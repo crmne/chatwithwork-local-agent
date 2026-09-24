@@ -5,15 +5,14 @@
 //!   user's SID and nobody else, and with remote clients rejected.
 //! - `first_pipe_instance` makes a second daemon (or a squatter that got
 //!   there first) fail loudly instead of sharing the name.
-//! - The daemon checks that each client process runs as the same user, and
-//!   the client checks the same of the server before sending anything. The
-//!   client also opens the pipe at identification level, so a server can
-//!   never impersonate it.
+//! - The daemon identifies each client by impersonating it for a moment
+//!   (identification level only) and refuses any other user. The client
+//!   checks that the pipe is owned by its own user before sending anything,
+//!   and opens it at identification level, so a server can never act as it.
 
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -25,7 +24,6 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
-use windows_sys::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 
 use crate::win;
 
@@ -40,8 +38,10 @@ unsafe impl Sync for SecurityDescriptor {}
 
 impl SecurityDescriptor {
     fn for_sid(sid: &str) -> Result<Self> {
-        // Protected DACL, generic-all for this SID only.
-        let sddl = win::wide(&format!("D:P(A;;GA;;;{sid})"));
+        // Owned by this SID (even from an elevated shell, where the owner
+        // would otherwise be Administrators), protected DACL, generic-all
+        // for this SID only.
+        let sddl = win::wide(&format!("O:{sid}D:P(A;;GA;;;{sid})"));
         let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
         let ok = unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -121,12 +121,7 @@ impl Listener {
         let fresh = create(&self.name, &self.sd, false)
             .with_context(|| format!("creating {}", self.name))?;
         let connected = std::mem::replace(&mut self.next, fresh);
-        let mut pid = 0u32;
-        let ok = unsafe { GetNamedPipeClientProcessId(connected.as_raw_handle() as _, &mut pid) };
-        if ok == 0 {
-            bail!("can't identify the control client");
-        }
-        match win::process_user_sid(pid) {
+        match win::pipe_client_sid(&connected) {
             Ok(sid) if sid == self.sid => Ok(connected),
             Ok(sid) => bail!("refused a connection from {sid}"),
             Err(e) => Err(e).context("checking the control client"),
@@ -155,13 +150,11 @@ pub fn connect(path: &Path) -> Result<Option<ClientStream>> {
             Err(e) => return Err(e).with_context(|| format!("connecting to {name}")),
         }
     };
-    let mut pid = 0u32;
-    let ok = unsafe { GetNamedPipeServerProcessId(file.as_raw_handle() as _, &mut pid) };
-    if ok == 0 {
-        bail!("can't identify the process behind {name}");
-    }
+    // Only the creator (or an administrator) can own the pipe, so its owner
+    // tells whose daemon this is.
     let own = win::current_user_sid()?;
-    let theirs = win::process_user_sid(pid).context("checking the daemon's user")?;
+    let theirs =
+        win::object_owner_sid(&file).with_context(|| format!("checking who owns {name}"))?;
     if theirs != own {
         bail!("{name} belongs to another user ({theirs}); refusing to talk to it");
     }

@@ -30,7 +30,7 @@ Clients shouldn't hard-code any of this. `cww status --json` doesn't print the e
 ## 2. Who may connect
 
 - **Linux and macOS:** the socket is mode `0600` inside a `0700` directory. The daemon also checks the peer's UID (`SO_PEERCRED` / `getpeereid`) and drops connections from any other user.
-- **Windows:** the pipe is created with a protected DACL that grants access to the current user's SID only (`D:P(A;;GA;;;<SID>)`), and remote clients are rejected. The daemon checks that the client process runs as the same user (`GetNamedPipeClientProcessId`). Clients SHOULD check the same of the server (`GetNamedPipeServerProcessId`) before sending anything, and SHOULD open the pipe with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` so the server can't impersonate them. The Rust client does both.
+- **Windows:** the pipe is created owned by the current user and with a protected DACL that grants access to that SID only (`O:<SID>D:P(A;;GA;;;<SID>)`), and remote clients are rejected. The daemon identifies each client by impersonating it at identification level (`ImpersonateNamedPipeClient`) and refuses other users. Clients SHOULD check that the pipe is owned by their own SID (`GetSecurityInfo`, `OWNER_SECURITY_INFORMATION`) before sending anything, and SHOULD open the pipe with `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` so the server can't impersonate them. The Rust client does both.
 - Only one daemon can listen at a time. A second one fails with "another cww daemon is already running".
 
 There is no authentication beyond this: any process running as the user can drive the daemon, just as it could edit `config.toml`.
