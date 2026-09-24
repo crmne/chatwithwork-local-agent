@@ -34,7 +34,7 @@ clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
-time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "local-offset"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util", "fs"] }
 tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
@@ -75,6 +75,10 @@ quick-xml = "0.41"
 
 # The user's Documents folder (XDG user dirs, known folders on Windows).
 dirs = "6"
+
+# Terminal UI (`cww tui`). crossterm works the same on Linux, macOS and Windows.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
+crossterm = "0.29"
 
 # Safe resolution (openat2, O_NOFOLLOW, F_GETPATH), peer credentials, umask.
 [target.'cfg(unix)'.dependencies]
