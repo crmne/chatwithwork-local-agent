@@ -7,6 +7,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -14,6 +15,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
+
+use crate::control::ControlEvent;
 
 const MAX_BYTES: u64 = 10 * 1024 * 1024;
 const KEEP_ROTATED: usize = 3;
@@ -77,6 +81,8 @@ pub fn now() -> String {
 pub struct AuditLog {
     path: PathBuf,
     file: Mutex<File>,
+    /// Live subscribers on the control channel (the TUI, `cww log -f`).
+    events: Option<broadcast::Sender<ControlEvent>>,
 }
 
 impl AuditLog {
@@ -87,12 +93,29 @@ impl AuditLog {
         Ok(Self {
             path: path.to_path_buf(),
             file: Mutex::new(open_append(path)?),
+            events: None,
         })
+    }
+
+    /// Also publish every entry to `events`.
+    pub fn with_events(mut self, events: broadcast::Sender<ControlEvent>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn append(&self, entry: &AuditEntry) {
         if let Err(e) = self.try_append(entry) {
             tracing::error!("can't write the audit log: {e:#}");
+        }
+        if let Some(events) = &self.events {
+            // No subscribers is fine.
+            let _ = events.send(ControlEvent::Audit {
+                entry: Box::new(entry.clone()),
+            });
         }
     }
 
@@ -110,12 +133,38 @@ impl AuditLog {
 }
 
 fn open_append(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
         .open(path)
         .with_context(|| format!("opening {}", path.display()))
+}
+
+/// The last `n` entries of the log at `path`, oldest first. Lines that
+/// don't parse are skipped.
+pub fn tail(path: &Path, n: usize) -> Result<Vec<AuditEntry>> {
+    const WINDOW: u64 = 2 * 1024 * 1024;
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
+    };
+    let len = file.metadata()?.len();
+    let start = len.saturating_sub(WINDOW);
+    file.seek(SeekFrom::Start(start))?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut file, &mut text)?;
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > 0 && !lines.is_empty() {
+        // The first line was probably cut in half.
+        lines.remove(0);
+    }
+    Ok(lines[lines.len().saturating_sub(n)..]
+        .iter()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect())
 }
 
 fn rotated(path: &Path, n: usize) -> PathBuf {
@@ -216,17 +265,17 @@ pub fn print_log(path: &Path, lines: usize, follow: bool, raw: bool) -> Result<(
         return Ok(());
     }
     let mut pos = file.seek(SeekFrom::End(0))?;
-    let mut inode = file.metadata()?.ino();
+    let mut inode = file_id(&file.metadata()?);
     let mut partial = String::new();
     loop {
         std::thread::sleep(Duration::from_millis(300));
         // Reopen after rotation or truncation.
         if let Ok(meta) = std::fs::metadata(path)
-            && (meta.ino() != inode || meta.len() < pos)
+            && (file_id(&meta) != inode || meta.len() < pos)
             && let Ok(f) = File::open(path)
         {
             file = f;
-            inode = meta.ino();
+            inode = file_id(&meta);
             pos = 0;
         }
         file.seek(SeekFrom::Start(pos))?;
@@ -250,10 +299,21 @@ pub fn print_log(path: &Path, lines: usize, follow: bool, raw: bool) -> Result<(
     }
 }
 
+/// Identifies the file behind a path, to notice rotation. Windows has no
+/// stable equivalent in std; there, rotation shows up as a shorter file.
+#[cfg(unix)]
+fn file_id(meta: &std::fs::Metadata) -> u64 {
+    meta.ino()
+}
+
+#[cfg(not(unix))]
+fn file_id(_meta: &std::fs::Metadata) -> u64 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn appends_private_json_lines() {
@@ -274,7 +334,15 @@ mod tests {
         let parsed: AuditEntry = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(parsed, entry);
         assert!(format_line(lines[0]).contains("DENIED read   docs:a.md"));
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let last = tail(&path, 1).unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].event, "connected");
+        assert_eq!(tail(&path, 10).unwrap().len(), 2);
     }
 }

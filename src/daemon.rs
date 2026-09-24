@@ -3,19 +3,22 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{AuditEntry, AuditLog};
 use crate::auth::load_credentials;
 use crate::config::Config;
-use crate::control::{self, ControlHandler, ControlRequest};
+use crate::control::{self, ControlEvent, ControlHandler, ControlRequest, PROTOCOL_VERSION};
 use crate::limits::Limiter;
 use crate::paths::Paths;
 use crate::reader::Reader;
-use crate::status::{Connection, SharedStatus};
+use crate::roots::{NewRoot, add_root, remove_root};
+use crate::status::{Changes, Connection, SharedStatus};
 use crate::tools::LocalFiles;
 use crate::tunnel::{Tunnel, TunnelExit, TunnelSettings};
 
@@ -31,21 +34,30 @@ struct Daemon {
     tunnel_token: Mutex<CancellationToken>,
     /// Wakes the supervisor after a reload.
     reloaded: Notify,
+    /// Events for control-channel subscribers.
+    events: broadcast::Sender<ControlEvent>,
+    /// Bumped whenever something in `status` changes.
+    changes: Changes,
+    /// Cancelled by a `shutdown` request.
+    shutdown: CancellationToken,
 }
 
 /// Run the daemon until `shutdown` is cancelled (or SIGINT/SIGTERM when
 /// `handle_signals` is set).
 pub async fn run(paths: Paths, shutdown: CancellationToken, handle_signals: bool) -> Result<()> {
+    #[cfg(unix)]
     rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
     paths.ensure()?;
     let config = Config::load(&paths)?;
-    let audit = Arc::new(AuditLog::open(&paths.audit_file())?);
+    let (events, _) = broadcast::channel(256);
+    let audit = Arc::new(AuditLog::open(&paths.audit_file())?.with_events(events.clone()));
     // Bind first: a second daemon must fail before it touches the index.
     let listener = control::bind(&paths.socket_path())?;
 
+    let changes = Changes::default();
     let reader = {
-        let (config, paths) = (config.clone(), paths.clone());
-        tokio::task::spawn_blocking(move || Reader::new(&config, &paths))
+        let (config, paths, changes) = (config.clone(), paths.clone(), changes.clone());
+        tokio::task::spawn_blocking(move || Reader::new(&config, &paths, changes))
             .await
             .context("starting the reader")??
     };
@@ -55,11 +67,15 @@ pub async fn run(paths: Paths, shutdown: CancellationToken, handle_signals: bool
         config: Mutex::new(config),
         reader: Arc::new(reader),
         audit,
-        status: SharedStatus::default(),
+        status: SharedStatus::new(changes.clone()),
         tunnel_token: Mutex::new(shutdown.child_token()),
         reloaded: Notify::new(),
+        events,
+        changes,
+        shutdown: shutdown.clone(),
         paths,
     });
+    tokio::spawn(Arc::clone(&daemon).publish_status(shutdown.clone()));
 
     if handle_signals {
         let shutdown = shutdown.clone();
@@ -81,11 +97,29 @@ pub async fn run(paths: Paths, shutdown: CancellationToken, handle_signals: bool
     daemon.supervise(&shutdown).await;
 
     daemon.audit.append(&AuditEntry::event("stopped"));
-    let _ = std::fs::remove_file(daemon.paths.socket_path());
     Ok(())
 }
 
 impl Daemon {
+    /// Push a fresh status to subscribers whenever something changes. Sleeps
+    /// until then; bursts of changes are coalesced.
+    async fn publish_status(self: Arc<Self>, shutdown: CancellationToken) {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = self.changes.wait() => {}
+            }
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_millis(150)) => {}
+            }
+            if self.events.receiver_count() > 0 {
+                let status = self.status_json().await;
+                let _ = self.events.send(ControlEvent::Status { status });
+            }
+        }
+    }
+
     /// Keep a tunnel running whenever the computer is paired.
     async fn supervise(self: &Arc<Self>, shutdown: &CancellationToken) {
         while !shutdown.is_cancelled() {
@@ -167,7 +201,79 @@ impl Daemon {
         }
         self.reloaded.notify_one();
         self.audit.append(&AuditEntry::event("reloaded"));
+        self.changes.bump();
         Ok(())
+    }
+
+    async fn add_root(&self, new: ControlRequest) -> Result<Value> {
+        let ControlRequest::RootsAdd {
+            path,
+            label,
+            follow_symlinks,
+            i_know,
+        } = new
+        else {
+            unreachable!("only called for roots_add");
+        };
+        let paths = self.paths.clone();
+        let root = tokio::task::spawn_blocking(move || {
+            let mut config = Config::load(&paths)?;
+            let root = add_root(
+                &mut config,
+                &paths,
+                NewRoot {
+                    path: &path,
+                    label,
+                    i_know,
+                    follow_symlinks,
+                },
+            )?;
+            config.save(&paths)?;
+            Ok::<_, anyhow::Error>(root)
+        })
+        .await??;
+        let mut entry = AuditEntry::event("root_added");
+        entry.detail = Some(format!("{} ({})", root.id, root.label));
+        self.audit.append(&entry);
+        self.reload().await?;
+        Ok(json!({ "root": root }))
+    }
+
+    async fn remove_root(&self, which: String) -> Result<Value> {
+        let paths = self.paths.clone();
+        let root = tokio::task::spawn_blocking(move || {
+            let mut config = Config::load(&paths)?;
+            let root = remove_root(&mut config, &which)?;
+            config.save(&paths)?;
+            Ok::<_, anyhow::Error>(root)
+        })
+        .await??;
+        let mut entry = AuditEntry::event("root_removed");
+        entry.detail = Some(format!("{} ({})", root.id, root.label));
+        self.audit.append(&entry);
+        self.reload().await?;
+        Ok(json!({ "root": root }))
+    }
+
+    async fn suggested_roots(&self) -> Value {
+        let config = self.config.lock().await.clone();
+        let suggestions: Vec<Value> = crate::paths::documents_dir()
+            .into_iter()
+            .map(|path| {
+                let real = path.canonicalize().ok();
+                let shared = config
+                    .roots
+                    .iter()
+                    .any(|r| Some(&r.path) == real.as_ref() || r.path == path);
+                json!({
+                    "path": path,
+                    "label": "Documents",
+                    "exists": path.is_dir(),
+                    "shared": shared,
+                })
+            })
+            .collect();
+        json!({ "suggestions": suggestions })
     }
 
     async fn set_paused(&self, paused: bool) -> Result<()> {
@@ -180,6 +286,7 @@ impl Daemon {
         } else {
             "resumed"
         }));
+        self.changes.bump();
         Ok(())
     }
 
@@ -199,9 +306,14 @@ impl Daemon {
             })
             .collect();
         json!({
+            "protocol": PROTOCOL_VERSION,
             "version": env!("CARGO_PKG_VERSION"),
+            "platform": std::env::consts::OS,
             "pid": std::process::id(),
             "connection": self.status.get(),
+            "paired": config.server.is_some(),
+            "config_file": self.paths.config_file(),
+            "audit_file": self.paths.audit_file(),
             "server": config.server.as_ref().map(|s| &s.url),
             "device_id": config.server.as_ref().map(|s| &s.device_id),
             "paused": self.paused.load(Ordering::SeqCst),
@@ -211,8 +323,22 @@ impl Daemon {
 }
 
 impl ControlHandler for Daemon {
+    fn events(&self) -> Option<broadcast::Receiver<ControlEvent>> {
+        Some(self.events.subscribe())
+    }
+
+    async fn initial_status(&self) -> Option<Value> {
+        Some(self.status_json().await)
+    }
+
     async fn handle(&self, request: ControlRequest) -> Result<Value> {
         match request {
+            ControlRequest::Hello => Ok(json!({
+                "protocol": PROTOCOL_VERSION,
+                "version": env!("CARGO_PKG_VERSION"),
+                "platform": std::env::consts::OS,
+                "pid": std::process::id(),
+            })),
             ControlRequest::Status => Ok(self.status_json().await),
             ControlRequest::Pause => {
                 self.set_paused(true).await?;
@@ -226,10 +352,58 @@ impl ControlHandler for Daemon {
                 self.reload().await?;
                 Ok(json!({}))
             }
+            ControlRequest::Shutdown => {
+                let mut entry = AuditEntry::event("shutdown_requested");
+                entry.detail = Some("over the control channel".into());
+                self.audit.append(&entry);
+                // Answer first, then stop.
+                let shutdown = self.shutdown.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    shutdown.cancel();
+                });
+                Ok(json!({ "stopping": true }))
+            }
+            request @ ControlRequest::RootsAdd { .. } => self.add_root(request).await,
+            ControlRequest::RootsRemove { root } => self.remove_root(root).await,
+            ControlRequest::AuditTail { lines } => {
+                let path = self.audit.path().to_path_buf();
+                let n = lines.unwrap_or(50).min(1000);
+                let entries =
+                    tokio::task::spawn_blocking(move || crate::audit::tail(&path, n)).await??;
+                Ok(json!({ "entries": entries }))
+            }
+            ControlRequest::SuggestedRoots => Ok(self.suggested_roots().await),
+            ControlRequest::Subscribe { .. } => {
+                anyhow::bail!("subscribe is handled by the control channel")
+            }
         }
     }
 }
 
+#[cfg(windows)]
+async fn wait_for_signal() {
+    use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_logoff, ctrl_shutdown};
+    let (Ok(mut c), Ok(mut brk), Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) = (
+        ctrl_c(),
+        ctrl_break(),
+        ctrl_close(),
+        ctrl_logoff(),
+        ctrl_shutdown(),
+    ) else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    tokio::select! {
+        _ = c.recv() => {}
+        _ = brk.recv() => {}
+        _ = close.recv() => {}
+        _ = logoff.recv() => {}
+        _ = shutdown.recv() => {}
+    }
+}
+
+#[cfg(unix)]
 async fn wait_for_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let (Ok(mut term), Ok(mut int)) = (

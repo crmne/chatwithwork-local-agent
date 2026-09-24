@@ -93,7 +93,13 @@ enum RootsCommand {
 #[derive(Subcommand)]
 enum DaemonCommand {
     /// Run in the foreground.
-    Run,
+    Run {
+        /// Write the daemon's own log to this file instead of stderr.
+        #[arg(long)]
+        log_file: Option<PathBuf>,
+    },
+    /// Ask the running daemon to stop.
+    Stop,
     /// Install and start the per-user service (systemd --user or LaunchAgent).
     Install {
         /// Leave out systemd sandboxing options.
@@ -128,7 +134,7 @@ fn run(cli: Cli) -> Result<()> {
                 "Start the daemon with `cww daemon install` (or `cww daemon run`).",
             );
             if Config::load(&paths)?.roots.is_empty() {
-                println!("Nothing is shared yet. Share a folder with `cww roots add <path>`.");
+                offer_documents(&paths)?;
             }
         }
         Command::Logout => {
@@ -151,16 +157,22 @@ fn run(cli: Cli) -> Result<()> {
             follow,
             lines,
             json,
-        } => audit::print_log(&paths.audit_file(), lines, follow, json)?,
+        } => log(&paths, lines, follow, json)?,
         Command::Daemon { command } => match command {
-            DaemonCommand::Run => {
-                init_logging();
+            DaemonCommand::Run { log_file } => {
+                init_logging(log_file.as_deref())?;
                 let runtime = tokio::runtime::Runtime::new()?;
                 runtime.block_on(daemon::run(
                     paths,
                     tokio_util::sync::CancellationToken::new(),
                     true,
                 ))?;
+            }
+            DaemonCommand::Stop => {
+                match control::request(&paths.socket_path(), ControlRequest::Shutdown)? {
+                    Some(_) => println!("The daemon is stopping."),
+                    None => println!("The daemon is not running."),
+                }
             }
             DaemonCommand::Install { no_hardening } => {
                 let file = service::install(&paths, &service::InstallOptions { no_hardening })?;
@@ -339,11 +351,93 @@ fn str(v: &Value) -> &str {
     v.as_str().unwrap_or("?")
 }
 
-fn init_logging() {
+/// Print the audit log. With `follow`, new entries come from the running
+/// daemon as they happen; without a daemon, the file is tailed instead.
+fn log(paths: &Paths, lines: usize, follow: bool, raw: bool) -> Result<()> {
+    audit::print_log(&paths.audit_file(), lines, false, raw)?;
+    if !follow {
+        return Ok(());
+    }
+    let Some(client) = control::Client::connect(&paths.socket_path())? else {
+        return audit::print_log(&paths.audit_file(), 0, true, raw);
+    };
+    for event in client.subscribe(&[control::Topic::Audit])? {
+        let event = event?;
+        if event["event"] != "audit" {
+            continue;
+        }
+        let line = serde_json::to_string(&event["entry"])?;
+        if raw {
+            println!("{line}");
+        } else {
+            println!("{}", audit::format_line(&line));
+        }
+    }
+    eprintln!("The daemon stopped.");
+    Ok(())
+}
+
+/// After pairing, offer to share the Documents folder. Nothing is shared
+/// without an explicit yes; without a terminal to ask on, nothing happens.
+fn offer_documents(paths: &Paths) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let hint = "Share a folder with `cww roots add <path>`.";
+    let Some(documents) = cww::paths::documents_dir().filter(|d| d.is_dir()) else {
+        println!("Nothing is shared yet. {hint}");
+        return Ok(());
+    };
+    if !std::io::stdin().is_terminal() {
+        println!("Nothing is shared yet. {hint}");
+        return Ok(());
+    }
+    println!();
+    println!("Nothing is shared yet. Chat with Work can search your Documents folder:");
+    println!("  {}", documents.display());
+    println!("Secrets inside it (keys, .env files, password databases) stay private either way.");
+    print!("Share it? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+        println!("Not shared. {hint}");
+        return Ok(());
+    }
+    roots(
+        paths,
+        RootsCommand::Add {
+            path: documents,
+            label: Some("Documents".into()),
+            i_know: false,
+            follow_symlinks: false,
+        },
+    )
+}
+
+fn init_logging(file: Option<&std::path::Path>) -> Result<()> {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_env("CWW_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
-        .init();
+        .with_target(false);
+    match file {
+        None => builder.init(),
+        Some(path) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            // Keep one previous log; the daemon logs little.
+            if std::fs::metadata(path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+                let _ = std::fs::rename(path, path.with_extension("log.1"));
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            builder
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+    }
+    Ok(())
 }
