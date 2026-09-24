@@ -15,12 +15,20 @@ fn main() {
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--log-file") => log_file = args.next().map(PathBuf::from),
+            // The Windows task passes CWW_HOME this way.
+            Some("--home") => {
+                if let Some(home) = args.next() {
+                    // SAFETY: single-threaded here, before anything reads the
+                    // environment.
+                    unsafe { std::env::set_var("CWW_HOME", home) };
+                }
+            }
             Some("--version") => {
                 println!("cww-agent {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             _ => {
-                eprintln!("usage: cww-agent [--log-file PATH]");
+                eprintln!("usage: cww-agent [--log-file PATH] [--home DIR]");
                 std::process::exit(2);
             }
         }

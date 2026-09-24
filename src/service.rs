@@ -107,6 +107,14 @@ pub fn uninstall(paths: &Paths, purge: bool) -> Result<Vec<PathBuf>> {
     Ok(removed)
 }
 
+/// `CWW_HOME`, when set, so the service uses the same directories as the
+/// command that installed it.
+fn custom_home() -> Option<PathBuf> {
+    std::env::var_os("CWW_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The launchd domain of the logged-in user, `gui/<uid>`.
 fn launchd_domain() -> String {
     #[cfg(unix)]
@@ -176,6 +184,9 @@ pub fn systemd_unit(exe: &Path, paths: &Paths, options: &InstallOptions) -> Stri
          RestartSec=5\n",
         exe = exe.display()
     );
+    if let Some(home) = custom_home() {
+        unit.push_str(&format!("Environment=\"CWW_HOME={}\"\n", home.display()));
+    }
     if !options.no_hardening {
         let writable: Vec<String> = [
             &paths.config_dir,
@@ -231,7 +242,7 @@ pub fn launch_agent(exe: &Path, paths: &Paths) -> String {
   <string>Background</string>
   <key>ThrottleInterval</key>
   <integer>10</integer>
-  <key>StandardOutPath</key>
+{environment}  <key>StandardOutPath</key>
   <string>{log}</string>
   <key>StandardErrorPath</key>
   <string>{log}</string>
@@ -240,6 +251,12 @@ pub fn launch_agent(exe: &Path, paths: &Paths) -> String {
 "#,
         exe = xml_escape(&exe.to_string_lossy()),
         log = xml_escape(&log.to_string_lossy()),
+        environment = custom_home()
+            .map(|home| format!(
+                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>CWW_HOME</key>\n    <string>{}</string>\n  </dict>\n",
+                xml_escape(&home.to_string_lossy())
+            ))
+            .unwrap_or_default(),
     )
 }
 
@@ -268,7 +285,7 @@ mod windows_task {
         // cww-agent.exe ships next to cww.exe and opens no console window.
         // A bare cww.exe (cargo install) still works, with a console window.
         let agent = exe.with_file_name("cww-agent.exe");
-        let (command, arguments) = if agent.exists() {
+        let (command, mut arguments) = if agent.exists() {
             (agent, format!("--log-file \"{}\"", log.display()))
         } else {
             (
@@ -276,6 +293,10 @@ mod windows_task {
                 format!("daemon run --log-file \"{}\"", log.display()),
             )
         };
+        // A task can't set environment variables, so pass CWW_HOME along.
+        if let Some(home) = custom_home() {
+            arguments.push_str(&format!(" --home \"{}\"", home.display()));
+        }
         let xml = task_xml(&command, &arguments, &current_user()?);
         let file = paths.state_dir.join("cww-task.xml");
         // schtasks reads task XML as UTF-16 with a byte order mark.
