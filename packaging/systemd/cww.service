@@ -1,0 +1,35 @@
+# systemd user unit for the Chat with Work Local Agent, installed by the
+# distribution packages to /usr/lib/systemd/user/cww.service.
+#
+#   systemctl --user enable --now cww.service
+#
+# The daemon only needs its own directories; everything else is read-only.
+[Unit]
+Description=Chat with Work Local Agent (cww)
+Documentation=https://github.com/crmne/chatwithwork-local-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs outside the sandbox so the directories exist before ReadWritePaths applies.
+ExecStartPre=+/usr/bin/mkdir -p -m 0700 %h/.config/cww %h/.local/share/cww %h/.local/state/cww
+ExecStart=/usr/bin/cww daemon run
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=cww
+RuntimeDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.config/cww %h/.local/share/cww %h/.local/state/cww
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=default.target

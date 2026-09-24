@@ -20,9 +20,7 @@ pub struct InstallOptions {
 }
 
 pub fn install(paths: &Paths, options: &InstallOptions) -> Result<PathBuf> {
-    let exe = std::env::current_exe()
-        .context("finding the cww binary")?
-        .canonicalize()?;
+    let exe = stable_exe()?;
     paths.ensure()?;
     if cfg!(target_os = "macos") {
         let plist = launch_agent_path()?;
@@ -37,6 +35,21 @@ pub fn install(paths: &Paths, options: &InstallOptions) -> Result<PathBuf> {
         )?;
         Ok(plist)
     } else if cfg!(target_os = "linux") {
+        // A distribution package ships the unit already; enable that one
+        // instead of shadowing it, unless the paths were customized.
+        let packaged = Path::new(PACKAGED_UNIT);
+        if exe == Path::new("/usr/bin/cww")
+            && packaged.exists()
+            && Paths::from_env().ok().as_ref() == Some(paths)
+            && std::env::var_os("CWW_HOME").is_none()
+            && !options.no_hardening
+        {
+            let _ = std::fs::remove_file(systemd_unit_path()?);
+            run("systemctl", &["--user", "daemon-reload"])?;
+            run("systemctl", &["--user", "enable", "--now", "cww.service"])?;
+            run("systemctl", &["--user", "restart", "cww.service"])?;
+            return Ok(packaged.to_path_buf());
+        }
         let unit = systemd_unit_path()?;
         write_file(&unit, &systemd_unit(&exe, paths, options))?;
         run("systemctl", &["--user", "daemon-reload"])?;
@@ -85,6 +98,37 @@ pub fn uninstall(paths: &Paths, purge: bool) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(removed)
+}
+
+/// Where distribution packages install the systemd user unit.
+pub const PACKAGED_UNIT: &str = "/usr/lib/systemd/user/cww.service";
+
+/// The path to register in the service. Package managers keep a stable
+/// symlink (`/opt/homebrew/bin/cww`) pointing into a versioned directory
+/// that disappears on upgrade, so prefer a well-known path that resolves to
+/// this same binary.
+fn stable_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("finding the cww binary")?;
+    let real = exe.canonicalize()?;
+    let mut candidates: Vec<PathBuf> = [
+        "/opt/homebrew/bin/cww",
+        "/usr/local/bin/cww",
+        "/home/linuxbrew/.linuxbrew/bin/cww",
+        "/usr/bin/cww",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        candidates.push(PathBuf::from(cargo_home).join("bin/cww"));
+    }
+    if let Ok(home) = home_dir() {
+        candidates.push(home.join(".cargo/bin/cww"));
+    }
+    Ok(candidates
+        .into_iter()
+        .find(|c| c.canonicalize().ok().as_ref() == Some(&real))
+        .unwrap_or(real))
 }
 
 fn systemd_unit_path() -> Result<PathBuf> {

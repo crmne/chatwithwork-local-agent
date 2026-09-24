@@ -25,6 +25,9 @@ targets = [
 ]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
+# Ship the service definitions in every archive. Homebrew puts them in
+# $(brew --prefix)/share/cww; `cww daemon install` registers the service.
+include = ["packaging/systemd/cww.service", "packaging/launchd/com.chatwithwork.cww.plist"]
 # Whether to install an updater program (never: updates come from the package manager)
 install-updater = false
 # Sign release artifacts with GitHub artifact attestations

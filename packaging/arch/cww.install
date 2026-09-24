@@ -1,0 +1,10 @@
+post_install() {
+  echo ">>> Chat with Work Local Agent installed."
+  echo ">>> Pair this computer:      cww login"
+  echo ">>> Share a folder:          cww roots add ~/Documents/Work"
+  echo ">>> Start the daemon:        systemctl --user enable --now cww"
+}
+
+post_upgrade() {
+  echo ">>> Restart the daemon to use the new version: systemctl --user restart cww"
+}
