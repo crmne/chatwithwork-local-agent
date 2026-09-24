@@ -160,8 +160,12 @@ pub fn remove_root(config: &mut Config, which: &str) -> Result<Root> {
 /// Why a path is too broad to share by default, if it is.
 #[cfg(windows)]
 fn too_broad(path: &Path) -> Result<Option<String>> {
+    // Reference folders can come as 8.3 short names (`C:\Users\RUNNER~1`),
+    // so compare canonical forms.
     let lower = |p: &Path| -> Vec<String> {
-        p.components()
+        canonical(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .components()
             .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
             .collect()
     };
