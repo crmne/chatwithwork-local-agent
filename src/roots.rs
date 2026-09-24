@@ -1,0 +1,260 @@
+//! Adding and removing shared roots.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+
+use crate::config::{Config, Root};
+use crate::paths::{Paths, home_dir};
+use crate::policy::DenyList;
+use crate::reader::safe_fs::is_valid_root_id;
+
+/// System directories that can't be shared without `--i-know`.
+const SYSTEM_DIRS: &[&str] = &[
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/srv",
+    "/sys",
+    "/tmp",
+    "/usr",
+    "/var",
+    "/nix",
+    "/snap",
+    "/Applications",
+    "/Library",
+    "/System",
+    "/Volumes",
+    "/cores",
+    "/private",
+    "/Users",
+    "/home",
+];
+
+pub struct NewRoot<'a> {
+    pub path: &'a Path,
+    pub label: Option<String>,
+    pub i_know: bool,
+    pub follow_symlinks: bool,
+}
+
+/// Validate and add a root to `config`. Returns the new root.
+pub fn add_root(config: &mut Config, paths: &Paths, new: NewRoot<'_>) -> Result<Root> {
+    let path = new
+        .path
+        .canonicalize()
+        .with_context(|| format!("{} does not exist", new.path.display()))?;
+    if !path.is_dir() {
+        bail!("{} is not a directory", path.display());
+    }
+    if let Some(reason) = too_broad(&path)?
+        && !new.i_know
+    {
+        bail!(
+            "refusing to share {}: {reason}. Share a narrower folder, or pass --i-know if you \
+             really mean it",
+            path.display()
+        );
+    }
+    let deny = DenyList::from_config(&config.deny, paths)?;
+    if let Some(pattern) = deny.denied_by(&path) {
+        bail!(
+            "{} matches the deny list ({pattern}); edit [deny] in {} to change that",
+            path.display(),
+            paths.config_file().display()
+        );
+    }
+    for dir in paths.all_dirs() {
+        if dir.starts_with(&path) && dir.exists() {
+            eprintln!(
+                "note: {} is inside this root; cww always hides its own files",
+                dir.display()
+            );
+        }
+    }
+    if let Some(existing) = config.roots.iter().find(|r| r.path == path) {
+        bail!("{} is already shared as {}", path.display(), existing.id);
+    }
+    let label = new
+        .label
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| {
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+        });
+    if label.chars().count() > 80 {
+        bail!("the label is longer than 80 characters");
+    }
+    let root = Root {
+        id: new_id(config, &label),
+        label,
+        path,
+        follow_symlinks: new.follow_symlinks,
+    };
+    config.roots.push(root.clone());
+    Ok(root)
+}
+
+/// Remove a root by ID, label or path.
+pub fn remove_root(config: &mut Config, which: &str) -> Result<Root> {
+    let as_path = PathBuf::from(which).canonicalize().ok();
+    let index = config
+        .roots
+        .iter()
+        .position(|r| r.id == which || as_path.as_ref() == Some(&r.path))
+        .or_else(|| {
+            let matches: Vec<usize> = config
+                .roots
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.label == which)
+                .map(|(i, _)| i)
+                .collect();
+            (matches.len() == 1).then(|| matches[0])
+        })
+        .with_context(|| format!("no shared folder matches {which:?}; see `cww roots list`"))?;
+    Ok(config.roots.remove(index))
+}
+
+/// Why a path is too broad to share by default, if it is.
+fn too_broad(path: &Path) -> Result<Option<String>> {
+    if path == Path::new("/") {
+        return Ok(Some("it is the whole filesystem".into()));
+    }
+    let home = home_dir()?;
+    let home = home.canonicalize().unwrap_or(home);
+    if path == home {
+        return Ok(Some("it is your whole home folder".into()));
+    }
+    if home.starts_with(path) {
+        return Ok(Some("it contains your home folder".into()));
+    }
+    for dir in SYSTEM_DIRS {
+        let dir = Path::new(dir);
+        if path == dir || (path.starts_with(dir) && !path.starts_with(&home)) {
+            return Ok(Some(format!(
+                "it is a system directory ({})",
+                dir.display()
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// A short readable ID derived from the label, made unique.
+fn new_id(config: &Config, label: &str) -> String {
+    let mut base: String = label
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    base.truncate(24);
+    let base = base.trim_matches('-').to_string();
+    let base = if is_valid_root_id(&base) {
+        base
+    } else {
+        "root".to_string()
+    };
+    if !config.roots.iter().any(|r| r.id == base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|id| !config.roots.iter().any(|r| &r.id == id))
+        .expect("an unused ID exists")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_are_readable_and_unique() {
+        let mut config = Config::default();
+        assert_eq!(new_id(&config, "Work Docs!"), "work-docs");
+        config.roots.push(Root {
+            id: "work-docs".into(),
+            label: "x".into(),
+            path: "/x".into(),
+            follow_symlinks: false,
+        });
+        assert_eq!(new_id(&config, "Work docs"), "work-docs-2");
+        assert_eq!(new_id(&config, "文档"), "root");
+        assert_eq!(new_id(&config, "A"), "root");
+    }
+
+    #[test]
+    fn refuses_broad_roots() {
+        assert!(too_broad(Path::new("/")).unwrap().is_some());
+        assert!(too_broad(Path::new("/etc")).unwrap().is_some());
+        assert!(too_broad(Path::new("/usr/share")).unwrap().is_some());
+        let home = home_dir().unwrap().canonicalize().unwrap();
+        assert!(too_broad(&home).unwrap().is_some());
+        assert!(too_broad(&home.join("Documents")).unwrap().is_none());
+    }
+
+    #[test]
+    fn adds_and_removes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(&tmp.path().join("cww"));
+        let dir = tmp.path().join("Shared Docs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        let new = |i_know| NewRoot {
+            path: &dir,
+            label: None,
+            i_know,
+            follow_symlinks: false,
+        };
+        // Temporary directories count as system directories.
+        assert!(add_root(&mut config, &paths, new(false)).is_err());
+        let root = add_root(&mut config, &paths, new(true)).unwrap();
+        assert_eq!(root.id, "shared-docs");
+        assert_eq!(root.label, "Shared Docs");
+        assert!(
+            add_root(&mut config, &paths, new(true)).is_err(),
+            "duplicate"
+        );
+        assert_eq!(
+            remove_root(&mut config, "Shared Docs").unwrap().id,
+            "shared-docs"
+        );
+        assert!(config.roots.is_empty());
+    }
+
+    #[test]
+    fn refuses_denied_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(&tmp.path().join("cww"));
+        let dir = tmp.path().join(".ssh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        let err = add_root(
+            &mut config,
+            &paths,
+            NewRoot {
+                path: &dir,
+                label: None,
+                i_know: true,
+                follow_symlinks: false,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("deny list"), "{err}");
+    }
+}

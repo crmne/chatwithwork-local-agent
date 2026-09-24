@@ -1,0 +1,78 @@
+[package]
+name = "cww"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Chat with Work local files agent: a read-only MCP server that shares chosen folders with Chat with Work"
+license = "MIT OR Apache-2.0"
+authors = ["Carmine Paolino <carmine@paolino.me>"]
+repository = "https://github.com/crmne/chatwithwork-agent"
+homepage = "https://chatwithwork.com"
+readme = "README.md"
+keywords = ["mcp", "search", "files", "agent"]
+categories = ["command-line-utilities", "filesystem"]
+publish = false
+
+[lib]
+name = "cww"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cww"
+path = "src/main.rs"
+
+[dependencies]
+# Runtime, CLI, serialization
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util", "fs"] }
+tokio-util = "0.7"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+
+# MCP server core (official SDK). Only the server role; we bring our own transport.
+rmcp = { version = "3.4.1", default-features = false, features = ["server"] }
+
+# Network: WebSocket tunnel and the pairing/token HTTP calls, rustls + ring + webpki roots only.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
+url = "2.5"
+
+# Crypto: Ed25519 device key, SHA-256 and randomness come from ring (already used by rustls).
+ring = "0.17"
+base64 = "0.22"
+
+# Secrets: OS keychain (macOS Keychain, Secret Service), with a 0600 file fallback.
+keyring = "4.2"
+
+# Files: safe resolution (openat2, O_NOFOLLOW, F_GETPATH), walking, grep, index, watching.
+rustix = { version = "1.1", features = ["fs", "process", "system", "alloc"] }
+ignore = "0.4.33"
+globset = "0.4.20"
+grep-searcher = "0.1.17"
+grep-regex = "0.1.14"
+grep-matcher = "0.1.9"
+tantivy = { version = "0.26.2", default-features = false, features = ["mmap", "lz4-compression"] }
+notify = "8.2"
+
+# Extraction: pdf, xlsx, docx/pptx (zip + xml). Only pure-Rust codecs.
+lopdf = { version = "0.45", default-features = false }
+calamine = "0.36"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
