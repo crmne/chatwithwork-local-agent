@@ -1,8 +1,21 @@
+print_cww_post_install() {
+  cat <<'EOF2'
+Chat with Work Local Agent setup, as your own user:
+
+  cww                                   # the terminal UI: pair, share folders, watch activity
+
+or, step by step:
+
+  cww login                             # pair this computer
+  cww roots add ~/Documents             # share a folder
+  systemctl --user enable --now cww     # run the daemon in the background
+
+Docs: https://github.com/crmne/chatwithwork-local-agent
+EOF2
+}
+
 post_install() {
-  echo ">>> Chat with Work Local Agent installed."
-  echo ">>> Pair this computer:      cww login"
-  echo ">>> Share a folder:          cww roots add ~/Documents/Work"
-  echo ">>> Start the daemon:        systemctl --user enable --now cww"
+  print_cww_post_install
 }
 
 post_upgrade() {
