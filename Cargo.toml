@@ -53,8 +53,7 @@ base64 = "0.22"
 # Secrets: OS keychain (macOS Keychain, Secret Service), with a 0600 file fallback.
 keyring = "4.2"
 
-# Files: safe resolution (openat2, O_NOFOLLOW, F_GETPATH), walking, grep, index, watching.
-rustix = { version = "1.1", features = ["fs", "process", "system", "alloc"] }
+# Files: walking, grep, index, watching. Safe resolution is per platform below.
 ignore = "0.4.33"
 globset = "0.4.20"
 grep-searcher = "0.1.17"
@@ -68,6 +67,25 @@ lopdf = { version = "0.45", default-features = false }
 calamine = "0.36"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 quick-xml = "0.41"
+
+# The user's Documents folder (XDG user dirs, known folders on Windows).
+dirs = "6"
+
+# Safe resolution (openat2, O_NOFOLLOW, F_GETPATH), peer credentials, umask.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process", "system", "alloc"] }
+
+# Handle-based resolution, the named pipe's DACL and peer checks.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [package.metadata.dist]
 # Released as binaries through dist, not published to crates.io.

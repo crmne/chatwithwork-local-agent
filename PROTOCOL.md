@@ -90,7 +90,7 @@ client_id=cww
 &scope=local_agent:serve
 &public_key=<base64url Ed25519 public key>
 &name=<device name, defaults to the hostname>
-&platform=<linux | macos>
+&platform=<linux | macos | windows>
 &client_version=<cww version, e.g. 0.1.0>
 ```
 

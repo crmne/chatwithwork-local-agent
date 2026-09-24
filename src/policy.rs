@@ -52,6 +52,12 @@ pub const DEFAULT_DENY: &[&str] = &[
     "*.keychain",
     "*.keychain-db",
     "AppData/Roaming/Microsoft/Credentials",
+    "AppData/Local/Microsoft/Credentials",
+    "AppData/Roaming/Microsoft/Protect",
+    "AppData/Roaming/Microsoft/Crypto",
+    "AppData/Roaming/Microsoft/SystemCertificates",
+    "AppData/Local/Microsoft/Vault",
+    "NTUSER.DAT*",
     // Mail and messages
     "Library/Mail",
     "Library/Messages",
@@ -67,6 +73,12 @@ pub const DEFAULT_DENY: &[&str] = &[
     "Library/Application Support/BraveSoftware",
     "Library/Application Support/Microsoft Edge",
     "Library/Safari",
+    "AppData/Local/Google/Chrome/User Data",
+    "AppData/Local/Chromium/User Data",
+    "AppData/Local/BraveSoftware",
+    "AppData/Local/Microsoft/Edge/User Data",
+    "AppData/Roaming/Mozilla/Firefox",
+    "AppData/Roaming/Opera Software",
     "Library/Cookies",
     // System secrets
     "/etc/shadow",
@@ -91,10 +103,21 @@ impl DenyList {
     /// The built-in list plus the config's changes, plus cww's own
     /// directories (config, index, logs, socket), which are always denied.
     pub fn from_config(config: &DenyConfig, paths: &Paths) -> Result<Self> {
+        // Anchored patterns built from components, so they work with any
+        // separator, and escaped, so a `[` in a home folder name is literal.
         let own_dirs: Vec<String> = paths
             .all_dirs()
             .iter()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| {
+                let parts: Vec<String> = p
+                    .components()
+                    .filter_map(|c| match c {
+                        Component::Normal(s) => Some(globset::escape(&s.to_string_lossy())),
+                        _ => None,
+                    })
+                    .collect();
+                format!("/{}", parts.join("/"))
+            })
             .collect();
         let kept = |p: &&&str| {
             !config

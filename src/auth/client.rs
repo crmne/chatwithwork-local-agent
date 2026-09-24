@@ -98,16 +98,24 @@ pub struct DeviceInfo {
 
 impl DeviceInfo {
     pub fn current(name: Option<String>) -> Self {
-        let host = rustix::system::uname()
-            .nodename()
-            .to_string_lossy()
-            .into_owned();
         Self {
-            name: name.unwrap_or(host),
+            name: name.unwrap_or_else(hostname),
             platform: std::env::consts::OS.to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
+}
+
+/// This computer's name, without the `.local` that macOS adds.
+fn hostname() -> String {
+    #[cfg(unix)]
+    let host = rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(windows)]
+    let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into());
+    host.strip_suffix(".local").unwrap_or(&host).to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

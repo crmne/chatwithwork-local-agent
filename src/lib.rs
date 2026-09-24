@@ -19,3 +19,5 @@ pub mod service;
 pub mod status;
 pub mod tools;
 pub mod tunnel;
+#[cfg(windows)]
+pub mod win;

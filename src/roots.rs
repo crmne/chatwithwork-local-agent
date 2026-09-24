@@ -11,6 +11,7 @@ use crate::reader::safe_fs::is_valid_root_id;
 
 /// System directories that can't be shared, nor anything inside them,
 /// without `--i-know`.
+#[cfg(not(windows))]
 const SYSTEM_DIRS: &[&str] = &[
     "/bin",
     "/boot",
@@ -45,6 +46,7 @@ const SYSTEM_DIRS: &[&str] = &[
 /// fine: `/tmp/project` is as narrow as `~/project`. These take precedence
 /// over `SYSTEM_DIRS`, so `/var/tmp/x` and macOS's `/private/tmp/x` (what
 /// `/tmp/x` canonicalizes to) are allowed too.
+#[cfg(not(windows))]
 const SCRATCH_DIRS: &[&str] = &[
     "/tmp",
     "/var/tmp",
@@ -65,10 +67,7 @@ pub struct NewRoot<'a> {
 
 /// Validate and add a root to `config`. Returns the new root.
 pub fn add_root(config: &mut Config, paths: &Paths, new: NewRoot<'_>) -> Result<Root> {
-    let path = new
-        .path
-        .canonicalize()
-        .with_context(|| format!("{} does not exist", new.path.display()))?;
+    let path = canonical(new.path)?;
     if !path.is_dir() {
         bail!("{} is not a directory", path.display());
     }
@@ -121,9 +120,25 @@ pub fn add_root(config: &mut Config, paths: &Paths, new: NewRoot<'_>) -> Result<
     Ok(root)
 }
 
+/// The canonical form of a folder the user named. On Windows, the `\\?\`
+/// prefix that `canonicalize` adds to ordinary drive paths is dropped, so
+/// the config stays readable and comparable.
+pub fn canonical(path: &Path) -> Result<PathBuf> {
+    let real = path
+        .canonicalize()
+        .with_context(|| format!("{} does not exist", path.display()))?;
+    #[cfg(windows)]
+    if let Some(rest) = real.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
+        return Ok(PathBuf::from(rest));
+    }
+    Ok(real)
+}
+
 /// Remove a root by ID, label or path.
 pub fn remove_root(config: &mut Config, which: &str) -> Result<Root> {
-    let as_path = PathBuf::from(which).canonicalize().ok();
+    let as_path = canonical(Path::new(which)).ok();
     let index = config
         .roots
         .iter()
@@ -143,6 +158,62 @@ pub fn remove_root(config: &mut Config, which: &str) -> Result<Root> {
 }
 
 /// Why a path is too broad to share by default, if it is.
+#[cfg(windows)]
+fn too_broad(path: &Path) -> Result<Option<String>> {
+    let lower = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let target = lower(path);
+    if path.parent().is_none() || target.len() <= 2 {
+        return Ok(Some("it is a whole drive".into()));
+    }
+    let home = home_dir()?;
+    let home_parts = lower(&home);
+    if target == home_parts {
+        return Ok(Some("it is your whole home folder".into()));
+    }
+    if home_parts.starts_with(&target) {
+        return Ok(Some("it contains your home folder".into()));
+    }
+    // Like /tmp on Unix: the temporary folder itself is refused, a folder
+    // inside it is fine.
+    let temp = lower(&std::env::temp_dir());
+    if target == temp {
+        return Ok(Some(
+            "it is the temporary folder; share a folder inside it".into(),
+        ));
+    }
+    if target.starts_with(&temp) {
+        return Ok(None);
+    }
+    let mut system: Vec<PathBuf> = [
+        "SystemRoot",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+    ]
+    .iter()
+    .filter_map(std::env::var_os)
+    .map(PathBuf::from)
+    .collect();
+    // Application data holds tokens, cookies and keys for every program.
+    system.push(home.join("AppData"));
+    for dir in system {
+        let parts = lower(&dir);
+        if target.starts_with(&parts) {
+            return Ok(Some(format!(
+                "it is a system or application directory ({})",
+                dir.display()
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Why a path is too broad to share by default, if it is.
+#[cfg(not(windows))]
 fn too_broad(path: &Path) -> Result<Option<String>> {
     if path == Path::new("/") {
         return Ok(Some("it is the whole filesystem".into()));
@@ -223,6 +294,37 @@ mod tests {
         assert_eq!(new_id(&config, "A"), "root");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn refuses_broad_windows_roots() {
+        assert!(too_broad(Path::new(r"C:\")).unwrap().is_some());
+        assert!(
+            too_broad(Path::new(r"C:\Windows\System32"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            too_broad(Path::new(r"c:\program files\app"))
+                .unwrap()
+                .is_some()
+        );
+        let home = home_dir().unwrap();
+        assert!(too_broad(&home).unwrap().is_some());
+        assert!(
+            too_broad(&home.join("AppData/Roaming/x"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(too_broad(&home.join("Documents")).unwrap().is_none());
+        assert!(too_broad(&std::env::temp_dir()).unwrap().is_some());
+        assert!(
+            too_broad(&std::env::temp_dir().join("x"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn refuses_broad_roots() {
         assert!(too_broad(Path::new("/")).unwrap().is_some());
@@ -233,6 +335,7 @@ mod tests {
         assert!(too_broad(&home.join("Documents")).unwrap().is_none());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn scratch_dirs_allow_subfolders_only() {
         for refused in ["/tmp", "/var/tmp", "/private/tmp", "/mnt", "/Volumes"] {

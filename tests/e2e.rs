@@ -414,8 +414,8 @@ fn fixture() -> Fixture {
     std::fs::write(root.join(".env"), "API_TOKEN=supersecret-env\n").unwrap();
     std::fs::write(root.join("keys/id_rsa"), "supersecret-key Falcon\n").unwrap();
     std::fs::write(outside.join("secret.txt"), "supersecret-outside Falcon\n").unwrap();
-    std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("escape.txt")).unwrap();
-    std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+    link_file(&outside.join("secret.txt"), &root.join("escape.txt"));
+    link_dir(&outside, &root.join("linked"));
     std::fs::hard_link(outside.join("secret.txt"), root.join("hardlink.txt")).unwrap();
     let paths = Paths::under(&base.join("cww"));
     Fixture {
@@ -817,6 +817,7 @@ async fn pairs_with_the_device_flow() {
     assert_mode(&fx.paths.config_file(), 0o600);
 }
 
+#[cfg(unix)]
 fn assert_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
@@ -825,4 +826,42 @@ fn assert_mode(path: &Path, mode: u32) {
         "{}",
         path.display()
     );
+}
+
+/// Windows has no modes; the profile folder's ACL keeps files private.
+#[cfg(windows)]
+fn assert_mode(path: &Path, _mode: u32) {
+    assert!(path.exists(), "{}", path.display());
+}
+
+#[cfg(unix)]
+fn link_file(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+/// A file symlink needs Developer Mode on Windows. Without it, a junction to
+/// the folder around the target makes the same escape attempt.
+#[cfg(windows)]
+fn link_file(target: &Path, link: &Path) {
+    if std::os::windows::fs::symlink_file(target, link).is_err() {
+        link_dir(target.parent().unwrap(), link);
+    }
+}
+
+/// Junctions need no privileges.
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) {
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap()
+        .status;
+    assert!(status.success(), "mklink /J failed");
 }
