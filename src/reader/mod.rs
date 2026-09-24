@@ -26,6 +26,7 @@ use crate::config::{Config, Limits};
 use crate::error::{ErrorCode, ToolError};
 use crate::paths::Paths;
 use crate::policy::DenyList;
+use crate::status::Changes;
 use indexer::{IndexState, Indexer, IndexerSettings};
 use safe_fs::{EntryKind, OpenPolicy, RootHandle, ToolPath};
 
@@ -142,11 +143,15 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn new(config: &Config, paths: &Paths) -> Result<Self> {
+    pub fn new(config: &Config, paths: &Paths, changes: Changes) -> Result<Self> {
         let state = build_state(config, paths)?;
         let (index, indexer) = if config.index.enabled {
             let index = Arc::new(index::SearchIndex::open(&paths.index_dir())?);
-            let indexer = Indexer::start(Arc::clone(&index), indexer_settings(&state, config));
+            let indexer = Indexer::start(
+                Arc::clone(&index),
+                indexer_settings(&state, config),
+                changes,
+            );
             (Some(index), Some(indexer))
         } else {
             (None, None)

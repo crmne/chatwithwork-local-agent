@@ -13,13 +13,13 @@ use anyhow::{Context, Result};
 use tantivy::collector::{Count, DocSetCollector, TopDocs};
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::{
-    Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TEXT, TantivyDocument, Value,
+    FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TEXT, TantivyDocument, Value,
 };
 use tantivy::snippet::SnippetGenerator;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
 
 /// Bump when the schema changes; an index with another version is rebuilt.
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 /// Characters of extracted text stored per file.
 pub const MAX_BODY_CHARS: usize = 2_000_000;
 const WRITER_MEMORY: usize = 32 * 1024 * 1024;
@@ -62,12 +62,14 @@ pub struct SearchQuery<'a> {
 fn schema() -> (Schema, Fields) {
     let mut b = Schema::builder();
     let fields = Fields {
-        path: b.add_text_field("path", STRING | STORED),
+        // Fast fields let a scan compare mtimes and sizes without loading
+        // any stored document.
+        path: b.add_text_field("path", STRING | STORED | FAST),
         root: b.add_text_field("root", STRING),
         title: b.add_text_field("title", TEXT | STORED),
         body: b.add_text_field("body", TEXT | STORED),
-        mtime: b.add_i64_field("mtime", INDEXED | STORED),
-        size: b.add_u64_field("size", STORED),
+        mtime: b.add_i64_field("mtime", INDEXED | STORED | FAST),
+        size: b.add_u64_field("size", STORED | FAST),
     };
     (b.build(), fields)
 }
@@ -102,6 +104,7 @@ impl SearchIndex {
     }
 
     /// `relative path -> (mtime, size)` for every indexed file of a root.
+    /// Reads fast fields only, so it stays cheap on large roots.
     pub fn indexed_files(&self, root_id: &str) -> Result<HashMap<String, (i64, u64)>> {
         let searcher = self.reader.searcher();
         let query = TermQuery::new(
@@ -110,24 +113,37 @@ impl SearchIndex {
         );
         let docs = searcher.search(&query, &DocSetCollector)?;
         let prefix = format!("{root_id}:");
+        let mut by_segment: HashMap<u32, Vec<u32>> = HashMap::new();
+        for address in &docs {
+            by_segment
+                .entry(address.segment_ord)
+                .or_default()
+                .push(address.doc_id);
+        }
         let mut out = HashMap::with_capacity(docs.len());
-        for address in docs {
-            let doc: TantivyDocument = searcher.doc(address)?;
-            let Some(path) = doc.get_first(self.fields.path).and_then(|v| v.as_str()) else {
+        let mut path = String::new();
+        for (segment, doc_ids) in by_segment {
+            let fast = searcher.segment_reader(segment).fast_fields();
+            let Some(paths) = fast.str("path")? else {
                 continue;
             };
-            let Some(rel) = path.strip_prefix(&prefix) else {
-                continue;
-            };
-            let mtime = doc
-                .get_first(self.fields.mtime)
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let size = doc
-                .get_first(self.fields.size)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            out.insert(rel.to_string(), (mtime, size));
+            let mtimes = fast.i64("mtime")?;
+            let sizes = fast.u64("size")?;
+            for doc in doc_ids {
+                let Some(ord) = paths.term_ords(doc).next() else {
+                    continue;
+                };
+                path.clear();
+                if !paths.ord_to_str(ord, &mut path)? {
+                    continue;
+                }
+                let Some(rel) = path.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let mtime = mtimes.first(doc).unwrap_or(0);
+                let size = sizes.first(doc).unwrap_or(0);
+                out.insert(rel.to_string(), (mtime, size));
+            }
         }
         Ok(out)
     }
@@ -201,6 +217,15 @@ impl SearchIndex {
 
     pub fn doc_count(&self) -> u64 {
         self.reader.searcher().num_docs()
+    }
+
+    /// Indexed files of one root.
+    pub fn root_count(&self, root_id: &str) -> u64 {
+        let query = TermQuery::new(
+            Term::from_field_text(self.fields.root, root_id),
+            IndexRecordOption::Basic,
+        );
+        self.reader.searcher().search(&query, &Count).unwrap_or(0) as u64
     }
 
     pub fn search(&self, q: &SearchQuery<'_>) -> Result<Vec<IndexHit>> {
