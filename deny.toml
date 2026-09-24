@@ -37,6 +37,12 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# option-ext (through dirs, for the Documents folder) is MPL-2.0: file-level
+# copyleft, fine to link into an MIT/Apache binary. Allowed for it alone.
+[[licenses.exceptions]]
+crate = "option-ext"
+allow = ["MPL-2.0"]
+
 [[licenses.clarify]]
 # ring's license file combines ISC, MIT and OpenSSL-derived terms.
 crate = "ring"
