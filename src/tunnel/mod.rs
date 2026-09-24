@@ -227,7 +227,9 @@ impl Tunnel {
         let config = WebSocketConfig::default()
             .max_message_size(Some(frame_cap))
             .max_frame_size(Some(frame_cap));
-        let connector = server.is_secure().then(|| Connector::Rustls(tls_config()));
+        let connector = server
+            .is_secure()
+            .then(|| Connector::Rustls(crate::tls::client_config()));
         let connect = tokio_tungstenite::connect_async_tls_with_config(
             request,
             Some(config),
@@ -286,18 +288,6 @@ fn describe_end(end: &SessionEnd) -> String {
         SessionEnd::Shutdown => "shut down".into(),
         SessionEnd::Error(e) => e.clone(),
     }
-}
-
-pub fn tls_config() -> Arc<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("ring supports the default TLS versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Arc::new(config)
 }
 
 /// Full-jitter exponential backoff: a random delay in [0, min(max, base·2^n)].

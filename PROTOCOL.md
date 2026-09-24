@@ -45,7 +45,7 @@ The user gives the server as an origin, for example `https://chatwithwork.com` (
 - `https://` is required. Plain `http://` is accepted only when the host is `localhost` or a loopback IP, for development.
 - HTTP endpoints are `<origin>/local_agent/device_authorizations` and `<origin>/local_agent/token`.
 - The WebSocket URL is `wss://<host[:port]>/local_agent` (`ws://` for the loopback exception).
-- TLS uses rustls with the Mozilla (webpki) root store. The daemon never follows redirects: a 3xx from any endpoint is an error.
+- TLS uses rustls. The daemon trusts the operating system's certificate store (macOS keychains, the Windows certificate store, the distribution's CA bundle on Linux, or `SSL_CERT_FILE`/`SSL_CERT_DIR` when set) plus Mozilla's root certificates, so servers behind private CAs work. The daemon never follows redirects: a 3xx from any endpoint is an error.
 
 ## 3. Device key and DPoP proofs
 

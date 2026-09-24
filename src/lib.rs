@@ -18,6 +18,7 @@ pub mod reader;
 pub mod roots;
 pub mod service;
 pub mod status;
+pub mod tls;
 pub mod tools;
 pub mod tui;
 pub mod tunnel;

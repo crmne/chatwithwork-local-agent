@@ -196,6 +196,7 @@ impl AuthClient {
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(30)))
             .user_agent(format!("cww/{}", env!("CARGO_PKG_VERSION")))
+            .tls_config(crate::tls::ureq_config())
             .build();
         Self {
             server,

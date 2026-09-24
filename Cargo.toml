@@ -44,9 +44,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # MCP server core (official SDK). Only the server role; we bring our own transport.
 rmcp = { version = "3.4.1", default-features = false, features = ["server"] }
 
-# Network: WebSocket tunnel and the pairing/token HTTP calls, rustls + ring + webpki roots only.
+# Network: WebSocket tunnel and the pairing/token HTTP calls, rustls + ring.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-webpki-roots = "1"
+# Trust the OS certificate store (private CAs, corporate proxies, local
+# development CAs) plus Mozilla's roots as a fallback.
+rustls-native-certs = "0.8"
+webpki-root-certs = "1"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
 url = "2.5"
@@ -97,7 +100,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 tempfile = "3.27"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [profile.release]
 lto = "thin"

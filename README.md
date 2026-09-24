@@ -84,7 +84,7 @@ Key fingerprint: 3sQ2…
 Waiting for approval...
 ```
 
-Open the link, sign in, check that the computer name matches, and approve. When nothing is shared yet, `cww login` then offers to share your Documents folder, and only does so if you answer yes. Chat with Work emails you whenever a computer is connected. For a self-hosted server, use `cww login --server https://chat.example.com`.
+Open the link, sign in, check that the computer name matches, and approve. When nothing is shared yet, `cww login` then offers to share your Documents folder, and only does so if you answer yes. Chat with Work emails you whenever a computer is connected. For a self-hosted server, use `cww login --server https://chat.example.com`. `cww` trusts the certificates your operating system trusts, so a server behind a company CA or a local development CA works once that CA is installed; `SSL_CERT_FILE` points it at a different bundle.
 
 The device key never leaves your computer. It is kept in the macOS Keychain, the Windows Credential Manager, or the Secret Service (GNOME Keyring, KWallet), or in a `0600` file on machines without any of them. To disconnect a computer, revoke it under **Settings ▸ Computers**; the daemon notices right away. Run `cww logout` to forget the pairing locally.
 
@@ -206,7 +206,7 @@ The rule behind the design: **every control that must hold against a compromised
 | Prompt injection ("read ~/.ssh/id_ed25519") | Paths outside shared folders don't resolve at all. The deny list applies inside shared folders, and it can only be changed in the local config file. |
 | Path tricks (`..`, absolute paths, symlinks, `/a/root2` vs `/a/root`, hard links) | Paths are parsed and rejected before any filesystem access. Resolution uses `openat2(RESOLVE_BENEATH \| RESOLVE_NO_MAGICLINKS \| RESOLVE_NO_SYMLINKS)` on Linux, a component-by-component `O_NOFOLLOW` walk on macOS followed by a check of the opened handle's real path (`F_GETPATH`), and on Windows a walk that opens each component as a reparse point, refuses symlinks and junctions, and checks the final handle's real path (`GetFinalPathNameByHandleW`), which also defeats 8.3 short names and alternate data streams. Checks run on the opened handle, not on strings, which rules out the CVE-2025-53109/53110 class of bugs. Files with more than one hard link, FIFOs, sockets and devices are refused. |
 | Other users on the same machine | The control socket is `0600` inside a `0700` directory, and connections from another UID are refused. On Windows the named pipe admits only the user's SID. Keys live in the OS keychain. |
-| Network attackers | TLS with rustls and the Mozilla root store, HTTPS/WSS only, no redirects followed. Tokens live 10 minutes, travel in headers only, and are bound to the device key with DPoP proofs. |
+| Network attackers | TLS with rustls, trusting the operating system's certificate store plus Mozilla's roots, HTTPS/WSS only, no redirects followed. Tokens live 10 minutes, travel in headers only, and are bound to the device key with DPoP proofs. |
 | A stolen access token | It is useless without the device key: every connection needs a fresh proof signed by that key. |
 | Revocation | Revoking a device in Settings closes its socket and makes every later token refresh fail. The daemon then stops reconnecting. |
 
