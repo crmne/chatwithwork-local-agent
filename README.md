@@ -1,6 +1,6 @@
 # Chat with Work Local Agent
 
-The Chat with Work Local Agent (`cww` on the command line) is the open-source companion for [Chat with Work](https://chatwithwork.com). It lets the assistant search and read the folders you choose on your Mac or Linux machine, and nothing else.
+The Chat with Work Local Agent (`cww` on the command line) is the open-source companion for [Chat with Work](https://chatwithwork.com). It lets the assistant search and read the folders you choose on your Mac, Windows PC or Linux machine, and nothing else.
 
 - **Four read-only tools:** `roots`, `search`, `list` and `read`. There is no code that writes, deletes, or runs anything.
 - **Only the folders you share,** and never the secrets inside them. SSH keys, `.env` files, keychains and browser profiles stay private even inside a shared folder.
@@ -10,17 +10,45 @@ The Chat with Work Local Agent (`cww` on the command line) is the open-source co
 
 ## Install
 
-**Shell installer (macOS and Linux)**
+**macOS**
+
+```sh
+brew install crmne/tap/cww
+```
+
+Or download `cww-vX.Y.Z-macos-universal.pkg` from the [latest release](https://github.com/crmne/chatwithwork-local-agent/releases/latest): it installs `/usr/local/bin/cww` and starts the background agent for you.
+
+**Windows** (10 and 11, x64 and Arm)
+
+```powershell
+winget install ChatWithWork.LocalAgent
+```
+
+Or download `cww-vX.Y.Z-x86_64-pc-windows-msvc.msi` (or the `aarch64` one) from the latest release. It installs for your user only, with no administrator prompt, puts `cww` on your `PATH`, adds **Chat with Work Local Agent** to the Start menu, and starts the background agent at every logon. Without WinGet:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/crmne/chatwithwork-local-agent/releases/latest/download/cww-installer.ps1 | iex"
+```
+
+**Linux**
+
+| Distribution | Command |
+|---|---|
+| Debian, Ubuntu | download the `.deb` from the latest release, then `sudo apt install ./chatwithwork-local-agent_*.deb` |
+| Fedora, RHEL, openSUSE | download the `.rpm`, then `sudo dnf install ./chatwithwork-local-agent-*.rpm` |
+| Arch | `yay -S chatwithwork-local-agent-bin` (or `chatwithwork-local-agent` to build from source) |
+| NixOS, Nix | `nix profile install github:crmne/chatwithwork-local-agent` |
+| Any, with Homebrew | `brew install crmne/tap/cww` |
+
+Linux builds are static, so they run on any distribution, x86_64 or arm64. The packages install `cww` and a systemd user unit, and start nothing until you do.
+
+**One line, macOS or Linux, no root**
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/crmne/chatwithwork-local-agent/releases/latest/download/cww-installer.sh | sh
 ```
 
-**Homebrew**
-
-```sh
-brew install crmne/tap/cww
-```
+It installs `cww` into `~/.local/bin` after checking it against the release's checksums.
 
 **From source** (Rust 1.90 or newer)
 
@@ -28,11 +56,15 @@ brew install crmne/tap/cww
 cargo install --locked --git https://github.com/crmne/chatwithwork-local-agent
 ```
 
-Release archives come with SHA-256 checksums and GitHub artifact attestations. To check a download:
+Release archives come with SHA-256 checksums and GitHub artifact attestations. The macOS binary is signed with Developer ID and notarized. To check a download:
 
 ```sh
-gh attestation verify cww-aarch64-apple-darwin.tar.xz --repo crmne/chatwithwork-local-agent
+gh attestation verify cww-v0.1.0-macos-universal.tar.gz --repo crmne/chatwithwork-local-agent
 ```
+
+[PACKAGING.md](PACKAGING.md) explains how each package is built and signed.
+
+**Then run `cww`.** In a terminal, it opens the terminal UI, which pairs the computer, offers to share your Documents folder, and shows everything the assistant asks for. The sections below do the same step by step.
 
 ## Pairing
 
@@ -52,9 +84,9 @@ Key fingerprint: 3sQ2…
 Waiting for approval...
 ```
 
-Open the link, sign in, check that the computer name matches, and approve. Chat with Work emails you whenever a computer is connected. For a self-hosted server, use `cww login --server https://chat.example.com`.
+Open the link, sign in, check that the computer name matches, and approve. When nothing is shared yet, `cww login` then offers to share your Documents folder, and only does so if you answer yes. Chat with Work emails you whenever a computer is connected. For a self-hosted server, use `cww login --server https://chat.example.com`.
 
-The device key never leaves your computer. It is kept in the macOS Keychain or the Secret Service (GNOME Keyring, KWallet), or in a `0600` file on machines without either. To disconnect a computer, revoke it under **Settings ▸ Computers**; the daemon notices right away. Run `cww logout` to forget the pairing locally.
+The device key never leaves your computer. It is kept in the macOS Keychain, the Windows Credential Manager, or the Secret Service (GNOME Keyring, KWallet), or in a `0600` file on machines without any of them. To disconnect a computer, revoke it under **Settings ▸ Computers**; the daemon notices right away. Run `cww logout` to forget the pairing locally.
 
 ## Share folders
 
@@ -71,16 +103,19 @@ Symlinks are not followed. `--follow-symlinks` allows links that stay inside the
 ## Run the daemon
 
 ```sh
-cww daemon install     # systemd --user unit on Linux, LaunchAgent on macOS
+cww daemon install     # systemd --user unit on Linux, LaunchAgent on macOS, logon task on Windows
 cww status             # connection, roots and index state
 cww pause              # refuse every request until...
 cww resume
 cww reload             # re-read config.toml after editing it
 cww log -f             # follow the audit log
+cww daemon stop        # stop it until the next logon
 cww daemon uninstall   # add --purge to also delete keys, config, index and logs
 ```
 
-`cww daemon run` runs in the foreground instead. Set `CWW_LOG=debug` for more output.
+`cww daemon run` runs in the foreground instead. Set `CWW_LOG=debug` for more output. With Homebrew, `brew services start cww` works too. On Windows the logon task runs `cww-agent.exe`, the same daemon without a console window, and it logs to `%LOCALAPPDATA%\cww\state\daemon.log`.
+
+The CLI, the terminal UI and the settings app talk to the daemon over a local socket (a named pipe on Windows) that only your user can open. [CONTROL.md](CONTROL.md) documents it for other clients.
 
 ## Terminal UI
 
@@ -144,8 +179,8 @@ read_chars_per_hour = 2000000
 
 [index]
 enabled = true
-watch = true
-rescan_secs = 1800
+watch = true          # follow file events; the index sleeps between them
+rescan_secs = 1800    # full rescan interval, only when watching is off or unavailable
 ```
 
 Run `cww reload` after editing the file. The `cww roots` commands reload the daemon for you.
@@ -157,7 +192,7 @@ Run `cww reload` after editing the file. The `cww roots` commands reload the dae
 | `~/.local/state/cww/audit.jsonl` | The audit log (`0600`, rotated at 10 MB, never uploaded) |
 | `$XDG_RUNTIME_DIR/cww/cww.sock` | The control socket for the CLI (`0600`) |
 
-The same layout is used on macOS. `CWW_HOME=/some/dir` puts all of it under one directory.
+The same layout is used on macOS. On Windows everything lives under `%LOCALAPPDATA%\cww` (`config`, `data`, `state`), and the control channel is a named pipe. `CWW_HOME=/some/dir` puts all of it under one directory.
 
 ## Threat model
 
@@ -169,15 +204,15 @@ The rule behind the design: **every control that must hold against a compromised
 |---|---|
 | A compromised server, admin or database sends arbitrary tool calls | Only four read-only tools exist. Reads are confined to your shared folders and the deny list. Rate and volume limits, the audit log, and `cww pause` all run locally. |
 | Prompt injection ("read ~/.ssh/id_ed25519") | Paths outside shared folders don't resolve at all. The deny list applies inside shared folders, and it can only be changed in the local config file. |
-| Path tricks (`..`, absolute paths, symlinks, `/a/root2` vs `/a/root`, hard links) | Paths are parsed and rejected before any filesystem access. Resolution uses `openat2(RESOLVE_BENEATH \| RESOLVE_NO_MAGICLINKS \| RESOLVE_NO_SYMLINKS)` on Linux, and a component-by-component `O_NOFOLLOW` walk on macOS followed by a check of the opened handle's real path (`F_GETPATH`). Checks run on the opened handle, not on strings, which rules out the CVE-2025-53109/53110 class of bugs. Files with more than one hard link, FIFOs, sockets and devices are refused. |
-| Other users on the same machine | The control socket is `0600` inside a `0700` directory, and connections from another UID are refused. Keys live in the OS keychain. |
+| Path tricks (`..`, absolute paths, symlinks, `/a/root2` vs `/a/root`, hard links) | Paths are parsed and rejected before any filesystem access. Resolution uses `openat2(RESOLVE_BENEATH \| RESOLVE_NO_MAGICLINKS \| RESOLVE_NO_SYMLINKS)` on Linux, a component-by-component `O_NOFOLLOW` walk on macOS followed by a check of the opened handle's real path (`F_GETPATH`), and on Windows a walk that opens each component as a reparse point, refuses symlinks and junctions, and checks the final handle's real path (`GetFinalPathNameByHandleW`), which also defeats 8.3 short names and alternate data streams. Checks run on the opened handle, not on strings, which rules out the CVE-2025-53109/53110 class of bugs. Files with more than one hard link, FIFOs, sockets and devices are refused. |
+| Other users on the same machine | The control socket is `0600` inside a `0700` directory, and connections from another UID are refused. On Windows the named pipe admits only the user's SID. Keys live in the OS keychain. |
 | Network attackers | TLS with rustls and the Mozilla root store, HTTPS/WSS only, no redirects followed. Tokens live 10 minutes, travel in headers only, and are bound to the device key with DPoP proofs. |
 | A stolen access token | It is useless without the device key: every connection needs a fresh proof signed by that key. |
 | Revocation | Revoking a device in Settings closes its socket and makes every later token refresh fail. The daemon then stops reconnecting. |
 
 **Default deny list:** matched on path components, case-insensitively, even inside shared folders.
 
-`.ssh`, `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.config/gh/hosts.yml`, `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `*.kdbx`, `*.1pux`, `.password-store`, `.local/share/keyrings`, `Library/Keychains`, `*.keychain`, `*.keychain-db`, `AppData/Roaming/Microsoft/Credentials`, `Library/Mail`, `Library/Messages`, browser profiles (Chrome, Chromium, Brave, Edge, Firefox, Safari, cookies), `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers`, `/etc/ssl/private`, and cww's own config, index, and log directories.
+`.ssh`, `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.config/gh/hosts.yml`, `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `*.kdbx`, `*.1pux`, `.password-store`, `.local/share/keyrings`, `Library/Keychains`, `*.keychain`, `*.keychain-db`, Windows credential stores (`AppData/Roaming/Microsoft/Credentials`, `Protect`, `Crypto`, `Vault`, `NTUSER.DAT`), `Library/Mail`, `Library/Messages`, browser profiles (Chrome, Chromium, Brave, Edge, Firefox, Safari, cookies), `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers`, `/etc/ssl/private`, and cww's own config, index, and log directories.
 
 ### What it does not protect against
 
@@ -191,7 +226,8 @@ The rule behind the design: **every control that must hold against a compromised
 
 - Split into a network process and a sandboxed reader process (Landlock + seccomp on Linux, Seatbelt on macOS).
 - A signed and notarized macOS app bundle registered through `SMAppService`, so folder permissions survive updates.
-- Local approval prompts, secret redaction, Windows support, reproducible builds, and an external audit before general availability.
+- A restricted token or AppContainer for the reader on Windows.
+- Local approval prompts, secret redaction, reproducible builds, and an external audit before general availability.
 
 ## Development
 
@@ -202,7 +238,7 @@ cargo fmt --check
 cargo deny check                            # licenses, advisories, bans, sources
 ```
 
-`tests/e2e.rs` runs a real daemon against a fake Chat with Work server: DPoP-checked token endpoint, device flow, and an Action Cable WebSocket. It covers reads outside the roots, denied secrets, symlink and hard-link escapes, pause, and revocation.
+`tests/e2e.rs` runs a real daemon against a fake Chat with Work server: DPoP-checked token endpoint, device flow, and an Action Cable WebSocket. It covers reads outside the roots, denied secrets, symlink, junction and hard-link escapes, pause, and revocation. CI runs everything on Linux, macOS and Windows, and builds the Nix package.
 
 | Module | Role |
 |---|---|
@@ -210,10 +246,10 @@ cargo deny check                            # licenses, advisories, bans, source
 | `tools` | The MCP server (via [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk)): four tools, limits, audit. |
 | `tunnel` | The outbound WebSocket, framing, reconnects. |
 | `auth` | Device key, DPoP proofs, device flow, secret storage. |
-| `daemon`, `control`, `service` | The daemon, its control socket, and systemd/launchd registration. |
+| `daemon`, `control`, `service` | The daemon, its control channel ([CONTROL.md](CONTROL.md)), and systemd, launchd and Scheduled Task registration. |
 | `tui` | The terminal UI, a client of the control socket. Screens are pinned as text snapshots in `src/tui/snapshots`; `UPDATE_SNAPSHOTS=1 cargo test` rewrites them. |
 
-Releases are built by [dist](https://github.com/axodotdev/cargo-dist) (`dist-workspace.toml`, `.github/workflows/release.yml`) when a `v*` tag is pushed.
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed, and packaged with [native-packages](https://github.com/crmne/native-packages); see [PACKAGING.md](PACKAGING.md).
 
 ## Security
 
