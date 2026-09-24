@@ -10,7 +10,7 @@ use cww::paths::Paths;
 use cww::roots::{NewRoot, add_root, remove_root};
 use cww::{audit, auth, daemon, service};
 
-/// Chat with Work local files agent.
+/// Chat with Work Local Agent.
 ///
 /// Shares folders you choose with Chat with Work, read-only.
 #[derive(Parser)]

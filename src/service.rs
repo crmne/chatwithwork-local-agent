@@ -102,8 +102,8 @@ fn launch_agent_path() -> Result<PathBuf> {
 pub fn systemd_unit(exe: &Path, paths: &Paths, options: &InstallOptions) -> String {
     let mut unit = format!(
         "[Unit]\n\
-         Description=Chat with Work local files agent (cww)\n\
-         Documentation=https://github.com/crmne/chatwithwork-agent\n\
+         Description=Chat with Work Local Agent (cww)\n\
+         Documentation=https://github.com/crmne/chatwithwork-local-agent\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
          \n\

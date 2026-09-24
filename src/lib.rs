@@ -1,4 +1,4 @@
-//! Chat with Work local files agent.
+//! Chat with Work Local Agent.
 //!
 //! `cww` shares chosen folders with Chat with Work through four read-only
 //! MCP tools, over a WebSocket it opens itself. See README.md for the threat

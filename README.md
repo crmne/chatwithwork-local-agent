@@ -1,6 +1,6 @@
-# cww: search your computer from Chat with Work
+# Chat with Work Local Agent
 
-`cww` is the open-source local files agent for [Chat with Work](https://chatwithwork.com). It lets the assistant search and read the folders you choose on your Mac or Linux machine, and nothing else.
+The Chat with Work Local Agent (`cww` on the command line) is the open-source companion for [Chat with Work](https://chatwithwork.com). It lets the assistant search and read the folders you choose on your Mac or Linux machine, and nothing else.
 
 - **Four read-only tools:** `roots`, `search`, `list` and `read`. There is no code that writes, deletes, or runs anything.
 - **Only the folders you share,** and never the secrets inside them. SSH keys, `.env` files, keychains and browser profiles stay private even inside a shared folder.
@@ -13,7 +13,7 @@
 **Shell installer (macOS and Linux)**
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/crmne/chatwithwork-agent/releases/latest/download/cww-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/crmne/chatwithwork-local-agent/releases/latest/download/cww-installer.sh | sh
 ```
 
 **Homebrew**
@@ -25,13 +25,13 @@ brew install crmne/tap/cww
 **From source** (Rust 1.90 or newer)
 
 ```sh
-cargo install --locked --git https://github.com/crmne/chatwithwork-agent
+cargo install --locked --git https://github.com/crmne/chatwithwork-local-agent
 ```
 
 Release archives come with SHA-256 checksums and GitHub artifact attestations. To check a download:
 
 ```sh
-gh attestation verify cww-aarch64-apple-darwin.tar.xz --repo crmne/chatwithwork-agent
+gh attestation verify cww-aarch64-apple-darwin.tar.xz --repo crmne/chatwithwork-local-agent
 ```
 
 ## Pairing

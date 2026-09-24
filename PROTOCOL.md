@@ -1,6 +1,6 @@
-# cww tunnel protocol, version 1
+# Chat with Work Local Agent: tunnel protocol, version 1
 
-This document describes everything that goes over the wire between the `cww` daemon and a Chat with Work server: pairing, tokens, the WebSocket tunnel, and the MCP messages inside it. A server implementation (the Rails app, or a self-hosted one) can be checked against it line by line.
+This document describes everything that goes over the wire between the Local Agent daemon (`cww`) and a Chat with Work server: pairing, tokens, the WebSocket tunnel, and the MCP messages inside it. A server implementation (the Rails app, or a self-hosted one) can be checked against it line by line.
 
 The key words MUST, SHOULD and MAY are used as in RFC 2119.
 
