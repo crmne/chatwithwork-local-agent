@@ -82,6 +82,31 @@ cww daemon uninstall   # add --purge to also delete keys, config, index and logs
 
 `cww daemon run` runs in the foreground instead. Set `CWW_LOG=debug` for more output.
 
+## Terminal UI
+
+```sh
+cww        # or cww tui
+```
+
+Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the left: your shared folders with their index state, and the daemon's connection. On the right: the latest request from Chat with Work as it happens, and the full audit log, colour-coded by decision.
+
+| Key | Does |
+|---|---|
+| `a` | Share a folder (prefilled with your Documents folder if it isn't shared) |
+| `d`, `x`, `Delete` | Stop sharing the selected folder, after asking |
+| `↑` `↓`, `j` `k` | Select a folder, or scroll the audit log |
+| `p` | Pause or resume answering Chat with Work |
+| `l` | Switch between the chat view and the audit log (`PgUp`, `PgDn`, `End` to follow) |
+| `r` | Look for the daemon again |
+| `?` | All the keys |
+| `q`, `Ctrl-C` | Quit |
+
+If nothing is shared yet, it offers your Documents folder and shares it only when you press `y`. If the daemon isn't running, it says so, shows `cww daemon install`, and works from `config.toml` and the audit file until the daemon starts; changes are saved there, like the `cww roots` commands. If the computer isn't paired, it shows `cww login`.
+
+Chat doesn't work in the terminal yet: Chat with Work has no chat API for it, so the chat pane says so and links to the browser. [CHAT_API.md](CHAT_API.md) proposes the API it needs.
+
+The UI uses no CPU while nothing happens, follows `NO_COLOR`, and falls back to 256 colours on terminals without true colour.
+
 ## What the assistant can do
 
 | Tool | What it does |
@@ -186,6 +211,7 @@ cargo deny check                            # licenses, advisories, bans, source
 | `tunnel` | The outbound WebSocket, framing, reconnects. |
 | `auth` | Device key, DPoP proofs, device flow, secret storage. |
 | `daemon`, `control`, `service` | The daemon, its control socket, and systemd/launchd registration. |
+| `tui` | The terminal UI, a client of the control socket. Screens are pinned as text snapshots in `src/tui/snapshots`; `UPDATE_SNAPSHOTS=1 cargo test` rewrites them. |
 
 Releases are built by [dist](https://github.com/axodotdev/cargo-dist) (`dist-workspace.toml`, `.github/workflows/release.yml`) when a `v*` tag is pushed.
 
