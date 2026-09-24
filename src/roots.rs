@@ -9,7 +9,8 @@ use crate::paths::{Paths, home_dir};
 use crate::policy::DenyList;
 use crate::reader::safe_fs::is_valid_root_id;
 
-/// System directories that can't be shared without `--i-know`.
+/// System directories that can't be shared, nor anything inside them,
+/// without `--i-know`.
 const SYSTEM_DIRS: &[&str] = &[
     "/bin",
     "/boot",
@@ -26,7 +27,6 @@ const SYSTEM_DIRS: &[&str] = &[
     "/sbin",
     "/srv",
     "/sys",
-    "/tmp",
     "/usr",
     "/var",
     "/nix",
@@ -34,11 +34,26 @@ const SYSTEM_DIRS: &[&str] = &[
     "/Applications",
     "/Library",
     "/System",
-    "/Volumes",
     "/cores",
     "/private",
     "/Users",
     "/home",
+];
+
+/// Shared scratch and mount directories. The directory itself is refused
+/// (it holds other programs' and users' files), but a folder inside it is
+/// fine: `/tmp/project` is as narrow as `~/project`. These take precedence
+/// over `SYSTEM_DIRS`, so `/var/tmp/x` and macOS's `/private/tmp/x` (what
+/// `/tmp/x` canonicalizes to) are allowed too.
+const SCRATCH_DIRS: &[&str] = &[
+    "/tmp",
+    "/var/tmp",
+    "/private/tmp",
+    "/private/var/tmp",
+    "/private/var/folders",
+    "/mnt",
+    "/media",
+    "/Volumes",
 ];
 
 pub struct NewRoot<'a> {
@@ -140,8 +155,18 @@ fn too_broad(path: &Path) -> Result<Option<String>> {
     if home.starts_with(path) {
         return Ok(Some("it contains your home folder".into()));
     }
-    for dir in SYSTEM_DIRS {
-        let dir = Path::new(dir);
+    for dir in SCRATCH_DIRS.iter().map(Path::new) {
+        if path == dir {
+            return Ok(Some(format!(
+                "it is a shared system directory ({}); share a folder inside it",
+                dir.display()
+            )));
+        }
+        if path.starts_with(dir) {
+            return Ok(None);
+        }
+    }
+    for dir in SYSTEM_DIRS.iter().map(Path::new) {
         if path == dir || (path.starts_with(dir) && !path.starts_with(&home)) {
             return Ok(Some(format!(
                 "it is a system directory ({})",
@@ -209,6 +234,34 @@ mod tests {
     }
 
     #[test]
+    fn scratch_dirs_allow_subfolders_only() {
+        for refused in ["/tmp", "/var/tmp", "/private/tmp", "/mnt", "/Volumes"] {
+            assert!(
+                too_broad(Path::new(refused)).unwrap().is_some(),
+                "{refused}"
+            );
+        }
+        for allowed in [
+            "/tmp/project",
+            "/tmp/a/b",
+            "/var/tmp/export",
+            "/private/tmp/project",
+            "/private/var/folders/xy/abc/T/docs",
+            "/mnt/usb/Reports",
+            "/Volumes/Backup/Work",
+        ] {
+            assert!(
+                too_broad(Path::new(allowed)).unwrap().is_none(),
+                "{allowed}"
+            );
+        }
+        // Scratch exceptions don't open up the rest of /var or /private.
+        assert!(too_broad(Path::new("/var/lib/secrets")).unwrap().is_some());
+        assert!(too_broad(Path::new("/private/etc")).unwrap().is_some());
+        assert!(too_broad(Path::new("/tmpfoo")).unwrap().is_none());
+    }
+
+    #[test]
     fn adds_and_removes() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths::under(&tmp.path().join("cww"));
@@ -221,9 +274,8 @@ mod tests {
             i_know,
             follow_symlinks: false,
         };
-        // Temporary directories count as system directories.
-        assert!(add_root(&mut config, &paths, new(false)).is_err());
-        let root = add_root(&mut config, &paths, new(true)).unwrap();
+        // A folder inside a temporary directory needs no --i-know.
+        let root = add_root(&mut config, &paths, new(false)).unwrap();
         assert_eq!(root.id, "shared-docs");
         assert_eq!(root.label, "Shared Docs");
         assert!(
