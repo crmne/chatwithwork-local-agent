@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Chat with Work Local Agent</title>
+    <organization>com.chatwithwork</organization>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="11.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <license file="LICENSE-MIT" mime-type="text/plain"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.chatwithwork.cww"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.chatwithwork.cww" visible="false">
+        <pkg-ref id="com.chatwithwork.cww"/>
+    </choice>
+    <pkg-ref id="com.chatwithwork.cww" version="__VERSION__" onConclusion="none">cww-component.pkg</pkg-ref>
+</installer-gui-script>

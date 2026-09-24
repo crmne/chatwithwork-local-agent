@@ -1,0 +1,12 @@
+#!/bin/sh
+# Runs as root after the package is installed. The daemon runs per user, so
+# register it for whoever is logged in at the console, as that user. It stays
+# idle until the computer is paired (`cww login` or the `cww` terminal UI).
+# Never fails the installation.
+user=$(stat -f %Su /dev/console 2>/dev/null)
+case "$user" in
+  ""|root|loginwindow|_mbsetupuser) exit 0 ;;
+esac
+uid=$(id -u "$user" 2>/dev/null) || exit 0
+launchctl asuser "$uid" sudo -H -u "$user" /usr/local/bin/cww daemon install >/dev/null 2>&1 || true
+exit 0
