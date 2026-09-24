@@ -1,0 +1,40 @@
+{
+    "version": "@VERSION@",
+    "description": "Chat with Work Local Agent: share the folders you choose with Chat with Work, read-only.",
+    "homepage": "https://github.com/crmne/chatwithwork-local-agent",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/crmne/chatwithwork-local-agent/releases/download/v@VERSION@/cww-v@VERSION@-x86_64-pc-windows-msvc.zip",
+            "hash": "@WINDOWS_X64_ZIP_SHA256@",
+            "extract_dir": "cww-v@VERSION@-x86_64-pc-windows-msvc"
+        },
+        "arm64": {
+            "url": "https://github.com/crmne/chatwithwork-local-agent/releases/download/v@VERSION@/cww-v@VERSION@-aarch64-pc-windows-msvc.zip",
+            "hash": "@WINDOWS_ARM64_ZIP_SHA256@",
+            "extract_dir": "cww-v@VERSION@-aarch64-pc-windows-msvc"
+        }
+    },
+    "bin": "cww.exe",
+    "notes": [
+        "Pair this computer and choose what to share: cww",
+        "Start the daemon at every logon: cww daemon install"
+    ],
+    "pre_uninstall": "if (Test-Path \"$dir\\cww.exe\") { & \"$dir\\cww.exe\" daemon uninstall | Out-Null }",
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/crmne/chatwithwork-local-agent/releases/download/v$version/cww-v$version-x86_64-pc-windows-msvc.zip",
+                "extract_dir": "cww-v$version-x86_64-pc-windows-msvc"
+            },
+            "arm64": {
+                "url": "https://github.com/crmne/chatwithwork-local-agent/releases/download/v$version/cww-v$version-aarch64-pc-windows-msvc.zip",
+                "extract_dir": "cww-v$version-aarch64-pc-windows-msvc"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/checksums.txt"
+        }
+    }
+}

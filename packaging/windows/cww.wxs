@@ -1,0 +1,100 @@
+<!--
+  Chat with Work Local Agent, as a per-user MSI (WiX Toolset 5).
+
+  - Installs cww.exe and cww-agent.exe to %LOCALAPPDATA%\Programs\Chat with Work Local Agent
+    and adds that folder to the user's PATH. Per-user, so no UAC prompt.
+  - Registers the daemon's logon Scheduled Task (`cww daemon install`) and
+    starts it; it stays idle until the computer is paired. Uninstalling
+    removes the task (`cww daemon uninstall`) but keeps keys and settings.
+  - A Start menu shortcut opens the `cww` terminal UI.
+
+  Build (see packaging/windows/build-msi.ps1):
+    wix build cww.wxs -arch x64 -ext WixToolset.Util.wixext -d Version=1.2.3 -d SourceDir=... -o cww.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Chat with Work Local Agent"
+    Manufacturer="Plenty UG"
+    Version="$(Version)"
+    UpgradeCode="{FBC69B33-161E-40DC-9D83-5B54DB1A9821}"
+    Scope="perUser"
+    Compressed="yes"
+    Language="1033">
+    <!-- Never change the UpgradeCode: it ties every version together. -->
+    <SummaryInformation Description="Chat with Work Local Agent (cww)" Manufacturer="Plenty UG" />
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/crmne/chatwithwork-local-agent" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/crmne/chatwithwork-local-agent#readme" />
+    <Property Id="ARPCOMMENTS" Value="Shares the folders you choose with Chat with Work, read-only." />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Chat with Work Local Agent" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <!-- Per-user components use an HKCU value as their key path. -->
+    <ComponentGroup Id="Program" Directory="INSTALLFOLDER">
+      <Component Id="Binary" Guid="{530F0C9E-77A2-4737-8015-FCFD6650E7B4}">
+        <File Id="CwwExe" Name="cww.exe" Source="$(SourceDir)\cww.exe" KeyPath="no" />
+        <!-- The daemon without a console window, for the logon task. -->
+        <File Id="CwwAgentExe" Name="cww-agent.exe" Source="$(SourceDir)\cww-agent.exe" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\Chat with Work\Local Agent"
+          Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <Environment Id="UserPath" Name="PATH" Value="[INSTALLFOLDER]"
+          Action="set" Part="last" System="no" Permanent="no" />
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+      </Component>
+      <Component Id="Documents" Guid="{69A65CF0-1A21-433D-B72A-F1B9EC96AB41}">
+        <File Id="Readme" Name="README.md" Source="$(SourceDir)\README.md" KeyPath="no" />
+        <File Id="Protocol" Name="PROTOCOL.md" Source="$(SourceDir)\PROTOCOL.md" KeyPath="no" />
+        <File Id="Security" Name="SECURITY.md" Source="$(SourceDir)\SECURITY.md" KeyPath="no" />
+        <File Id="LicenseMit" Name="LICENSE-MIT" Source="$(SourceDir)\LICENSE-MIT" KeyPath="no" />
+        <File Id="LicenseApache" Name="LICENSE-APACHE" Source="$(SourceDir)\LICENSE-APACHE" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\Chat with Work\Local Agent"
+          Name="Documents" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="Shortcuts" Directory="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="TuiShortcut" Name="Chat with Work Local Agent"
+          Description="Pair this computer, choose what to share and watch activity"
+          Target="[#CwwExe]" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\Chat with Work\Local Agent"
+          Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="Chat with Work Local Agent" AllowAbsent="no">
+      <ComponentGroupRef Id="Program" />
+      <ComponentGroupRef Id="Shortcuts" />
+    </Feature>
+
+    <!--
+      Register and remove the Scheduled Task without flashing a console
+      window (WixQuietExec). Failures are ignored: the task can always be
+      registered later with `cww daemon install`.
+    -->
+    <SetProperty Id="RegisterDaemon" Value="&quot;[#CwwExe]&quot; daemon install"
+      Before="RegisterDaemon" Sequence="execute" />
+    <CustomAction Id="RegisterDaemon" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+      DllEntry="WixQuietExec" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <SetProperty Id="UnregisterDaemon" Value="&quot;[#CwwExe]&quot; daemon uninstall"
+      Before="UnregisterDaemon" Sequence="execute" />
+    <CustomAction Id="UnregisterDaemon" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+      DllEntry="WixQuietExec" Execute="deferred" Impersonate="yes" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="UnregisterDaemon" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="RegisterDaemon" Before="InstallFinalize" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

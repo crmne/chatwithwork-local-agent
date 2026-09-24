@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+PackageIdentifier: ChatWithWork.LocalAgent
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: Plenty UG
+PublisherUrl: https://chatwithwork.com
+PublisherSupportUrl: https://github.com/crmne/chatwithwork-local-agent/issues
+PrivacyUrl: https://chatwithwork.com/privacy
+Author: Carmine Paolino
+PackageName: Chat with Work Local Agent
+PackageUrl: https://github.com/crmne/chatwithwork-local-agent
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/crmne/chatwithwork-local-agent#license
+Copyright: Copyright (c) 2026 Carmine Paolino (Plenty UG)
+ShortDescription: Share the folders you choose with Chat with Work, read-only.
+Description: |-
+  The Chat with Work Local Agent (cww) lets the Chat with Work assistant search and read the folders you
+  choose on this computer, and nothing else. It answers four read-only tools over one outbound WebSocket,
+  keeps its full-text index on your machine, and never shares secrets such as keys, .env files or password
+  databases, even inside a shared folder. Every request is written to a local audit log.
+Moniker: cww
+Tags:
+- chatwithwork
+- mcp
+- search
+- files
+- ai
+ReleaseNotesUrl: https://github.com/crmne/chatwithwork-local-agent/releases/tag/v@VERSION@
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0
