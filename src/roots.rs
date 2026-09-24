@@ -230,6 +230,22 @@ fn too_broad(path: &Path) -> Result<Option<String>> {
     if home.starts_with(path) {
         return Ok(Some("it contains your home folder".into()));
     }
+    // This session's own temporary directory ($TMPDIR) counts as scratch
+    // too, wherever it lives (Nix builds keep it under /nix), unless it is
+    // something broad like / or the home folder.
+    if let Ok(temp) = std::env::temp_dir().canonicalize()
+        && temp.components().count() > 2
+        && !home.starts_with(&temp)
+    {
+        if path == temp {
+            return Ok(Some(
+                "it is the temporary folder; share a folder inside it".into(),
+            ));
+        }
+        if path.starts_with(&temp) {
+            return Ok(None);
+        }
+    }
     for dir in SCRATCH_DIRS.iter().map(Path::new) {
         if path == dir {
             return Ok(Some(format!(
@@ -334,9 +350,11 @@ mod tests {
         assert!(too_broad(Path::new("/")).unwrap().is_some());
         assert!(too_broad(Path::new("/etc")).unwrap().is_some());
         assert!(too_broad(Path::new("/usr/share")).unwrap().is_some());
-        let home = home_dir().unwrap().canonicalize().unwrap();
-        assert!(too_broad(&home).unwrap().is_some());
-        assert!(too_broad(&home.join("Documents")).unwrap().is_none());
+        // Build sandboxes can set HOME to a folder that doesn't exist.
+        if let Ok(home) = home_dir().unwrap().canonicalize() {
+            assert!(too_broad(&home).unwrap().is_some());
+            assert!(too_broad(&home.join("Documents")).unwrap().is_none());
+        }
     }
 
     #[cfg(not(windows))]
