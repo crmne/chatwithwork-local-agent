@@ -96,48 +96,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
-[package.metadata.dist]
-# Released as binaries through dist, not published to crates.io.
-dist = true
-
-# Debian package (cargo deb). The binary goes to /usr/bin/cww.
-[package.metadata.deb]
-name = "chatwithwork-local-agent"
-maintainer = "Carmine Paolino <carmine@paolino.me>"
-copyright = "2026, Carmine Paolino (Plenty UG)"
-license-file = ["LICENSE-MIT", "0"]
-section = "net"
-priority = "optional"
-extended-description = """\
-Shares folders you choose with Chat with Work through four read-only tools \
-(roots, search, list, read) over an outbound WebSocket. Includes a systemd \
-user unit: systemctl --user enable --now cww."""
-depends = "$auto"
-assets = [
-    ["target/release/cww", "usr/bin/", "755"],
-    ["packaging/systemd/cww.service", "usr/lib/systemd/user/", "644"],
-    ["README.md", "usr/share/doc/chatwithwork-local-agent/", "644"],
-    ["PROTOCOL.md", "usr/share/doc/chatwithwork-local-agent/", "644"],
-    ["SECURITY.md", "usr/share/doc/chatwithwork-local-agent/", "644"],
-    ["LICENSE-MIT", "usr/share/doc/chatwithwork-local-agent/", "644"],
-    ["LICENSE-APACHE", "usr/share/doc/chatwithwork-local-agent/", "644"],
-]
-
-# RPM package (cargo generate-rpm).
-[package.metadata.generate-rpm]
-name = "chatwithwork-local-agent"
-summary = "Chat with Work Local Agent: read-only local files for Chat with Work"
-license = "MIT OR Apache-2.0"
-assets = [
-    { source = "target/release/cww", dest = "/usr/bin/cww", mode = "755" },
-    { source = "packaging/systemd/cww.service", dest = "/usr/lib/systemd/user/cww.service", mode = "644" },
-    { source = "README.md", dest = "/usr/share/doc/chatwithwork-local-agent/README.md", mode = "644", doc = true },
-    { source = "PROTOCOL.md", dest = "/usr/share/doc/chatwithwork-local-agent/PROTOCOL.md", mode = "644", doc = true },
-    { source = "SECURITY.md", dest = "/usr/share/doc/chatwithwork-local-agent/SECURITY.md", mode = "644", doc = true },
-    { source = "LICENSE-MIT", dest = "/usr/share/licenses/chatwithwork-local-agent/LICENSE-MIT", mode = "644" },
-    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/chatwithwork-local-agent/LICENSE-APACHE", mode = "644" },
-]
-
 [dev-dependencies]
 tempfile = "3.27"
 
@@ -145,8 +103,3 @@ tempfile = "3.27"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"

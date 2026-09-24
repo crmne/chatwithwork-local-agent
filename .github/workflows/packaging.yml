@@ -1,0 +1,144 @@
+name: Packaging
+
+# Releases call this after the GitHub release exists: the shared
+# native-packages workflow downloads the static Linux builds, checks them
+# against checksums.txt, builds .deb and .rpm, attaches them, renders the
+# AUR, Homebrew and WinGet recipes, and publishes the enabled ones.
+#
+# Pushes and pull requests that touch packaging build the same packages
+# from this commit instead, and install them in clean containers.
+on:
+  push:
+    branches: [main]
+    paths: [native-packages.yaml, packaging/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
+  pull_request:
+    paths: [native-packages.yaml, packaging/**, .github/workflows/packaging.yml, .github/workflows/release.yml]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published version to package (empty packages this commit)
+        type: string
+        default: ''
+      publish:
+        description: Attach packages and run enabled downstream publishers
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: true
+    secrets:
+      AUR_SSH_KEY:
+        required: false
+      AUR_KNOWN_HOSTS:
+        required: false
+      HOMEBREW_TAP_GITHUB_TOKEN:
+        required: false
+      HOMEBREW_TAP_SSH_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Inputs for packaging this commit: the static Linux builds as a release
+  # would name them, the source archive, and stand-ins for the macOS and
+  # Windows assets that only the recipes' checksums refer to.
+  inputs:
+    if: inputs.version == ''
+    name: build inputs (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }} --bin cww
+      - name: Release-shaped archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          name="cww-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp README.md PROTOCOL.md CONTROL.md SECURITY.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp "target/${{ matrix.target }}/release/cww" "dist/$name/"
+          cp --parents packaging/systemd/cww.service "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+          if [ "${{ matrix.target }}" = x86_64-unknown-linux-musl ]; then
+            git archive --format=tar.gz --prefix="chatwithwork-local-agent-${VERSION}/" \
+              -o "dist/chatwithwork-local-agent-${VERSION}.tar.gz" HEAD
+            for stand_in in macos-universal.tar.gz x86_64-pc-windows-msvc.msi aarch64-pc-windows-msvc.msi x86_64-pc-windows-msvc.zip aarch64-pc-windows-msvc.zip; do
+              echo "stand-in for packaging tests" > "dist/cww-v${VERSION}-${stand_in}"
+            done
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packaging-inputs-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The shared workflow downloads one artifact, so merge the two.
+  merge-inputs:
+    if: inputs.version == ''
+    needs: inputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact/merge@v7
+        with:
+          name: packaging-inputs
+          pattern: packaging-inputs-*
+
+  packaging:
+    if: always() && (inputs.version != '' || needs.merge-inputs.result == 'success')
+    needs: [inputs, merge-inputs]
+    permissions:
+      contents: write
+    uses: crmne/native-packages/.github/workflows/package.yml@8025372579b1864b09b579255484f4e15f65bc78 # main after v0.7.0: tap deploy key
+    with:
+      targets: linux-amd64,linux-arm64
+      version: ${{ inputs.version || needs.inputs.outputs.version }}
+      source-artifact: ${{ inputs.version == '' && 'packaging-inputs' || '' }}
+      publish: ${{ inputs.publish == true && inputs.version != '' }}
+    secrets: inherit
+
+  installation:
+    name: Install (${{ matrix.os }}, ${{ matrix.image }})
+    needs: packaging
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        image: ['ubuntu:24.04', 'debian:12-slim', 'debian:13-slim', 'fedora:41', 'fedora:latest', 'rockylinux:9']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-packages
+          path: dist/native-packages
+      - name: Install, run and remove in a clean container
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: bash packaging/test-install.sh "$IMAGE" dist/native-packages

@@ -1,0 +1,176 @@
+# Shared CLI: gem install native-packages --version 0.7.0
+# See PACKAGING.md.
+---
+schema: 1
+tool:
+  version: 0.7.0
+  nfpm: 2.47.0
+nfpm:
+  name: chatwithwork-local-agent
+  maintainer: Carmine Paolino <carmine@paolino.me>
+  homepage: https://chatwithwork.com
+  description: |-
+    Chat with Work Local Agent: share folders with Chat with Work, read-only.
+    cww answers four read-only tools (roots, search, list, read) for the
+    folders you choose, over an outbound WebSocket. Secrets inside shared
+    folders stay private. Includes a systemd user unit.
+  license: MIT OR Apache-2.0
+  provides: [cww]
+  contents:
+  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/cww"
+    dst: /usr/bin/cww
+    file_info:
+      mode: 493
+  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/packaging/systemd/cww.service"
+    dst: /usr/lib/systemd/user/cww.service
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/README.md"
+    dst: /usr/share/doc/chatwithwork-local-agent/README.md
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/PROTOCOL.md"
+    dst: /usr/share/doc/chatwithwork-local-agent/PROTOCOL.md
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/SECURITY.md"
+    dst: /usr/share/doc/chatwithwork-local-agent/SECURITY.md
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/LICENSE-MIT"
+    dst: /usr/share/licenses/chatwithwork-local-agent/LICENSE-MIT
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/LICENSE-APACHE"
+    dst: /usr/share/licenses/chatwithwork-local-agent/LICENSE-APACHE
+    file_info:
+      mode: 420
+  scripts:
+    postinstall: packaging/linux/postinstall.sh
+  # The binary is static (musl): no runtime dependencies. The Secret Service
+  # is optional; without it the device key goes to a 0600 file.
+  overrides:
+    deb:
+      recommends:
+      - gnome-keyring | kwalletmanager | keepassxc
+    rpm:
+      recommends:
+      - gnome-keyring
+  rpm:
+    buildhost: github-actions
+targets:
+  linux-amd64:
+    platform: linux
+    arch: amd64
+    libc: static
+    compiler_target: x86_64-unknown-linux-musl
+    formats:
+    - deb
+    - rpm
+    input:
+      local: dist/cww-v@VERSION@-x86_64-unknown-linux-musl.tar.gz
+      release_asset: cww-v@VERSION@-x86_64-unknown-linux-musl.tar.gz
+  linux-arm64:
+    platform: linux
+    arch: arm64
+    libc: static
+    compiler_target: aarch64-unknown-linux-musl
+    formats:
+    - deb
+    - rpm
+    input:
+      local: dist/cww-v@VERSION@-aarch64-unknown-linux-musl.tar.gz
+      release_asset: cww-v@VERSION@-aarch64-unknown-linux-musl.tar.gz
+release:
+  repository: crmne/chatwithwork-local-agent
+  checksums: checksums.txt
+  prereleases: true
+assets:
+  AMD64:
+    file: cww-v@VERSION@-x86_64-unknown-linux-musl.tar.gz
+    local: dist/cww-v@VERSION@-x86_64-unknown-linux-musl.tar.gz
+  ARM64:
+    file: cww-v@VERSION@-aarch64-unknown-linux-musl.tar.gz
+    local: dist/cww-v@VERSION@-aarch64-unknown-linux-musl.tar.gz
+  # Built, signed and notarized by the release workflow's macOS job.
+  MACOS:
+    file: cww-v@VERSION@-macos-universal.tar.gz
+    local: dist/cww-v@VERSION@-macos-universal.tar.gz
+  # Built (and signed, when the Windows secrets exist) by the release
+  # workflow's Windows jobs.
+  WINDOWS_X64_MSI:
+    file: cww-v@VERSION@-x86_64-pc-windows-msvc.msi
+    local: dist/cww-v@VERSION@-x86_64-pc-windows-msvc.msi
+  WINDOWS_ARM64_MSI:
+    file: cww-v@VERSION@-aarch64-pc-windows-msvc.msi
+    local: dist/cww-v@VERSION@-aarch64-pc-windows-msvc.msi
+  WINDOWS_X64_ZIP:
+    file: cww-v@VERSION@-x86_64-pc-windows-msvc.zip
+    local: dist/cww-v@VERSION@-x86_64-pc-windows-msvc.zip
+  WINDOWS_ARM64_ZIP:
+    file: cww-v@VERSION@-aarch64-pc-windows-msvc.zip
+    local: dist/cww-v@VERSION@-aarch64-pc-windows-msvc.zip
+  SOURCE:
+    file: chatwithwork-local-agent-@VERSION@.tar.gz
+    url: https://github.com/crmne/chatwithwork-local-agent/archive/refs/tags/v@VERSION@.tar.gz
+    checksummed: false
+    local: dist/chatwithwork-local-agent-@VERSION@.tar.gz
+templates:
+  homebrew/Formula/cww.rb: packaging/homebrew/cww.rb.in
+  arch/chatwithwork-local-agent/PKGBUILD: packaging/arch/chatwithwork-local-agent/PKGBUILD.in
+  arch/chatwithwork-local-agent/chatwithwork-local-agent.install: packaging/arch/cww.install
+  arch/chatwithwork-local-agent-bin/PKGBUILD: packaging/arch/chatwithwork-local-agent-bin/PKGBUILD.in
+  arch/chatwithwork-local-agent-bin/chatwithwork-local-agent-bin.install: packaging/arch/cww.install
+  arch/chatwithwork-local-agent-git/PKGBUILD: packaging/arch/chatwithwork-local-agent-git/PKGBUILD.in
+  arch/chatwithwork-local-agent-git/chatwithwork-local-agent-git.install: packaging/arch/cww.install
+  winget/ChatWithWork.LocalAgent.yaml: packaging/winget/ChatWithWork.LocalAgent.yaml.in
+  winget/ChatWithWork.LocalAgent.installer.yaml: packaging/winget/ChatWithWork.LocalAgent.installer.yaml.in
+  winget/ChatWithWork.LocalAgent.locale.en-US.yaml: packaging/winget/ChatWithWork.LocalAgent.locale.en-US.yaml.in
+  scoop/cww.json: packaging/scoop/cww.json.in
+repositories:
+  homebrew:
+    url: https://github.com/crmne/homebrew-tap.git
+    push_url: https://github.com/crmne/homebrew-tap.git
+    branch: main
+    package_path: "."
+    files:
+      homebrew/Formula/cww.rb: Formula/cww.rb
+    version_file: Formula/cww.rb
+    version_pattern: 'version "([^"]+)"'
+    publish: push
+  aur-source:
+    group: aur
+    url: https://aur.archlinux.org/chatwithwork-local-agent.git
+    push_url: ssh://aur@aur.archlinux.org/chatwithwork-local-agent.git
+    branch: master
+    package_path: "."
+    files:
+      arch/chatwithwork-local-agent: "."
+    version_file: ".SRCINFO"
+    version_pattern: "^\\s*pkgver = (\\S+)"
+    publish: push
+  aur-bin:
+    group: aur
+    url: https://aur.archlinux.org/chatwithwork-local-agent-bin.git
+    push_url: ssh://aur@aur.archlinux.org/chatwithwork-local-agent-bin.git
+    branch: master
+    package_path: "."
+    files:
+      arch/chatwithwork-local-agent-bin: "."
+    version_file: ".SRCINFO"
+    version_pattern: "^\\s*pkgver = (\\S+)"
+    publish: push
+  aur-git:
+    group: aur
+    url: https://aur.archlinux.org/chatwithwork-local-agent-git.git
+    push_url: ssh://aur@aur.archlinux.org/chatwithwork-local-agent-git.git
+    branch: master
+    package_path: "."
+    files:
+      arch/chatwithwork-local-agent-git: "."
+    version_file: ".SRCINFO"
+    version_pattern: "^\\s*pkgver = (\\S+)"
+    publish: push
+# WinGet and Scoop recipes are rendered with the others (recipes/winget,
+# recipes/scoop) and submitted by hand; see PACKAGING.md.
+version_file: Cargo.toml
