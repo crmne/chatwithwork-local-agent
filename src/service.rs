@@ -4,8 +4,8 @@
 //!   with the hardening options from the design doc.
 //! - macOS: a LaunchAgent plist at `~/Library/LaunchAgents/com.chatwithwork.cww.plist`.
 //! - Windows: a Scheduled Task that starts at logon, runs as the user with
-//!   least privilege, and restarts on failure. It runs `cww daemon run`
-//!   under `conhost --headless`, so no console window appears.
+//!   least privilege, and restarts on failure. It runs `cww-agent.exe`, the
+//!   daemon built without a console, so no window appears.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -264,7 +264,19 @@ mod windows_task {
     pub const TASK_NAME: &str = "Chat with Work Local Agent";
 
     pub fn install(exe: &Path, paths: &Paths) -> Result<PathBuf> {
-        let xml = task_xml(exe, paths, &current_user()?);
+        let log = paths.daemon_log_file();
+        // cww-agent.exe ships next to cww.exe and opens no console window.
+        // A bare cww.exe (cargo install) still works, with a console window.
+        let agent = exe.with_file_name("cww-agent.exe");
+        let (command, arguments) = if agent.exists() {
+            (agent, format!("--log-file \"{}\"", log.display()))
+        } else {
+            (
+                exe.to_path_buf(),
+                format!("daemon run --log-file \"{}\"", log.display()),
+            )
+        };
+        let xml = task_xml(&command, &arguments, &current_user()?);
         let file = paths.state_dir.join("cww-task.xml");
         // schtasks reads task XML as UTF-16 with a byte order mark.
         let mut bytes = vec![0xFF, 0xFE];
@@ -325,16 +337,7 @@ mod windows_task {
         })
     }
 
-    pub fn task_xml(exe: &Path, paths: &Paths, user: &str) -> String {
-        let conhost = std::env::var_os("SystemRoot")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
-            .join(r"System32\conhost.exe");
-        let arguments = format!(
-            "--headless \"{}\" daemon run --log-file \"{}\"",
-            exe.display(),
-            paths.daemon_log_file().display()
-        );
+    pub fn task_xml(command: &Path, arguments: &str, user: &str) -> String {
         format!(
             r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -387,8 +390,8 @@ mod windows_task {
 </Task>
 "#,
             user = xml_escape(user),
-            command = xml_escape(&conhost.to_string_lossy()),
-            arguments = xml_escape(&arguments),
+            command = xml_escape(&command.to_string_lossy()),
+            arguments = xml_escape(arguments),
         )
     }
 }
@@ -435,10 +438,16 @@ mod tests {
 
     #[test]
     fn task_xml_renders() {
-        let paths = Paths::under(Path::new("/home/u/.cww"));
-        let task = windows_task::task_xml(Path::new(r"C:\Apps\cww.exe"), &paths, "PC\\carmine");
+        let task = windows_task::task_xml(
+            Path::new(r"C:\Apps\cww-agent.exe"),
+            r#"--log-file "C:\Logs\daemon.log""#,
+            "PC\\carmine",
+        );
         assert!(task.contains("<UserId>PC\\carmine</UserId>"));
-        assert!(task.contains("--headless &quot;C:\\Apps\\cww.exe&quot; daemon run --log-file"));
+        assert!(task.contains("<Command>C:\\Apps\\cww-agent.exe</Command>"));
+        assert!(
+            task.contains("<Arguments>--log-file &quot;C:\\Logs\\daemon.log&quot;</Arguments>")
+        );
         assert!(task.contains("<RunLevel>LeastPrivilege</RunLevel>"));
     }
 }

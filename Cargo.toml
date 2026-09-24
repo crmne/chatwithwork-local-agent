@@ -21,6 +21,11 @@ path = "src/lib.rs"
 name = "cww"
 path = "src/main.rs"
 
+# The daemon without a console window, for the Windows logon task.
+[[bin]]
+name = "cww-agent"
+path = "src/agent.rs"
+
 [dependencies]
 # Runtime, CLI, serialization
 anyhow = "1"

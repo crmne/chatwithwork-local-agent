@@ -42,6 +42,14 @@ struct Daemon {
     shutdown: CancellationToken,
 }
 
+/// `cww daemon run` (and `cww-agent` on Windows): set up logging, then run
+/// the daemon on a fresh runtime until a signal or a `shutdown` request.
+pub fn run_foreground(paths: Paths, log_file: Option<&std::path::Path>) -> Result<()> {
+    crate::logging::init(log_file)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(run(paths, CancellationToken::new(), true))
+}
+
 /// Run the daemon until `shutdown` is cancelled (or SIGINT/SIGTERM when
 /// `handle_signals` is set).
 pub async fn run(paths: Paths, shutdown: CancellationToken, handle_signals: bool) -> Result<()> {

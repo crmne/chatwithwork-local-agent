@@ -159,15 +159,7 @@ fn run(cli: Cli) -> Result<()> {
             json,
         } => log(&paths, lines, follow, json)?,
         Command::Daemon { command } => match command {
-            DaemonCommand::Run { log_file } => {
-                init_logging(log_file.as_deref())?;
-                let runtime = tokio::runtime::Runtime::new()?;
-                runtime.block_on(daemon::run(
-                    paths,
-                    tokio_util::sync::CancellationToken::new(),
-                    true,
-                ))?;
-            }
+            DaemonCommand::Run { log_file } => daemon::run_foreground(paths, log_file.as_deref())?,
             DaemonCommand::Stop => {
                 match control::request(&paths.socket_path(), ControlRequest::Shutdown)? {
                     Some(_) => println!("The daemon is stopping."),
@@ -411,33 +403,4 @@ fn offer_documents(paths: &Paths) -> Result<()> {
             follow_symlinks: false,
         },
     )
-}
-
-fn init_logging(file: Option<&std::path::Path>) -> Result<()> {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_env("CWW_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false);
-    match file {
-        None => builder.init(),
-        Some(path) => {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            // Keep one previous log; the daemon logs little.
-            if std::fs::metadata(path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
-                let _ = std::fs::rename(path, path.with_extension("log.1"));
-            }
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
-            builder
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(file))
-                .init();
-        }
-    }
-    Ok(())
 }
