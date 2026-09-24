@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::Value;
 
 use cww::config::{Config, DEFAULT_SERVER};
@@ -12,12 +12,13 @@ use cww::{audit, auth, daemon, service};
 
 /// Chat with Work Local Agent.
 ///
-/// Shares folders you choose with Chat with Work, read-only.
+/// Shares folders you choose with Chat with Work, read-only. Without a
+/// command, opens the terminal UI.
 #[derive(Parser)]
 #[command(name = "cww", version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -67,6 +68,8 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Open the terminal UI (the default when run in a terminal).
+    Tui,
 }
 
 #[derive(Subcommand)]
@@ -123,7 +126,17 @@ fn main() {
 
 fn run(cli: Cli) -> Result<()> {
     let paths = Paths::from_env()?;
-    match cli.command {
+    let Some(command) = cli.command else {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+            return cww::tui::run(paths);
+        }
+        // Piped into `head`, a broken pipe isn't worth an error.
+        let _ = Cli::command().print_help();
+        return Ok(());
+    };
+    match command {
+        Command::Tui => cww::tui::run(paths)?,
         Command::Login { server, name } => {
             let options = auth::LoginOptions { name, store: None };
             let paired = auth::login(&paths, &server, options, |line| println!("{line}"))?;

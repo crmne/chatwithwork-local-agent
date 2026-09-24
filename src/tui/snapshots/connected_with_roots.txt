@@ -1,0 +1,30 @@
+ Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
+                               │────────────────────────────────────────────────────────────────────
+ CHATS                         │
+ In the browser for now        │
+                               │
+ ━━ ROOTS                    2 │
+ ▌● Work docs                  │
+    work-docs · 1,532 files    │
+  ⠋ Projects                   │
+    projects · indexing 214    │
+                               │
+                               │              Chat isn't available in the terminal yet
+                               │
+                               │    Chat with Work has no chat API for it. Your files are shared;
+                               │                       chat in the browser at
+                               │                   https://chatwithwork.com/chats
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │────────────────────────────────────────────────────────────────────
+ DAEMON                        │  LIVE      ● search "budget" → 3 hits · 2s ago
+ ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
+   chatwithwork.com · #42      │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
+   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
+ ↑↓ select   a add folder   d remove   l audit log   p pause   ? help   q quit

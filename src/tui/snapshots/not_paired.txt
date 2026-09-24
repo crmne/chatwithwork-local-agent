@@ -1,0 +1,30 @@
+ Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                    ○ NOT PAIRED
+                               │────────────────────────────────────────────────────────────────────
+ CHATS                         │
+ In the browser for now        │  ╭──────────────────────────────────────────────────────────────╮
+                               │  │ ● This computer isn't paired                                 │
+ ━━ ROOTS                    1 │  │ Chat with Work can't search your folders until you pair it.  │
+ ▌● Work docs                  │  │ In another terminal, run:                                    │
+    work-docs · 1,532 files    │  │   $ cww login                                                │
+                               │  ╰──────────────────────────────────────────────────────────────╯
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │              Chat isn't available in the terminal yet
+                               │
+                               │    Chat with Work has no chat API for it. Chat in the browser at
+                               │                   https://chatwithwork.com/chats
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │────────────────────────────────────────────────────────────────────
+ DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
+ ○ not paired      since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
+   $ cww login                 │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
+   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
+ ↑↓ select   a add folder   d remove   l audit log   p pause   ? help   q quit

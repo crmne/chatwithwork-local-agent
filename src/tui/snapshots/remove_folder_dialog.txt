@@ -1,0 +1,30 @@
+ Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
+                               │────────────────────────────────────────────────────────────────────
+ CHATS                         │
+ In the browser for now        │
+                               │
+ ━━ ROOTS                    1 │
+ ▌● Work docs                  │
+    work-docs · 1,532 files    │
+                               │
+                               │
+                ╭ STOP SHARING ────────────────────────────────────────────────────╮
+                │ Stop sharing Work docs?                                          │et
+                │                                                                  │
+                │ Chat with Work can no longer search or read /home/carmine/Work   │s are shared;
+                │ docs, and its entries leave the index. The folder itself isn't   │
+                │ touched.                                                         │
+                │                                                                  │
+                │ y stop sharing   n keep it                                       │
+                ╰──────────────────────────────────────────────────────────────────╯
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │────────────────────────────────────────────────────────────────────
+ DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
+ ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
+   chatwithwork.com · #42      │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
+   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
+ y stop sharing   n keep it
