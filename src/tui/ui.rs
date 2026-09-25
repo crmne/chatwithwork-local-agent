@@ -904,7 +904,7 @@ fn conversation(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: Of
                 theme.signal_ink(Signal::Attention),
             ));
         }
-        Following::Refused => {
+        Following::Refused | Following::Unsupported => {
             meta.push(Span::raw("  "));
             meta.push(Span::styled(
                 "not live",

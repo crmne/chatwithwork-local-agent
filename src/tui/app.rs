@@ -349,7 +349,10 @@ pub enum Following {
     Live,
     /// The daemon lost Chat with Work for a moment and keeps trying.
     Offline,
+    /// The server refused to follow this chat.
     Refused,
+    /// The daemon's connection to the server can't follow chats.
+    Unsupported,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -665,6 +668,13 @@ impl App {
                     }
                     effects.push(Effect::Chat(ChatCommand::List));
                     if let Some(open) = self.chat.open {
+                        if matches!(
+                            self.chat.following,
+                            Following::Refused | Following::Unsupported
+                        ) {
+                            self.chat.following = Following::Starting;
+                            effects.push(Effect::Chat(ChatCommand::Follow(Some(open))));
+                        }
                         effects.extend(self.refresh_chat(open));
                     }
                 }
@@ -1251,9 +1261,13 @@ impl App {
                 self.chat.list = list;
                 let len = self.chat.visible().len();
                 self.chat.selected = self.chat.selected.min(len);
-                // Chats are back (allowed again, say): follow the open one again.
+                // Chats are back (allowed again, say): follow the open one
+                // again, unless that's already underway. A list that works
+                // after a refusal leaves it be: the refusal was about the
+                // chat, and following again would only be refused again.
                 if let Some(open) = self.chat.open
-                    && (!was_ready || self.chat.following == Following::Refused)
+                    && !was_ready
+                    && self.chat.following != Following::Starting
                 {
                     self.chat.following = Following::Starting;
                     let mut effects = vec![Effect::Chat(ChatCommand::Follow(Some(open)))];
@@ -1378,10 +1392,12 @@ impl App {
                     Live::Refused => {
                         self.chat.following = Following::Refused;
                         if self.chat.ready() {
-                            self.chat.access = Access::Loading;
                             return vec![Effect::Chat(ChatCommand::List)];
                         }
                     }
+                    // Not a refusal, just a connection that can't follow:
+                    // nothing the list would explain.
+                    Live::Unsupported => self.chat.following = Following::Unsupported,
                 }
             }
             ChatMsg::FollowFailed { chat, failure } => {

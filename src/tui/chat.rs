@@ -183,6 +183,9 @@ pub enum Live {
     Watching,
     /// The server won't let this computer follow it.
     Refused,
+    /// The daemon's connection can't follow chats at all (it speaks bare
+    /// MCP): nothing to retry until it reconnects.
+    Unsupported,
     /// No connection to the server right now; the daemon keeps trying.
     Offline,
 }
@@ -198,7 +201,8 @@ impl Live {
             },
             "progress" => Self::Progress(update["text"].as_str()?.to_string()),
             "watching" => Self::Watching,
-            "refused" | "unsupported" => Self::Refused,
+            "refused" => Self::Refused,
+            "unsupported" => Self::Unsupported,
             "offline" => Self::Offline,
             _ => Self::Changed,
         })
@@ -360,5 +364,9 @@ mod tests {
         );
         assert_eq!(Live::from_update(&json!({})), Some(Live::Changed));
         assert_eq!(Live::from_update(&json!({ "type": "chunk" })), None);
+        assert_eq!(
+            Live::from_update(&json!({ "type": "unsupported" })),
+            Some(Live::Unsupported)
+        );
     }
 }

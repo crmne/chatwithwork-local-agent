@@ -269,7 +269,7 @@ Each event is one line with an `event` field.
 {"event": "audit", "entry": { "ts": "2026-09-25T08:14:05Z", "event": "tool", "tool": "read", "path": "work-docs:plans/q3.md", "decision": "denied", "code": "denied", "reason": "this path is on the deny list (.env*)" }}
 ```
 
-**`chat`**: an update of the followed chat. `update.type` is `chunk` (answer text as it's written: `message_id`, `text`), `progress` (what the running step does: `text`), `changed` (anything else: read the chat again), or a note from the daemon: `watching` (the server follows it now, so catch up), `offline` (no connection to the server; the daemon keeps trying and says `watching` again later) or `refused` (the server won't let this computer follow it).
+**`chat`**: an update of the followed chat. `update.type` is `chunk` (answer text as it's written: `message_id`, `text`), `progress` (what the running step does: `text`), `changed` (anything else: read the chat again), or a note from the daemon: `watching` (the server follows it now, so catch up), `offline` (no connection to the server; the daemon keeps trying and says `watching` again later), `refused` (the server won't let this computer follow it), or `unsupported` (the daemon's connection speaks bare MCP, which can't follow chats).
 
 ```json
 {"event": "chat", "chat": "42", "update": { "type": "chunk", "message_id": 5, "text": "The Q3 budget is " }}

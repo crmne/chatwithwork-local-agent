@@ -1057,6 +1057,94 @@ fn chats_taken_back_show_at_once_and_come_back_live() {
 }
 
 #[test]
+fn a_chat_refused_while_chats_still_work_is_not_followed_in_a_loop() {
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("idle")),
+    }));
+    assert_eq!(
+        app.update(Msg::Chat(ChatMsg::Live {
+            chat: 42,
+            live: Live::Refused
+        })),
+        vec![Effect::Chat(ChatCommand::List)]
+    );
+    assert!(app.chat.ready(), "still usable while the list says why");
+    // The list works: the refusal was about this chat. Following it again
+    // would only be refused again.
+    assert!(
+        app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list()))))
+            .is_empty()
+    );
+    assert_eq!(app.chat.following, Following::Refused);
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("not live"), "{screen}");
+
+    // r tries again, once.
+    app.update(key(KeyCode::Esc));
+    let effects = app.update(char('r'));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Follow(Some(42)))));
+    assert_eq!(app.chat.following, Following::Starting);
+}
+
+#[test]
+fn a_connection_that_cant_follow_chats_asks_nothing_more() {
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("idle")),
+    }));
+    assert!(
+        app.update(Msg::Chat(ChatMsg::Live {
+            chat: 42,
+            live: Live::Unsupported
+        }))
+        .is_empty()
+    );
+    assert_eq!(app.chat.following, Following::Unsupported);
+    assert!(app.chat.ready());
+    assert!(
+        app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list()))))
+            .is_empty()
+    );
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("not live"), "{screen}");
+}
+
+#[test]
+fn a_reconnect_follows_the_open_chat_once() {
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("idle")),
+    }));
+    app.update(Msg::Chat(ChatMsg::Listed(Err(Failure::new(
+        "daemon_stopped",
+        "Gone.",
+    )))));
+    let effects = app.update(Msg::Daemon(DaemonMsg::Status(Box::new(status(
+        "connected",
+        vec![],
+    )))));
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|e| **e == Effect::Chat(ChatCommand::Follow(Some(42))))
+            .count(),
+        1
+    );
+    assert!(
+        !app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list()))))
+            .contains(&Effect::Chat(ChatCommand::Follow(Some(42)))),
+        "already following"
+    );
+}
+
+#[test]
 fn snapshot_chat_search() {
     let mut app = app();
     chats_ready(&mut app);
