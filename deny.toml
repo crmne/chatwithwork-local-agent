@@ -45,6 +45,21 @@ confidence-threshold = 0.9
 crate = "option-ext"
 allow = ["MPL-2.0"]
 
+# The desktop app's clipboard on Windows (arboard) is BSL-1.0: permissive,
+# no notice needed in binaries.
+[[licenses.exceptions]]
+crate = "clipboard-win"
+allow = ["BSL-1.0"]
+
+[[licenses.exceptions]]
+crate = "error-code"
+allow = ["BSL-1.0"]
+
+# egui's built-in fonts carry the fonts' own licenses.
+[[licenses.exceptions]]
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
 [[licenses.clarify]]
 # ring's license file combines ISC, MIT and OpenSSL-derived terms.
 crate = "ring"
@@ -54,6 +69,8 @@ license-files = []
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# cww-app isn't published; its path dependency on cww is the workspace's own.
+allow-wildcard-paths = true
 highlight = "all"
 # Native TLS and OpenSSL are never allowed: TLS is rustls with ring only.
 deny = [
@@ -67,4 +84,10 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# The desktop app's forks, pinned in Cargo.toml: egui and winit (patched
+# until upstream releases the fixes) and fastframe's text rendering.
+allow-git = [
+    "https://github.com/crmne/egui",
+    "https://github.com/crmne/fastframe",
+    "https://github.com/crmne/winit",
+]

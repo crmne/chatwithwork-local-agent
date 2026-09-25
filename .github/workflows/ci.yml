@@ -93,6 +93,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # Every crate, the desktop app's dependencies included; by default
+          # only the root package's are checked.
+          arguments: --workspace --all-features
 
   nix:
     name: Nix package (${{ matrix.system }})
