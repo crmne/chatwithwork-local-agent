@@ -67,21 +67,61 @@ The same secrets as ZapFast and TonePush. `native-packages notarize-macos` signs
 - `APPLE_SIGNING_IDENTITY`: `Developer ID Application: PlentyLabs UG (haftungsbeschrankt) & Co. KG (JPL7999US3)`.
 - `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`: Apple ID email, Team ID and an app-specific password, for notarization.
 
-The `.pkg` needs a Developer ID **Installer** certificate as well, which a Developer ID Application certificate doesn't cover. With it, `pkg.sh` signs the package, notarizes it and staples the ticket, so it installs offline too:
+The `.pkg` needs a Developer ID **Installer** certificate as well, which a Developer ID Application certificate doesn't cover. With it, `pkg.sh` signs the package, notarizes it and staples the ticket, so it installs offline too. Without it the `.pkg` is built unsigned, which Gatekeeper refuses to open with a double-click; the Homebrew formula and the one-line installer don't need it.
 
-- `APPLE_INSTALLER_CERTIFICATE_P12`, `APPLE_INSTALLER_CERTIFICATE_PASSWORD`
-- `APPLE_INSTALLER_SIGNING_IDENTITY`: `Developer ID Installer: PlentyLabs UG (haftungsbeschrankt) & Co. KG (JPL7999US3)`
+#### Getting the Developer ID Installer certificate
 
-Without them the `.pkg` is built unsigned, which Gatekeeper refuses to open with a double-click.
+Only the Apple Developer account holder can create Developer ID certificates.
+
+1. On a Mac, open Keychain Access → Certificate Assistant → *Request a Certificate From a Certificate Authority*. Enter the account holder's email, choose *Saved to disk*, and save the `.certSigningRequest`.
+2. At [developer.apple.com/account/resources/certificates](https://developer.apple.com/account/resources/certificates/add), choose **Developer ID Installer**, keep the *G2 Sub-CA* profile, upload the request and download the `.cer`.
+3. Double-click the `.cer` so Keychain Access pairs it with the private key from step 1. It appears under *My Certificates* as `Developer ID Installer: PlentyLabs UG (haftungsbeschrankt) & Co. KG (JPL7999US3)`.
+4. Right-click that certificate → *Export*, save as `.p12` with a strong password. Keep the `.p12` and its password in the 1Password item "Apple Notarization", next to the Application certificate.
+5. Set the secrets:
+
+   ```sh
+   base64 -i developer-id-installer.p12 | gh secret set APPLE_INSTALLER_CERTIFICATE_P12
+   gh secret set APPLE_INSTALLER_CERTIFICATE_PASSWORD   # paste the export password
+   gh secret set APPLE_INSTALLER_SIGNING_IDENTITY --body "Developer ID Installer: PlentyLabs UG (haftungsbeschrankt) & Co. KG (JPL7999US3)"
+   ```
+
+6. Run `gh workflow run release.yml` and check that the `macos` job signs, notarizes and staples the `.pkg`. `pkgutil --check-signature` and `spctl -a -vv -t install` on the downloaded artifact should both report the Developer ID Installer identity.
+
+The notarization secrets (`APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`) are shared with the binary and need no change.
 
 ### Windows
 
-Unsigned Windows binaries that register a logon task are what Microsoft Defender's behaviour models look for, and SmartScreen warns about any unsigned MSI. Sign releases before publishing them to WinGet. Either:
+Unsigned Windows binaries that register a logon task are what Microsoft Defender's behaviour models look for, and SmartScreen warns about any unsigned MSI a browser downloaded. `cww.exe`, `cww-agent.exe` and the MSI are all signed with SHA-256 and an RFC 3161 timestamp once one of these is set up. Sign releases before publishing them to WinGet.
 
-- **Azure Artifact Signing** (formerly Trusted Signing; recommended, about $10 a month): `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` (an app registration with the *Artifact Signing Certificate Profile Signer* role), `AZURE_SIGNING_ENDPOINT` (for example `https://weu.codesigning.azure.net/`), `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE`.
-- **A code signing certificate** (OV or EV, exported with its key): `WINDOWS_CERTIFICATE_PFX` (base64) and `WINDOWS_CERTIFICATE_PASSWORD`.
+#### What SmartScreen needs
 
-`cww.exe`, `cww-agent.exe` and the MSI are all signed with SHA-256 and an RFC 3161 timestamp.
+- **A signature.** Unsigned downloads always get the full-screen warning.
+- **Reputation for the publisher.** A signature alone doesn't silence SmartScreen: since 2024 no certificate type, EV included, is trusted instantly. Reputation builds as people download and run releases signed by the same publisher identity, so keep signing every release with the same identity and don't rotate it needlessly.
+- The warning only applies to files with the Mark of the Web, meaning downloaded by a browser. `winget install`, Scoop and the PowerShell one-liner don't trigger it; Defender still scans them.
+
+#### Option A: Azure Artifact Signing (formerly Trusted Signing)
+
+About $10 a month, keys in Microsoft's HSMs, and `release.yml` already supports it. Eligibility for Public Trust:
+
+- Organizations in the EU (and the US, Canada, UK and others) with **at least three years of verifiable tax history**. PlentyLabs qualifies only if it has that history.
+- Individuals only in the US and Canada.
+
+Steps:
+
+1. In the Azure portal, create an *Artifact Signing account* in West Europe (endpoint `https://weu.codesigning.azure.net/`).
+2. Under *Identity validation*, start a **Public Trust** validation for the organization. Microsoft checks the registration and tax records, and one person completes an ID check with AU10TIX. It usually takes a few days.
+3. Create a *certificate profile* of type **Public Trust** using the validated identity.
+4. Create an app registration (Entra ID) with a client secret, and give it the **Artifact Signing Certificate Profile Signer** role on the account.
+5. Set the secrets: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE`.
+6. Run `gh workflow run release.yml` and check the Windows jobs report signed files (`Get-AuthenticodeSignature` on the MSI shows `Valid`).
+
+#### Option B: a certificate from a CA with cloud signing
+
+If the organization doesn't qualify for Option A, buy an **OV** code signing certificate for the organization (or for yourself as an individual) from a CA that offers cloud signing usable in CI, such as SSL.com (eSigner) or Certum (SimplySign). Since June 2023, publicly trusted code signing keys must live in a hardware or cloud HSM, so a new certificate can't be exported as a `.pfx`. The `WINDOWS_CERTIFICATE_PFX` path in `sign.ps1` only works for older exportable certificates. Using a cloud-signing CA needs a small change to `packaging/windows/sign.ps1` to call the CA's signing tool instead. EV costs more and no longer buys instant SmartScreen trust, so OV is enough.
+
+#### Option C: the Microsoft Store
+
+Individual developer accounts are free. Microsoft signs Store packages itself, so they never hit SmartScreen, and `winget install` can install from the Store. It needs an MSIX package with a full-trust startup task for the agent, which `cww.wxs` doesn't produce yet.
 
 ## Package managers
 
