@@ -38,6 +38,10 @@ enum Command {
         /// Print the approval link without opening a browser.
         #[arg(long)]
         no_browser: bool,
+        /// Print JSON lines for a program to read (the desktop app): the
+        /// code, then the outcome. Never asks anything.
+        #[arg(long)]
+        json: bool,
     },
     /// Forget the pairing on this computer. Revoke it in Settings too.
     Logout,
@@ -169,6 +173,13 @@ fn run(cli: Cli) -> Result<()> {
             server,
             name,
             no_browser,
+            json: true,
+        } => login_json(&paths, &server, name, !no_browser)?,
+        Command::Login {
+            server,
+            name,
+            no_browser,
+            json: false,
         } => {
             let options = auth::LoginOptions {
                 name,
@@ -421,6 +432,49 @@ fn pause(paths: &Paths, paused: bool) -> Result<()> {
 }
 
 /// Ask a running daemon to re-read the config.
+/// `cww login --json`: one JSON object per line on stdout. First
+/// `{"event":"code",...}` with what to show and open, then `{"event":"paired",...}`
+/// or `{"event":"error",...}`. The daemon is told to reload on success.
+fn login_json(paths: &Paths, server: &str, name: Option<String>, open: bool) -> Result<()> {
+    use std::sync::atomic::AtomicBool;
+
+    let emit = |value: Value| println!("{value}");
+    let options = auth::LoginOptions {
+        name,
+        store: None,
+        open_browser: false,
+    };
+    let result = auth::start_login(paths, server, options).and_then(|pending| {
+        let opened = open && pending.browser_url().is_some_and(cww::browser::open);
+        emit(serde_json::json!({
+            "event": "code",
+            "user_code": pending.user_code(),
+            "verification_uri": pending.verification_uri(),
+            "verification_uri_complete": pending.verification_uri_complete(),
+            "browser_url": pending.browser_url(),
+            "device_name": pending.device_name(),
+            "fingerprint": pending.fingerprint(),
+            "opened": opened,
+        }));
+        pending.wait(&AtomicBool::new(false))
+    });
+    match result {
+        Ok(paired) => {
+            let _ = control::request(&paths.socket_path(), ControlRequest::Reload);
+            emit(serde_json::json!({
+                "event": "paired",
+                "server": paired.url,
+                "device_id": paired.device_id,
+            }));
+            Ok(())
+        }
+        Err(e) => {
+            emit(serde_json::json!({ "event": "error", "error": format!("{e:#}") }));
+            std::process::exit(1);
+        }
+    }
+}
+
 fn notify_daemon(paths: &Paths, if_not_running: &str) {
     match control::request(&paths.socket_path(), ControlRequest::Reload) {
         Ok(Some(_)) => println!("The daemon picked up the change."),

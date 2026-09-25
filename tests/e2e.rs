@@ -1012,6 +1012,58 @@ async fn the_settings_app_manages_folders_over_the_control_channel() {
         .unwrap();
 }
 
+/// `cww login --json`, which the desktop app runs to pair: the code first,
+/// then the outcome, one JSON object per line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_json_reports_the_code_and_the_pairing() {
+    let fx = fixture();
+    let server = FakeServer::start().await;
+    let (base, origin) = (fx.base.join("cww"), server.origin.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_cww"))
+            .args([
+                "login",
+                "--json",
+                "--no-browser",
+                "--server",
+                &origin,
+                "--name",
+                "Test laptop",
+            ])
+            .env("CWW_HOME", base)
+            .env("CWW_SECRET_STORE", "file")
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<Value> = String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["event"], "code");
+    assert_eq!(lines[0]["user_code"], "WDJB-MJHT");
+    assert_eq!(lines[0]["device_name"], "Test laptop");
+    assert_eq!(
+        lines[0]["browser_url"],
+        json!(format!("{}/device", server.origin))
+    );
+    assert_eq!(lines[0]["opened"], false, "--no-browser");
+    assert_eq!(lines[1]["event"], "paired");
+    assert_eq!(lines[1]["device_id"], "42");
+    assert_eq!(
+        Config::load(&fx.paths).unwrap().server.unwrap().device_id,
+        "42"
+    );
+}
+
 #[cfg(unix)]
 fn assert_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;

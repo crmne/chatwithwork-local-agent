@@ -133,6 +133,15 @@ Re-reads `config.toml`: roots, deny list, limits and pairing. Answers `{"ok": tr
 
 There is no pairing request: pairing stores a new device key in the user's keychain, which the sandboxed daemon shouldn't do, so clients pair on their own side and then send `reload`. `cww login`, the terminal UI and the desktop app all do it the same way, with `cww::auth::start_login`: it asks the server for a code (PROTOCOL.md section 4), `PendingLogin::browser_url` gives the approval page to open (only a page on that server), and `PendingLogin::wait` polls until approval, then saves the key, the refresh credential and the server in `config.toml`. The daemon connects after the `reload`. To forget a pairing, clients call `cww::auth::logout` (like `cww logout`) and send `reload`.
 
+A program that isn't the `cww` binary, such as the desktop app, runs `cww login --json [--server URL] [--name NAME] [--no-browser]` instead, so the key is created by the same binary that later reads it (on macOS, a keychain item created by another program would make the daemon ask for permission). It prints one JSON object per line and never asks anything:
+
+```json
+{"event": "code", "user_code": "WDJB-MJHT", "verification_uri": "https://chatwithwork.com/device", "verification_uri_complete": "https://chatwithwork.com/device?user_code=WDJB-MJHT", "browser_url": "https://chatwithwork.com/device?user_code=WDJB-MJHT", "device_name": "carmine-mbp", "fingerprint": "3sQ2…", "opened": true}
+{"event": "paired", "server": "https://chatwithwork.com", "device_id": "42"}
+```
+
+or `{"event": "error", "error": "..."}` and exit status 1. `browser_url` is `null` unless the page is on the server being paired with. Like `cww login`, the command opens it in the browser unless `--no-browser` is given, and `opened` says whether it did. Killing the process cancels the pairing. It sends `reload` itself on success; `cww logout` forgets the pairing the same way.
+
 ### `roots_add`
 
 ```json
