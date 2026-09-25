@@ -1,0 +1,223 @@
+name: Desktop preview
+
+# Preview builds of the desktop app (cww-app) with the cww daemon, for trying
+# them by hand on macOS and Windows before the app is in the release
+# packaging. Publishes a GitHub prerelease named desktop-preview-<run>,
+# never marked latest. Its tag doesn't match v*, so release.yml and the
+# Homebrew, WinGet and AUR publishers never run for it.
+#
+# The push trigger only registers the workflow from this branch so it can
+# be dispatched; a push builds nothing.
+on:
+  workflow_dispatch:
+  push:
+    branches: [settings-app]
+    paths: [.github/workflows/desktop-preview.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-preview
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS universal
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-preview-macos
+
+      - name: Build both architectures
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --locked --release --target "$target" -p cww -p cww-app --bin cww --bin cww-app
+          done
+
+      - name: Universal binaries
+        run: |
+          mkdir -p universal
+          for bin in cww cww-app; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin" \
+              -output "universal/$bin"
+            lipo "universal/$bin" -verify_arch x86_64 arm64
+          done
+
+      - name: Import the Developer ID Application identity
+        run: |
+          keychain="$RUNNER_TEMP/cww-app.keychain-db"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/app.p12"
+          security import "$RUNNER_TEMP/app.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/app.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Bundle and sign the app
+        run: |
+          version="$(cargo pkgid -p cww-app | sed 's/.*[#@]//')-preview.${GITHUB_RUN_NUMBER}"
+          mkdir -p dist
+          CODESIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" packaging/macos/bundle.sh \
+            universal/cww-app universal/cww "dist/Chat with Work Local Agent.app" "$version"
+          app="dist/Chat with Work Local Agent.app"
+          codesign --display --verbose=2 "$app" 2>&1 | grep -q "flags=0x10000(runtime)"
+          codesign --display --verbose=2 "$app/Contents/MacOS/cww" 2>&1 | grep -q "flags=0x10000(runtime)"
+
+      - name: Notarize and staple the app
+        run: |
+          app="dist/Chat with Work Local Agent.app"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-app.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize-app.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+            --wait --timeout 30m --output-format json | tee "$RUNNER_TEMP/notary-app.json"
+          id=$(plutil -extract id raw "$RUNNER_TEMP/notary-app.json")
+          xcrun notarytool log "$id" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+            dist/notary-log-app.json
+          cat dist/notary-log-app.json
+          test "$(plutil -extract status raw "$RUNNER_TEMP/notary-app.json")" = Accepted
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+      - name: Disk image and zip
+        run: |
+          app="dist/Chat with Work Local Agent.app"
+          dmg="dist/cww-app-macos-universal.dmg"
+          ditto -c -k --keepParent "$app" dist/cww-app-macos-universal.zip
+          staging="$RUNNER_TEMP/dmg"
+          mkdir -p "$staging"
+          ditto "$app" "$staging/Chat with Work Local Agent.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Chat with Work Local Agent" -srcfolder "$staging" \
+            -fs HFS+ -format UDZO -ov "$dmg"
+          codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+            --wait --timeout 30m --output-format json | tee "$RUNNER_TEMP/notary-dmg.json"
+          id=$(plutil -extract id raw "$RUNNER_TEMP/notary-dmg.json")
+          xcrun notarytool log "$id" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+            dist/notary-log-dmg.json
+          cat dist/notary-log-dmg.json
+          test "$(plutil -extract status raw "$RUNNER_TEMP/notary-dmg.json")" = Accepted
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          rm -rf "$app"
+          ls -la dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          path: dist/
+          if-no-files-found: error
+
+  windows:
+    name: Windows (${{ matrix.arch }})
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    # An uncached release build with LTO takes more than 15 minutes here.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          # Cross-compiled from x64; ring builds its assembly with clang.
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-preview-${{ matrix.target }}
+
+      - run: cargo build --locked --release --target ${{ matrix.target }} -p cww -p cww-app --bin cww --bin cww-agent --bin cww-app
+
+      - name: Package
+        shell: bash
+        run: |
+          name="cww-app-windows-${{ matrix.arch }}"
+          release="target/${{ matrix.target }}/release"
+          mkdir -p "dist/$name"
+          cp "$release/cww-app.exe" "$release/cww.exe" "$release/cww-agent.exe" "dist/$name/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          (cd dist && 7z a "$name.zip" "$name")
+          rm -rf "dist/$name"
+          7z l "dist/$name.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  prerelease:
+    name: GitHub prerelease
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          rm -f notary-log-*.json
+          sha256sum -- * > checksums.txt
+          cat checksums.txt
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="desktop-preview-${GITHUB_RUN_NUMBER}"
+          {
+            echo "Preview build of the desktop app from \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA::12} (run ${GITHUB_RUN_ID})."
+            echo
+            cat packaging/release-notes/desktop-preview.md
+          } > notes.md
+          gh release create "$tag" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Desktop app preview ${GITHUB_RUN_NUMBER}" \
+            --notes-file notes.md \
+            --prerelease \
+            --latest=false
