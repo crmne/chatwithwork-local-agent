@@ -288,6 +288,9 @@ jobs:
     needs: [release-source, build, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Publishing waits for the maintainer's approval, and only this job can
+    # read the release signing key (v* tags only).
+    environment: release-signing
     permissions:
       contents: write
     steps:
@@ -307,6 +310,22 @@ jobs:
           cd dist
           sha256sum -- * > checksums.txt
           cat checksums.txt
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+      # Sign checksums.txt (checksums.txt.sig), then check the signature and
+      # every listed file against the committed key. The desktop app's updater
+      # carries the key and refuses a release without a valid signature.
+      - name: Sign checksums
+        env:
+          CWW_UPDATE_SIGNING_KEY: ${{ secrets.CWW_UPDATE_SIGNING_KEY }}
+        run: |
+          gem install native-packages --version 0.7.0 --no-document
+          native-packages sign-checksums dist/checksums.txt \
+            --public-key app/assets/update-public-key.hex \
+            --key-env CWW_UPDATE_SIGNING_KEY
+          native-packages verify-checksums dist/checksums.txt \
+            --public-key app/assets/update-public-key.hex
       # Publish the reviewed notes committed before the tag, never a
       # generated summary. A stable tag without them stops here; a
       # prerelease without them gets a short placeholder.
