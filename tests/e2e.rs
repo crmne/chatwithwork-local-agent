@@ -1142,6 +1142,200 @@ async fn a_proxy_that_refuses_the_credentials_is_reported() {
     assert!(good.connect("127.0.0.1", port).await.is_ok());
 }
 
+async fn control_error(paths: &Paths, request: ControlRequest) -> String {
+    let socket = paths.socket_path();
+    tokio::task::spawn_blocking(move || control::request(&socket, request))
+        .await
+        .unwrap()
+        .expect_err("the request fails")
+        .to_string()
+}
+
+/// Follows `watch` on a thread, the way the desktop app does.
+struct Watcher {
+    lines: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Watcher {
+    fn start(paths: &Paths) -> Self {
+        let socket = paths.socket_path();
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let client = control::Client::connect(&socket).unwrap().unwrap();
+            for event in client.subscribe(&[control::Topic::Status]).unwrap() {
+                let mut event = event.unwrap();
+                if tx.send(event["status"].take()).is_err() {
+                    return;
+                }
+            }
+        });
+        Self { lines }
+    }
+
+    /// Wait for a status line that satisfies `check`.
+    async fn until(&mut self, what: &str, check: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut last = Value::Null;
+        while Instant::now() < deadline {
+            match self.lines.try_recv() {
+                Ok(status) if check(&status) => return status,
+                Ok(status) => last = status,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("watch ended: {e}; last status {last}"),
+            }
+        }
+        panic!("never saw {what}; last status {last}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_settings_app_manages_folders_over_the_control_channel() {
+    let fx = fixture();
+    // Not paired yet; secrets go to the file store, not the test machine's keychain.
+    Config {
+        secret_store: Some("file".into()),
+        ..Config::default()
+    }
+    .save(&fx.paths)
+    .unwrap();
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fx.paths.socket_path().exists() {
+        assert!(Instant::now() < deadline, "the daemon never listened");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut watch = Watcher::start(&fx.paths);
+    let first = watch.until("the first status", |_| true).await;
+    assert_eq!(first["connection"]["connection"], "not_paired", "{first}");
+    assert_eq!(first["roots"], json!([]));
+
+    // Share a folder; the watch reports it and its first index pass.
+    let docs = fx.base.join("work/docs");
+    let added = control(
+        &fx.paths,
+        ControlRequest::RootsAdd {
+            path: docs.clone(),
+            label: Some("Docs".into()),
+            i_know: false,
+            follow_symlinks: false,
+        },
+    )
+    .await;
+    assert_eq!(added["root"]["id"], "docs", "{added}");
+    let ready = watch
+        .until("the index to be ready", |s| {
+            s["roots"][0]["index"] == "ready"
+        })
+        .await;
+    assert_eq!(ready["roots"][0]["label"], "Docs");
+    assert_eq!(ready["roots"][0]["local_path"], json!(docs));
+    assert!(
+        ready["roots"][0]["indexed_files"].as_u64().unwrap() >= 2,
+        "{ready}"
+    );
+    assert_eq!(Config::load(&fx.paths).unwrap().roots.len(), 1, "saved");
+
+    // Relabel it, and refuse what `cww roots add` refuses.
+    control(
+        &fx.paths,
+        ControlRequest::RootsLabel {
+            root: "docs".into(),
+            label: " Work docs ".into(),
+        },
+    )
+    .await;
+    watch
+        .until("the new label", |s| s["roots"][0]["label"] == "Work docs")
+        .await;
+    let empty = control_error(
+        &fx.paths,
+        ControlRequest::RootsLabel {
+            root: "docs".into(),
+            label: "  ".into(),
+        },
+    )
+    .await;
+    assert!(empty.contains("can't be empty"), "{empty}");
+    let ssh = fx.base.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let denied = control_error(
+        &fx.paths,
+        ControlRequest::RootsAdd {
+            path: ssh,
+            label: None,
+            i_know: true,
+            follow_symlinks: false,
+        },
+    )
+    .await;
+    assert!(denied.contains("deny list"), "{denied}");
+    let again = control_error(
+        &fx.paths,
+        ControlRequest::RootsAdd {
+            path: docs.clone(),
+            label: None,
+            i_know: false,
+            follow_symlinks: false,
+        },
+    )
+    .await;
+    assert!(again.contains("already shared"), "{again}");
+
+    // The deny list in effect, for the settings window.
+    let deny = control(&fx.paths, ControlRequest::Deny).await;
+    let builtin: Vec<&str> = deny["builtin"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(
+        builtin.contains(&".ssh") && builtin.contains(&".env*"),
+        "{deny}"
+    );
+    assert!(
+        deny["own_dirs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(fx.paths.config_dir)),
+        "{deny}"
+    );
+
+    // Pause and resume show up in the status and the audit log.
+    control(&fx.paths, ControlRequest::Pause).await;
+    watch.until("paused", |s| s["paused"] == true).await;
+    control(&fx.paths, ControlRequest::Resume).await;
+    watch.until("resumed", |s| s["paused"] == false).await;
+    let log = control(&fx.paths, ControlRequest::AuditTail { lines: Some(2) }).await;
+    let events: Vec<&str> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(events, ["paused", "resumed"], "{log}");
+
+    control(
+        &fx.paths,
+        ControlRequest::RootsRemove {
+            root: "docs".into(),
+        },
+    )
+    .await;
+    watch.until("no roots", |s| s["roots"] == json!([])).await;
+    assert!(Config::load(&fx.paths).unwrap().roots.is_empty());
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+}
+
 #[cfg(unix)]
 fn assert_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;

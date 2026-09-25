@@ -131,6 +131,10 @@ While paused, every tool call from Chat with Work is refused with the `paused` e
 
 Re-reads `config.toml`: roots, deny list, limits and pairing. Answers `{"ok": true}`. Use it after editing the file by hand; the other requests reload on their own.
 
+### Pairing
+
+There is no pairing request: pairing stores a new device key in the user's keychain, which the sandboxed daemon shouldn't do, so clients pair on their own side and then send `reload`. `cww login`, the terminal UI and the desktop app all do it the same way, with `cww::auth::start_login`: it asks the server for a code (PROTOCOL.md section 4), `PendingLogin::browser_url` gives the approval page to open (only a page on that server), and `PendingLogin::wait` polls until approval, then saves the key, the refresh credential and the server in `config.toml`. The daemon connects after the `reload`. To forget a pairing, clients call `cww::auth::logout` (like `cww logout`) and send `reload`.
+
 ### `roots_add`
 
 ```json
@@ -177,6 +181,34 @@ The rules are the same as `cww roots add`. Errors include: the folder doesn't ex
 ```
 
 What to offer on first run: the user's Documents folder (the XDG user directory on Linux, `~/Documents` on macOS, the Documents known folder on Windows, which may be redirected to OneDrive). **Nothing is shared by this request.** Clients must ask the user and send `roots_add` only after an explicit yes.
+
+### `roots_label`
+
+```json
+{"cmd": "roots_label", "root": "documents", "label": "Team documents"}
+```
+
+Changes the label Chat with Work sees. `root` is an ID; `label` is 1 to 80 characters after trimming. The ID stays the same, so paths the server already knows keep working. Answers with the updated `root` and writes a `root_labeled` audit entry.
+
+### `deny`
+
+```json
+{"cmd": "deny"}
+```
+
+```json
+{
+  "ok": true,
+  "builtin": [".ssh", ".gnupg", ".env*", "*.pem", "…"],
+  "extra": ["*.secret"],
+  "removed": ["*.key"],
+  "own_dirs": ["/home/carmine/.config/cww", "…"],
+  "allow_hardlinks": false,
+  "config_file": "/home/carmine/.config/cww/config.toml"
+}
+```
+
+The deny list in effect, for clients to show: `builtin` is the built-in list minus the patterns under `[deny] remove`, `extra` the patterns under `[deny] extra`, and `own_dirs` cww's own directories, which are always denied. The list can only be changed by editing `config.toml`; there is deliberately no request for it.
 
 ### `audit_tail`
 
@@ -290,7 +322,7 @@ The daemon never polls to produce events, and a client that waits on a subscript
 | Field | Present | Meaning |
 |---|---|---|
 | `ts` | always | RFC 3339, UTC. |
-| `event` | always | `tool` for a tool call. Daemon events: `started`, `stopped`, `connected`, `disconnected`, `revoked`, `paused`, `resumed`, `reloaded`, `root_added`, `root_removed`, `shutdown_requested`, `restarting` (to widen the sandbox for a new folder). |
+| `event` | always | `tool` for a tool call. Daemon events: `started`, `stopped`, `connected`, `disconnected`, `revoked`, `paused`, `resumed`, `reloaded`, `root_added`, `root_removed`, `root_labeled`, `shutdown_requested`, `restarting` (to widen the sandbox for a new folder). |
 | `tool` | tool calls | `roots`, `search`, `list`, `read`, or an unknown name the server tried. |
 | `decision` | tool calls | `allowed`, `denied` or `error`. |
 | `path`, `query` | when given | The tool path (`root:relative`) or search query, truncated. |
