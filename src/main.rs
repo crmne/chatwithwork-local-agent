@@ -35,6 +35,9 @@ enum Command {
         /// Name shown in Settings (defaults to the hostname).
         #[arg(long)]
         name: Option<String>,
+        /// Print the approval link without opening a browser.
+        #[arg(long)]
+        no_browser: bool,
     },
     /// Forget the pairing on this computer. Revoke it in Settings too.
     Logout,
@@ -162,8 +165,16 @@ fn run(cli: Cli) -> Result<()> {
     };
     match command {
         Command::Tui => cww::tui::run(paths)?,
-        Command::Login { server, name } => {
-            let options = auth::LoginOptions { name, store: None };
+        Command::Login {
+            server,
+            name,
+            no_browser,
+        } => {
+            let options = auth::LoginOptions {
+                name,
+                store: None,
+                open_browser: !no_browser,
+            };
             let paired = auth::login(&paths, &server, options, |line| println!("{line}"))?;
             println!();
             println!("Paired with {} as device {}.", paired.url, paired.device_id);

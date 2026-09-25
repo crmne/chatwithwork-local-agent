@@ -49,6 +49,8 @@ pub struct LoginOptions {
     pub name: Option<String>,
     /// Where to keep the secrets (defaults to the keychain if it works).
     pub store: Option<SecretStore>,
+    /// Open the approval page in the default browser.
+    pub open_browser: bool,
 }
 
 /// A pairing started with [`start_login`], waiting for the user to approve
@@ -165,7 +167,7 @@ impl PendingLogin {
 /// Start pairing this computer with a server: create a key and ask the
 /// server for a code. [`PendingLogin::wait`] finishes it.
 pub fn start_login(paths: &Paths, server: &str, options: LoginOptions) -> Result<PendingLogin> {
-    let LoginOptions { name, store } = options;
+    let LoginOptions { name, store, .. } = options;
     let server = ServerUrl::parse(server)?;
     let client = AuthClient::new(server.clone());
     let key = DeviceKey::generate()?;
@@ -194,6 +196,7 @@ pub fn login(
     options: LoginOptions,
     mut say: impl FnMut(&str),
 ) -> Result<ServerConfig> {
+    let open_browser = options.open_browser;
     let pending = start_login(paths, server, options)?;
     say(&format!(
         "To connect \"{}\" to Chat with Work:",
@@ -208,6 +211,9 @@ pub fn login(
     }
     say("");
     say(&format!("Key fingerprint: {}", pending.fingerprint()));
+    if open_browser && pending.browser_url().is_some_and(crate::browser::open) {
+        say("Opened the approval page in your browser.");
+    }
     say("Waiting for approval...");
     pending.wait(&AtomicBool::new(false))
 }

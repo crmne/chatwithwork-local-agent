@@ -788,6 +788,7 @@ async fn pairs_with_the_device_flow() {
         let options = cww::auth::LoginOptions {
             name: Some("Test laptop".into()),
             store: Some(SecretStore::File(paths.secrets_file())),
+            ..Default::default()
         };
         let result = cww::auth::login(&paths, &origin, options, |line| said.push(line.to_string()));
         (result, said)
