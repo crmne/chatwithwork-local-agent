@@ -92,6 +92,7 @@ fn status(connection: &str, roots: Vec<RootState>) -> DaemonStatus {
         paired: connection != "not_paired",
         server: (connection != "not_paired").then(|| "https://chatwithwork.com".into()),
         device_id: (connection != "not_paired").then(|| "42".into()),
+        proxy: None,
         paused: false,
         connection: Link {
             connection: connection.into(),
@@ -252,6 +253,23 @@ fn snapshot_connected_with_roots() {
     );
     app.update(Msg::Daemon(DaemonMsg::AuditHistory(history())));
     assert_snapshot("connected_with_roots", &app);
+}
+
+#[test]
+fn shows_the_proxy_without_credentials() {
+    let mut app = app();
+    let mut s = status(
+        "connected",
+        vec![root("work-docs", "Work docs", "ready", 1532)],
+    );
+    s.proxy = Some(crate::proxy::ProxyInfo {
+        url: "http://alice:***@proxy.corp:3128".into(),
+        source: "config".into(),
+    });
+    running(&mut app, s);
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("via proxy proxy.corp:3128"), "{screen}");
+    assert!(!screen.contains("alice"), "{screen}");
 }
 
 #[test]

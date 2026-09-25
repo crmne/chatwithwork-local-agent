@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
 use super::key::DeviceKey;
+use crate::proxy::Proxy;
 
 pub const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 pub const SCOPE: &str = "local_agent:serve";
@@ -57,6 +58,20 @@ impl ServerUrl {
 
     pub fn is_secure(&self) -> bool {
         self.origin.scheme() == "https"
+    }
+
+    /// The host, without brackets around an IPv6 address.
+    pub fn host(&self) -> String {
+        match self.origin.host() {
+            Some(Host::Ipv6(ip)) => ip.to_string(),
+            Some(host) => host.to_string(),
+            None => String::new(),
+        }
+    }
+
+    /// The port, explicit or the scheme's default.
+    pub fn port(&self) -> u16 {
+        self.origin.port_or_known_default().unwrap_or(443)
     }
 
     pub fn endpoint(&self, path: &str) -> String {
@@ -189,8 +204,13 @@ pub struct AuthClient {
 }
 
 impl AuthClient {
-    pub fn new(server: ServerUrl) -> Self {
+    /// A client for `server`, through `proxy` when there is one. Without a
+    /// proxy it connects directly, whatever the environment says: the
+    /// caller has already applied the environment (see `crate::proxy`).
+    pub fn new(server: ServerUrl, proxy: Option<&Proxy>) -> Result<Self> {
+        let proxy = proxy.map(Proxy::to_ureq).transpose()?;
         let config = ureq::Agent::config_builder()
+            .proxy(proxy)
             .https_only(server.is_secure())
             .max_redirects(0)
             .http_status_as_error(false)
@@ -198,11 +218,11 @@ impl AuthClient {
             .user_agent(format!("cww/{}", env!("CARGO_PKG_VERSION")))
             .tls_config(crate::tls::ureq_config())
             .build();
-        Self {
+        Ok(Self {
             server,
             agent: config.into(),
             nonce: Mutex::new(None),
-        }
+        })
     }
 
     /// The latest `DPoP-Nonce` the server sent.

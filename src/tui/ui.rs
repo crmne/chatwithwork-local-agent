@@ -279,6 +279,12 @@ fn daemon_running(
                 }
             }
             lines.push(Line::styled(text, theme.muted()));
+            if let Some(proxy) = &status.proxy {
+                lines.push(Line::styled(
+                    format!("  via proxy {}", proxy_host(&proxy.url)),
+                    theme.muted(),
+                ));
+            }
         }
     }
     let answering = if status.paused {
@@ -290,6 +296,12 @@ fn daemon_running(
         answering,
         Span::styled(format!(" · cww {}", status.version), theme.faint()),
     ]));
+}
+
+/// `host:port` of a proxy URL, without the scheme or the user name.
+fn proxy_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.rsplit_once('@').map_or(rest, |(_, host)| host)
 }
 
 fn connection_state(state: &str) -> (&'static str, Signal, String) {

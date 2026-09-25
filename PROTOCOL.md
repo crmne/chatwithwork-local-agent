@@ -201,6 +201,7 @@ User-Agent: cww/0.1.0
 
 - The access token is only ever sent in the `Authorization` header, never in the URL.
 - `Origin` is the server's own origin, so Action Cable's same-origin check (`allow_same_origin_as_host`) accepts it.
+- Behind an HTTP proxy, the daemon first opens a tunnel with `CONNECT <host>:<port>` and runs TLS and this request inside it, as it does for the pairing and token requests. The server sees the same bytes either way.
 
 **The server MUST**, before accepting the upgrade: validate the access token (signature, expiry, audience, scope `local_agent:serve`, device not revoked), validate the DPoP proof as in section 3, including `ath`, and check that the proof key is the one the token is bound to.
 

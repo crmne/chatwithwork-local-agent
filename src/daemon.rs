@@ -278,18 +278,39 @@ impl Daemon {
                 Arc::clone(&self.paused),
                 max_message_bytes,
             );
-            let tunnel = Tunnel::new(
-                TunnelSettings {
-                    server: credentials.server,
-                    device_id: credentials.device_id,
-                    key: Arc::new(credentials.key),
-                    store: credentials.store,
-                    max_message_bytes,
-                },
-                files,
-                Arc::clone(&self.audit),
-                self.status.clone(),
-            );
+            let proxy_setting = self.config.lock().await.proxy.clone();
+            let tunnel = crate::proxy::for_server(proxy_setting.as_deref(), &credentials.server)
+                .and_then(|proxy| {
+                    if let Some(proxy) = &proxy {
+                        tracing::info!(
+                            "reaching the server through the proxy {}",
+                            proxy.redacted()
+                        );
+                    }
+                    Tunnel::new(
+                        TunnelSettings {
+                            server: credentials.server,
+                            device_id: credentials.device_id,
+                            key: Arc::new(credentials.key),
+                            store: credentials.store,
+                            max_message_bytes,
+                            proxy,
+                        },
+                        files,
+                        Arc::clone(&self.audit),
+                        self.status.clone(),
+                    )
+                });
+            let tunnel = match tunnel {
+                Ok(tunnel) => tunnel,
+                Err(e) => {
+                    // A proxy setting that can't work: wait for a fixed config.
+                    tracing::error!("can't reach the server: {e:#}");
+                    self.status.set(Connection::Offline, Some(format!("{e:#}")));
+                    self.wait_for_reload(shutdown).await;
+                    continue;
+                }
+            };
             if tunnel.run(token).await == TunnelExit::Revoked {
                 self.wait_for_reload(shutdown).await;
             }
@@ -323,8 +344,9 @@ impl Daemon {
         self.limiter.set_limits(new.limits.clone());
         self.paused.store(new.paused, Ordering::SeqCst);
         let mut config = self.config.lock().await;
-        let pairing_changed =
-            config.server != new.server || config.secret_store != new.secret_store;
+        let pairing_changed = config.server != new.server
+            || config.secret_store != new.secret_store
+            || config.proxy != new.proxy;
         *config = new;
         drop(config);
         if pairing_changed {
@@ -448,10 +470,22 @@ impl Daemon {
             "audit_file": self.paths.audit_file(),
             "server": config.server.as_ref().map(|s| &s.url),
             "device_id": config.server.as_ref().map(|s| &s.device_id),
+            "proxy": proxy_info(&config),
             "paused": self.paused.load(Ordering::SeqCst),
             "roots": roots,
         })
     }
+}
+
+/// The proxy the tunnel uses for the paired server, without its password.
+/// `null` for a direct connection, or when the setting is invalid (the
+/// connection's `last_error` says why).
+fn proxy_info(config: &Config) -> Option<crate::proxy::ProxyInfo> {
+    let server = crate::auth::client::ServerUrl::parse(&config.server.as_ref()?.url).ok()?;
+    crate::proxy::for_server(config.proxy.as_deref(), &server)
+        .ok()
+        .flatten()
+        .map(|p| p.info())
 }
 
 impl ControlHandler for Daemon {

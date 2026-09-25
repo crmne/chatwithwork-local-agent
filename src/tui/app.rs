@@ -36,6 +36,8 @@ pub struct DaemonStatus {
     pub paired: bool,
     pub server: Option<String>,
     pub device_id: Option<String>,
+    /// The proxy the daemon reaches the server through, without its password.
+    pub proxy: Option<crate::proxy::ProxyInfo>,
     pub paused: bool,
     pub connection: Link,
     pub roots: Vec<RootState>,

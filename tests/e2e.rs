@@ -818,6 +818,211 @@ async fn pairs_with_the_device_flow() {
     assert_mode(&fx.paths.config_file(), 0o600);
 }
 
+/// A CONNECT proxy that wants Basic auth, like a company's.
+struct TestProxy {
+    port: u16,
+    /// `CONNECT` targets it tunnelled, in order.
+    tunnels: Arc<Mutex<Vec<String>>>,
+    /// Requests it refused for missing or wrong credentials.
+    refused: Arc<Mutex<usize>>,
+}
+
+impl TestProxy {
+    async fn start(user: &str, password: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let expected = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"))
+        );
+        let tunnels = Arc::new(Mutex::new(Vec::new()));
+        let refused = Arc::new(Mutex::new(0));
+        let (t, r) = (Arc::clone(&tunnels), Arc::clone(&refused));
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (t, r, expected) = (Arc::clone(&t), Arc::clone(&r), expected.clone());
+                tokio::spawn(async move { tunnel(stream, &expected, &t, &r).await });
+            }
+        });
+        Self {
+            port,
+            tunnels,
+            refused,
+        }
+    }
+
+    fn url(&self, user: &str, password: &str) -> String {
+        format!("http://{user}:{password}@127.0.0.1:{}", self.port)
+    }
+}
+
+async fn tunnel(
+    mut client: TcpStream,
+    expected_auth: &str,
+    tunnels: &Mutex<Vec<String>>,
+    refused: &Mutex<usize>,
+) {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if client.read(&mut byte).await.unwrap_or(0) == 0 {
+            return;
+        }
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head).to_string();
+    let mut words = head.split_whitespace();
+    let (method, target) = (
+        words.next().unwrap_or_default(),
+        words.next().unwrap_or_default(),
+    );
+    let auth = head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case("proxy-authorization")
+            .then(|| v.trim().to_string())
+    });
+    if method != "CONNECT" {
+        let _ = client.write_all(b"HTTP/1.1 405 Only CONNECT\r\n\r\n").await;
+        return;
+    }
+    if auth.as_deref() != Some(expected_auth) {
+        *refused.lock().unwrap() += 1;
+        let _ = client
+            .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"test\"\r\ncontent-length: 0\r\n\r\n")
+            .await;
+        return;
+    }
+    let Ok(mut upstream) = TcpStream::connect(target).await else {
+        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+        return;
+    };
+    tunnels.lock().unwrap().push(target.to_string());
+    client
+        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await
+        .unwrap();
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+}
+
+/// Pairing, token refreshes and the WebSocket all go through the proxy set
+/// in config.toml, and status shows it without the password.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn goes_through_an_http_proxy() {
+    const PASSWORD: &str = "hunter2-proxy";
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    let proxy = TestProxy::start("alice", PASSWORD).await;
+    let target = server.origin.trim_start_matches("http://").to_string();
+    Config {
+        proxy: Some(proxy.url("alice", PASSWORD)),
+        ..Config::default()
+    }
+    .save(&fx.paths)
+    .unwrap();
+
+    let (paths, origin) = (fx.paths.clone(), server.origin.clone());
+    tokio::task::spawn_blocking(move || {
+        let options = cww::auth::LoginOptions {
+            store: Some(SecretStore::File(paths.secrets_file())),
+            ..Default::default()
+        };
+        cww::auth::login(&paths, &origin, options, |_| {})
+    })
+    .await
+    .unwrap()
+    .expect("pairing through the proxy");
+    let pairing = proxy.tunnels.lock().unwrap().len();
+    assert!(pairing >= 2, "pairing never used the proxy");
+    assert!(
+        proxy.tunnels.lock().unwrap().iter().all(|t| *t == target),
+        "{:?}",
+        proxy.tunnels
+    );
+    assert_eq!(*proxy.refused.lock().unwrap(), 0);
+
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let _ws = tokio::time::timeout(Duration::from_secs(20), server.sockets.recv())
+        .await
+        .expect("the daemon connects through the proxy")
+        .unwrap();
+    // At least a token refresh and the WebSocket.
+    assert!(proxy.tunnels.lock().unwrap().len() >= pairing + 2);
+    assert!(proxy.tunnels.lock().unwrap().iter().all(|t| *t == target));
+
+    let status = control(&fx.paths, ControlRequest::Status).await;
+    let shown = format!("alice:***@127.0.0.1:{}", proxy.port);
+    assert_eq!(status["proxy"]["source"], "config", "{status}");
+    assert!(
+        status["proxy"]["url"].as_str().unwrap().contains(&shown),
+        "{status}"
+    );
+    assert!(!status.to_string().contains(PASSWORD), "{status}");
+
+    // The CLI says the same, in both forms.
+    let home = fx.paths.config_file();
+    let home = home.parent().unwrap().parent().unwrap().to_path_buf();
+    for args in [&["status"][..], &["status", "--json"][..]] {
+        let (home, args) = (home.clone(), args.to_vec());
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_cww"))
+                .args(args)
+                .env("CWW_HOME", home)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains(&shown), "{stdout}");
+        assert!(!stdout.contains(PASSWORD), "{stdout}");
+    }
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}
+
+/// A proxy that refuses the credentials stops pairing with a clear error,
+/// and the error doesn't repeat the password.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_proxy_that_refuses_the_credentials_is_reported() {
+    let fx = fixture();
+    let server = FakeServer::start().await;
+    let proxy = TestProxy::start("alice", "right-password").await;
+    Config {
+        proxy: Some(proxy.url("alice", "wrong-password")),
+        ..Config::default()
+    }
+    .save(&fx.paths)
+    .unwrap();
+    let (paths, origin) = (fx.paths.clone(), server.origin.clone());
+    let err = tokio::task::spawn_blocking(move || {
+        let options = cww::auth::LoginOptions {
+            store: Some(SecretStore::File(paths.secrets_file())),
+            ..Default::default()
+        };
+        cww::auth::login(&paths, &origin, options, |_| {})
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("407"), "{err}");
+    assert!(!err.contains("wrong-password"), "{err}");
+    assert_eq!(*proxy.refused.lock().unwrap(), 1);
+
+    // The WebSocket's own CONNECT says what went wrong.
+    let bad = cww::proxy::Proxy::parse(&proxy.url("alice", "wrong-password"), "config").unwrap();
+    let port = server.origin.rsplit(':').next().unwrap().parse().unwrap();
+    let err = format!("{:#}", bad.connect("127.0.0.1", port).await.err().unwrap());
+    assert!(err.contains("rejected the credentials"), "{err}");
+    assert!(!err.contains("wrong-password"), "{err}");
+    let good = cww::proxy::Proxy::parse(&proxy.url("alice", "right-password"), "config").unwrap();
+    assert!(good.connect("127.0.0.1", port).await.is_ok());
+}
+
 #[cfg(unix)]
 fn assert_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;

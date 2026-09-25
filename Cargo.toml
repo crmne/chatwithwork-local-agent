@@ -53,6 +53,9 @@ webpki-root-certs = "1"
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
 url = "2.5"
+percent-encoding = "2.3"
+# TLS to an https:// proxy; tokio-tungstenite already uses it for the server.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 # Crypto: Ed25519 device key, SHA-256 and randomness come from ring (already used by rustls).
 ring = "0.17"
@@ -112,7 +115,6 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 tempfile = "3.27"
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [profile.release]
 lto = "thin"

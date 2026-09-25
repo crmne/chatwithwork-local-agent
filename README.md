@@ -181,6 +181,7 @@ Everything lives in `~/.config/cww/config.toml`. The server can't change any of 
 
 ```toml
 paused = false
+proxy = "http://proxy.example:3128"  # optional; see "Behind a proxy"
 
 [[roots]]
 id = "work-docs"
@@ -218,6 +219,31 @@ Run `cww reload` after editing the file. The `cww roots` commands reload the dae
 | `$XDG_RUNTIME_DIR/cww/cww.sock` | The control socket for the CLI (`0600`) |
 
 The same layout is used on macOS. On Windows everything lives under `%LOCALAPPDATA%\cww` (`config`, `data`, `state`), and the control channel is a named pipe. `CWW_HOME=/some/dir` puts all of it under one directory.
+
+## Behind a proxy
+
+Some networks only let traffic out through an HTTP proxy. `cww` sends pairing, token refreshes and the WebSocket through one with HTTP `CONNECT`, so TLS still runs end to end between `cww` and Chat with Work: the proxy sees the server's host name and nothing else.
+
+The daemon runs as a background service (systemd, launchd, or a Windows logon task), and services don't inherit your shell's environment. So set the proxy in `config.toml`, at the top of the file, before any `[section]`:
+
+```toml
+proxy = "http://proxy.example:3128"
+# or with credentials, sent as Basic auth:
+proxy = "http://alice:s3cret@proxy.example:3128"
+```
+
+Then run `cww reload` (or `cww login` if you haven't paired yet). `proxy = "none"` connects directly whatever the environment says. `config.toml` is readable only by you (`0600`), but a proxy password in it is stored in plain text; percent-encode special characters in the user name or password (`@` as `%40`). An `https://` proxy URL also encrypts the hop to the proxy. SOCKS proxies and NTLM or Kerberos authentication aren't supported.
+
+Without `proxy` in the config, `cww` reads the environment as curl does: `https_proxy` or `HTTPS_PROXY` (`http_proxy` or `HTTP_PROXY` for a plain `http://` development server), then `all_proxy` or `ALL_PROXY`, unless the server matches `no_proxy` or `NO_PROXY` (comma-separated host names, which also match their subdomains; `.example.com` and `*.example.com` work too, as do IP addresses, CIDR ranges like `10.0.0.0/8`, `host:port`, and `*` for everything). That covers `cww login` and `cww daemon run` in a shell. `cww login` and `cww daemon install` warn when a proxy variable is set in the shell but not in `config.toml`.
+
+`cww status` (and `--json`, and the terminal UI) show the proxy in use and where it came from, never the password:
+
+```
+Server:     https://chatwithwork.com
+Proxy:      http://alice:***@proxy.example:3128 (from config)
+```
+
+`cww` doesn't read the proxy settings of macOS or Windows (System Settings, PAC files, WPAD); copy the proxy's address into `config.toml`. A proxy that inspects TLS needs its CA in the operating system's trust store, as described under [Pairing](#pairing).
 
 ## Threat model
 

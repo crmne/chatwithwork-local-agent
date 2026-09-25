@@ -4,6 +4,9 @@
 #   systemctl --user enable --now cww.service
 #
 # The daemon only needs its own directories; everything else is read-only.
+#
+# Behind an HTTP proxy, set `proxy = "http://proxy.example:3128"` in
+# ~/.config/cww/config.toml: services don't see a shell's HTTPS_PROXY.
 [Unit]
 Description=Chat with Work Local Agent (cww)
 Documentation=https://github.com/crmne/chatwithwork-local-agent

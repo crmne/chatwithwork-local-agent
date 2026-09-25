@@ -169,7 +169,8 @@ impl PendingLogin {
 pub fn start_login(paths: &Paths, server: &str, options: LoginOptions) -> Result<PendingLogin> {
     let LoginOptions { name, store, .. } = options;
     let server = ServerUrl::parse(server)?;
-    let client = AuthClient::new(server.clone());
+    let proxy = crate::proxy::for_server(Config::load(paths)?.proxy.as_deref(), &server)?;
+    let client = AuthClient::new(server.clone(), proxy.as_ref())?;
     let key = DeviceKey::generate()?;
     let info = DeviceInfo::current(name);
     let auth = client
@@ -236,7 +237,7 @@ mod tests {
         let server = ServerUrl::parse("https://chatwithwork.com").unwrap();
         PendingLogin {
             paths: Paths::under(std::path::Path::new("/nonexistent")),
-            client: AuthClient::new(server.clone()),
+            client: AuthClient::new(server.clone(), None).unwrap(),
             server,
             key: DeviceKey::generate().unwrap(),
             info: DeviceInfo::current(Some("test".into())),

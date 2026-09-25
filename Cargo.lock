@@ -853,6 +853,7 @@ dependencies = [
  "lopdf",
  "mimalloc",
  "notify",
+ "percent-encoding",
  "quick-xml",
  "ratatui",
  "rcgen",

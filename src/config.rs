@@ -21,6 +21,11 @@ pub struct Config {
     pub secret_store: Option<String>,
     /// Pause answering tool calls. Survives restarts.
     pub paused: bool,
+    /// HTTP proxy to reach the server through, such as
+    /// `http://user:password@proxy.example:3128`, or `none` for a direct
+    /// connection. Overrides `HTTPS_PROXY` and the other proxy variables,
+    /// which services don't inherit from a shell. See `crate::proxy`.
+    pub proxy: Option<String>,
     /// Folders shared with the server. Nothing outside them is readable.
     pub roots: Vec<Root>,
     pub deny: DenyConfig,
@@ -188,6 +193,7 @@ mod tests {
             follow_symlinks: false,
         });
         config.deny.extra.push("*.secret".into());
+        config.proxy = Some("http://proxy.example:3128".into());
         config.save(&paths).unwrap();
         assert_eq!(Config::load(&paths).unwrap(), config);
     }

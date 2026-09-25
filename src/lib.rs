@@ -15,6 +15,7 @@ pub mod limits;
 pub mod logging;
 pub mod paths;
 pub mod policy;
+pub mod proxy;
 pub mod reader;
 pub mod roots;
 pub mod sandbox;

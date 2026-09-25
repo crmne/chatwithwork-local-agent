@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
-use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -25,6 +24,7 @@ use crate::audit::{AuditEntry, AuditLog};
 use crate::auth::client::{AuthClient, RefreshError, ServerUrl, TokenResponse};
 use crate::auth::key::DeviceKey;
 use crate::auth::secrets::{REFRESH_TOKEN, SecretStore};
+use crate::proxy::{Proxy, ProxyStream};
 use crate::status::{Connection, SharedStatus};
 use crate::tools::LocalFiles;
 use framing::{Framing, OFFERED_SUBPROTOCOLS};
@@ -49,6 +49,8 @@ pub struct TunnelSettings {
     pub key: Arc<DeviceKey>,
     pub store: SecretStore,
     pub max_message_bytes: usize,
+    /// The proxy to reach the server through, if any.
+    pub proxy: Option<Proxy>,
 }
 
 pub struct Tunnel {
@@ -65,7 +67,7 @@ enum ConnectError {
     Other(anyhow::Error),
 }
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type Socket = WebSocketStream<MaybeTlsStream<ProxyStream>>;
 
 impl Tunnel {
     pub fn new(
@@ -73,16 +75,19 @@ impl Tunnel {
         files: LocalFiles,
         audit: Arc<AuditLog>,
         status: SharedStatus,
-    ) -> Self {
-        let client = Arc::new(AuthClient::new(settings.server.clone()));
-        Self {
+    ) -> anyhow::Result<Self> {
+        let client = Arc::new(AuthClient::new(
+            settings.server.clone(),
+            settings.proxy.as_ref(),
+        )?);
+        Ok(Self {
             settings,
             client,
             files,
             audit,
             status,
             token: None,
-        }
+        })
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) -> TunnelExit {
@@ -230,12 +235,21 @@ impl Tunnel {
         let connector = server
             .is_secure()
             .then(|| Connector::Rustls(crate::tls::client_config()));
-        let connect = tokio_tungstenite::connect_async_tls_with_config(
-            request,
-            Some(config),
-            false,
-            connector,
-        );
+        let proxy = self.settings.proxy.as_ref();
+        let (host, port) = (server.host(), server.port());
+        // The TCP connection, through the proxy if there is one, then TLS
+        // and the upgrade on top of it.
+        let connect = async move {
+            let stream = crate::proxy::open(proxy, &host, port).await.map_err(Err)?;
+            tokio_tungstenite::client_async_tls_with_config(
+                request,
+                stream,
+                Some(config),
+                connector,
+            )
+            .await
+            .map_err(Ok)
+        };
         let (ws, response) = match tokio::time::timeout(Duration::from_secs(30), connect).await {
             Err(_) => {
                 return Err(ConnectError::Other(anyhow!(
@@ -243,7 +257,7 @@ impl Tunnel {
                 )));
             }
             Ok(Ok(pair)) => pair,
-            Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response)))
+            Ok(Err(Ok(tokio_tungstenite::tungstenite::Error::Http(response))))
                 if matches!(response.status().as_u16(), 401 | 403) =>
             {
                 let nonce = response
@@ -253,13 +267,16 @@ impl Tunnel {
                     .map(str::to_string);
                 return Err(ConnectError::Unauthorized { nonce });
             }
-            Ok(Err(tokio_tungstenite::tungstenite::Error::Http(response))) => {
+            Ok(Err(Ok(tokio_tungstenite::tungstenite::Error::Http(response)))) => {
                 return Err(ConnectError::Other(anyhow!(
                     "the server refused the WebSocket upgrade ({})",
                     response.status()
                 )));
             }
-            Ok(Err(e)) => return Err(ConnectError::Other(anyhow!("connecting to {url}: {e}"))),
+            Ok(Err(Ok(e))) => return Err(ConnectError::Other(anyhow!("connecting to {url}: {e}"))),
+            Ok(Err(Err(e))) => {
+                return Err(ConnectError::Other(anyhow!("connecting to {url}: {e:#}")));
+            }
         };
         let selected = response
             .headers()

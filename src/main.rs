@@ -185,6 +185,7 @@ fn run(cli: Cli) -> Result<()> {
             if Config::load(&paths)?.roots.is_empty() {
                 offer_documents(&paths)?;
             }
+            proxy_hint(&paths);
             if no_daemon {
                 notify_daemon(&paths, START_DAEMON_HINT);
             } else {
@@ -265,6 +266,7 @@ fn run(cli: Cli) -> Result<()> {
             DaemonCommand::Install { no_hardening } => {
                 let file = service::install(&paths, &service::InstallOptions { no_hardening })?;
                 println!("Installed and started {}.", file.display());
+                proxy_hint(&paths);
             }
             DaemonCommand::Uninstall { purge } => {
                 for path in service::uninstall(&paths, purge)? {
@@ -362,6 +364,9 @@ fn status(paths: &Paths, json: bool) -> Result<()> {
         "Server:     {}",
         status["server"].as_str().unwrap_or("not paired")
     );
+    if status["paired"] == Value::Bool(true) {
+        println!("Proxy:      {}", describe_proxy(&status["proxy"]));
+    }
     println!(
         "Connection: {} since {}{}",
         str(&conn["connection"]).replace('_', " "),
@@ -445,6 +450,15 @@ fn start_daemon(paths: &Paths) {
     }
 }
 
+/// Warn when a proxy is set in this shell only; the service won't see it.
+fn proxy_hint(paths: &Paths) {
+    let setting = Config::load(paths).ok().and_then(|c| c.proxy);
+    if let Some(hint) = cww::proxy::service_hint(setting.as_deref(), &paths.config_file()) {
+        println!();
+        println!("{hint}");
+    }
+}
+
 /// Ask a running daemon to re-read the config.
 fn notify_daemon(paths: &Paths, if_not_running: &str) {
     match control::request(&paths.socket_path(), ControlRequest::Reload) {
@@ -452,6 +466,14 @@ fn notify_daemon(paths: &Paths, if_not_running: &str) {
         Ok(None) if !if_not_running.is_empty() => println!("{if_not_running}"),
         Ok(None) => {}
         Err(e) => eprintln!("warning: couldn't reach the daemon: {e:#}"),
+    }
+}
+
+/// The daemon's `proxy` status field: never holds a password.
+fn describe_proxy(proxy: &Value) -> String {
+    match proxy["url"].as_str() {
+        Some(url) => format!("{url} (from {})", str(&proxy["source"])),
+        None => "none, connecting directly".into(),
     }
 }
 
