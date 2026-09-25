@@ -67,6 +67,9 @@ pub struct PendingLogin {
     auth: DeviceAuthorization,
     store: Option<SecretStore>,
     deadline: Instant,
+    /// This attempt's number: only the newest attempt may save, and a
+    /// logout supersedes every attempt started before it.
+    attempt: u64,
 }
 
 impl PendingLogin {
@@ -145,26 +148,95 @@ impl PendingLogin {
             .expect("checked in poll_pairing");
 
         let paths = &self.paths;
-        let mut config = Config::load(paths)?;
-        // Forget an earlier pairing, wherever its secrets were.
-        if config.server.is_some() {
-            let old_store = SecretStore::for_config(&config, paths);
-            let _ = old_store.delete(DEVICE_KEY);
-            let _ = old_store.delete(REFRESH_TOKEN);
-        }
+        commit_attempt(paths, self.attempt, cancel, || {
+            let mut config = Config::load(paths)?;
+            // Forget an earlier pairing, wherever its secrets were.
+            if config.server.is_some() {
+                let old_store = SecretStore::for_config(&config, paths);
+                let _ = old_store.delete(DEVICE_KEY);
+                let _ = old_store.delete(REFRESH_TOKEN);
+            }
 
-        let store = self.store.unwrap_or_else(|| SecretStore::choose(paths));
-        store.set(DEVICE_KEY, &self.key.to_stored())?;
-        store.set(REFRESH_TOKEN, &refresh)?;
-        let server_config = ServerConfig {
-            url: self.server.origin(),
-            device_id,
-        };
-        config.server = Some(server_config.clone());
-        config.secret_store = Some(store.name().to_string());
-        config.save(paths)?;
-        Ok(server_config)
+            let store = self.store.unwrap_or_else(|| SecretStore::choose(paths));
+            store.set(DEVICE_KEY, &self.key.to_stored())?;
+            store.set(REFRESH_TOKEN, &refresh)?;
+            let server_config = ServerConfig {
+                url: self.server.origin(),
+                device_id,
+            };
+            config.server = Some(server_config.clone());
+            config.secret_store = Some(store.name().to_string());
+            config.save(paths)?;
+            Ok(server_config)
+        })
     }
+}
+
+/// Pairing writes are serialized across processes (`cww login`, the
+/// terminal UI, the desktop app, `cww logout`) with a lock file, and
+/// numbered: each attempt and each logout takes the next number, and an
+/// attempt may save only if its number is still the latest and it wasn't
+/// cancelled, checked under the lock it saves under. So an older attempt
+/// that is approved late can't overwrite a newer pairing, or bring one back
+/// after a logout.
+struct PairingLock {
+    _file: std::fs::File,
+}
+
+fn lock_pairing(paths: &Paths) -> Result<PairingLock> {
+    crate::paths::ensure_private_dir(&paths.config_dir)?;
+    let path = paths.config_dir.join("pairing.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(PairingLock { _file: file })
+}
+
+fn generation_file(paths: &Paths) -> std::path::PathBuf {
+    paths.config_dir.join("pairing.gen")
+}
+
+fn current_generation(paths: &Paths) -> u64 {
+    std::fs::read_to_string(generation_file(paths))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Take the next number. Call with the lock held.
+fn next_generation(paths: &Paths, _lock: &PairingLock) -> Result<u64> {
+    let next = current_generation(paths) + 1;
+    crate::paths::write_private_file(&generation_file(paths), next.to_string().as_bytes())?;
+    Ok(next)
+}
+
+/// Start a pairing attempt, superseding any earlier one.
+fn begin_attempt(paths: &Paths) -> Result<u64> {
+    let lock = lock_pairing(paths)?;
+    next_generation(paths, &lock)
+}
+
+/// Run `save` only if `attempt` is still current and not cancelled, all
+/// under the lock.
+fn commit_attempt<T>(
+    paths: &Paths,
+    attempt: u64,
+    cancel: &AtomicBool,
+    save: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _lock = lock_pairing(paths)?;
+    if cancel.load(Ordering::SeqCst) {
+        bail!("pairing was cancelled");
+    }
+    if current_generation(paths) != attempt {
+        bail!("a newer pairing or a logout replaced this one; start again");
+    }
+    save()
 }
 
 /// Start pairing this computer with a server: create a key and ask the
@@ -185,7 +257,9 @@ pub fn start_login(paths: &Paths, server: &str, options: LoginOptions) -> Result
         .start_pairing(&key, &info, !without_chats)
         .context("starting pairing")?;
     let deadline = Instant::now() + Duration::from_secs(auth.expires_in.max(1));
+    let attempt = begin_attempt(paths)?;
     Ok(PendingLogin {
+        attempt,
         paths: paths.clone(),
         server,
         client,
@@ -228,6 +302,9 @@ pub fn login(
 }
 
 pub fn logout(paths: &Paths) -> Result<bool> {
+    // Supersede any pairing still waiting for approval.
+    let lock = lock_pairing(paths)?;
+    next_generation(paths, &lock)?;
     let mut config = Config::load(paths)?;
     let store = SecretStore::for_config(&config, paths);
     store.delete(DEVICE_KEY)?;
@@ -244,6 +321,7 @@ mod tests {
     fn pending(verification_uri: &str, complete: Option<&str>) -> PendingLogin {
         let server = ServerUrl::parse("https://chatwithwork.com").unwrap();
         PendingLogin {
+            attempt: 0,
             paths: Paths::under(std::path::Path::new("/nonexistent")),
             client: AuthClient::new(server.clone(), None).unwrap(),
             server,
@@ -293,5 +371,44 @@ mod tests {
         let err = p.wait(&cancel).unwrap_err();
         assert!(err.to_string().contains("cancelled"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn only_the_latest_attempt_saves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path());
+        Config {
+            secret_store: Some("file".into()),
+            ..Config::default()
+        }
+        .save(&paths)
+        .unwrap();
+        let go = AtomicBool::new(false);
+
+        // A newer attempt supersedes an older one.
+        let older = begin_attempt(&paths).unwrap();
+        let newer = begin_attempt(&paths).unwrap();
+        let err = commit_attempt(&paths, older, &go, || Ok(())).unwrap_err();
+        assert!(err.to_string().contains("newer pairing"), "{err}");
+        commit_attempt(&paths, newer, &go, || Ok(())).unwrap();
+
+        // A logout supersedes an attempt still waiting.
+        let waiting = begin_attempt(&paths).unwrap();
+        logout(&paths).unwrap();
+        let saved = std::cell::Cell::new(false);
+        assert!(
+            commit_attempt(&paths, waiting, &go, || {
+                saved.set(true);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!saved.get(), "nothing was written");
+
+        // A cancel is honoured at the moment of saving.
+        let current = begin_attempt(&paths).unwrap();
+        let cancelled = AtomicBool::new(true);
+        let err = commit_attempt(&paths, current, &cancelled, || Ok(())).unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "{err}");
     }
 }
