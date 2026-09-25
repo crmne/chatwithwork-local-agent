@@ -39,6 +39,9 @@ struct Daemon {
     tunnel_token: Mutex<CancellationToken>,
     /// Wakes the supervisor after a reload.
     reloaded: Notify,
+    /// Held while a request edits config.toml, so concurrent edits don't
+    /// save over each other.
+    config_edits: Mutex<()>,
     /// Events for control-channel subscribers.
     events: broadcast::Sender<ControlEvent>,
     /// Bumped whenever something in `status` changes.
@@ -204,6 +207,7 @@ pub async fn run(paths: Paths, shutdown: CancellationToken, handle_signals: bool
         reloaded: Notify::new(),
         chats: Arc::new(ChatHub::new(events.clone())),
         chat_client: Mutex::new(None),
+        config_edits: Mutex::new(()),
         events,
         changes,
         shutdown: shutdown.clone(),
@@ -389,23 +393,20 @@ impl Daemon {
         else {
             unreachable!("only called for roots_add");
         };
-        let paths = self.paths.clone();
-        let root = tokio::task::spawn_blocking(move || {
-            let mut config = Config::load(&paths)?;
-            let root = add_root(
-                &mut config,
-                &paths,
-                NewRoot {
-                    path: &path,
-                    label,
-                    i_know,
-                    follow_symlinks,
-                },
-            )?;
-            config.save(&paths)?;
-            Ok::<_, anyhow::Error>(root)
-        })
-        .await??;
+        let root = self
+            .edit_config(move |config, paths| {
+                add_root(
+                    config,
+                    paths,
+                    NewRoot {
+                        path: &path,
+                        label,
+                        i_know,
+                        follow_symlinks,
+                    },
+                )
+            })
+            .await?;
         let mut entry = AuditEntry::event("root_added");
         entry.detail = Some(format!("{} ({})", root.id, root.label));
         self.audit.append(&entry);
@@ -414,14 +415,9 @@ impl Daemon {
     }
 
     async fn remove_root(&self, which: String) -> Result<Value> {
-        let paths = self.paths.clone();
-        let root = tokio::task::spawn_blocking(move || {
-            let mut config = Config::load(&paths)?;
-            let root = remove_root(&mut config, &which)?;
-            config.save(&paths)?;
-            Ok::<_, anyhow::Error>(root)
-        })
-        .await??;
+        let root = self
+            .edit_config(move |config, _| remove_root(config, &which))
+            .await?;
         let mut entry = AuditEntry::event("root_removed");
         entry.detail = Some(format!("{} ({})", root.id, root.label));
         self.audit.append(&entry);
@@ -488,11 +484,34 @@ impl Daemon {
             .await
     }
 
+    /// Load config.toml, change it with `edit`, and save it, one request at
+    /// a time: two requests editing at once would each save over the
+    /// other's change.
+    async fn edit_config<T: Send + 'static>(
+        &self,
+        edit: impl FnOnce(&mut Config, &Paths) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let _editing = self.config_edits.lock().await;
+        let paths = self.paths.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut config = Config::load(&paths)?;
+            let edited = edit(&mut config, &paths)?;
+            config.save(&paths)?;
+            Ok(edited)
+        })
+        .await?
+    }
+
     async fn set_paused(&self, paused: bool) -> Result<()> {
         self.paused.store(paused, Ordering::SeqCst);
-        let mut config = self.config.lock().await;
-        config.paused = paused;
-        config.save(&self.paths)?;
+        // Edited on disk, not saved from memory: a folder just added may
+        // not be in memory until its reload.
+        self.edit_config(move |config, _| {
+            config.paused = paused;
+            Ok(())
+        })
+        .await?;
+        self.config.lock().await.paused = paused;
         self.audit.append(&AuditEntry::event(if paused {
             "paused"
         } else {
@@ -543,20 +562,17 @@ impl Daemon {
         if label.chars().count() > 80 {
             bail!("the label is longer than 80 characters");
         }
-        let paths = self.paths.clone();
-        let root = tokio::task::spawn_blocking(move || {
-            let mut config = Config::load(&paths)?;
-            let root = config
-                .roots
-                .iter_mut()
-                .find(|r| r.id == which)
-                .with_context(|| format!("no shared folder has the ID {which:?}"))?;
-            root.label = label;
-            let root = root.clone();
-            config.save(&paths)?;
-            Ok::<_, anyhow::Error>(root)
-        })
-        .await??;
+        let root = self
+            .edit_config(move |config, _| {
+                let root = config
+                    .roots
+                    .iter_mut()
+                    .find(|r| r.id == which)
+                    .with_context(|| format!("no shared folder has the ID {which:?}"))?;
+                root.label = label;
+                Ok(root.clone())
+            })
+            .await?;
         let mut entry = AuditEntry::event("root_labeled");
         entry.detail = Some(format!("{} ({})", root.id, root.label));
         self.audit.append(&entry);

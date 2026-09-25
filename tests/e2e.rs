@@ -1339,6 +1339,71 @@ async fn the_settings_app_manages_folders_over_the_control_channel() {
         .unwrap();
 }
 
+/// Requests that edit config.toml at once (the app adds a folder while a
+/// rename is out, say) all land: none saves over another's change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_config_edits_all_land() {
+    let fx = fixture();
+    Config {
+        secret_store: Some("file".into()),
+        ..Config::default()
+    }
+    .save(&fx.paths)
+    .unwrap();
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !fx.paths.socket_path().exists() {
+        assert!(Instant::now() < deadline, "the daemon never listened");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let add = |name: &str| {
+        let path = fx.base.join("work").join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        control(
+            &fx.paths,
+            ControlRequest::RootsAdd {
+                path,
+                label: None,
+                i_know: false,
+                follow_symlinks: false,
+            },
+        )
+    };
+    add("docs").await;
+
+    let (a, b, c, d, _, _) = tokio::join!(
+        add("alpha"),
+        add("bravo"),
+        add("charlie"),
+        add("delta"),
+        control(
+            &fx.paths,
+            ControlRequest::RootsLabel {
+                root: "docs".into(),
+                label: "Renamed".into(),
+            },
+        ),
+        control(&fx.paths, ControlRequest::Pause),
+    );
+    for added in [a, b, c, d] {
+        assert!(added["root"]["id"].is_string(), "{added}");
+    }
+    let config = Config::load(&fx.paths).unwrap();
+    let mut ids: Vec<&str> = config.roots.iter().map(|r| r.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["alpha", "bravo", "charlie", "delta", "docs"]);
+    assert_eq!(config.root("docs").unwrap().label, "Renamed");
+    assert!(config.paused);
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+}
+
 /// `cww login --json`, which the desktop app runs to pair: the code first,
 /// then the outcome, one JSON object per line, saying what became of the
 /// daemon. `--no-daemon` keeps these tests from installing a service.
