@@ -1,11 +1,12 @@
 //! `cww daemon run`: the reader, the control socket and the tunnel.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, broadcast};
 use tokio_util::sync::CancellationToken;
@@ -16,6 +17,7 @@ use crate::config::Config;
 use crate::control::{self, ControlEvent, ControlHandler, ControlRequest, PROTOCOL_VERSION};
 use crate::limits::Limiter;
 use crate::paths::Paths;
+use crate::policy::DEFAULT_DENY;
 use crate::reader::Reader;
 use crate::roots::{NewRoot, add_root, remove_root};
 use crate::status::{Changes, Connection, SharedStatus};
@@ -452,6 +454,63 @@ impl Daemon {
             "roots": roots,
         })
     }
+
+    async fn label_root(&self, which: String, label: String) -> Result<Value> {
+        let label = label.trim().to_string();
+        if label.is_empty() {
+            bail!("the label can't be empty");
+        }
+        if label.chars().count() > 80 {
+            bail!("the label is longer than 80 characters");
+        }
+        let paths = self.paths.clone();
+        let root = tokio::task::spawn_blocking(move || {
+            let mut config = Config::load(&paths)?;
+            let root = config
+                .roots
+                .iter_mut()
+                .find(|r| r.id == which)
+                .with_context(|| format!("no shared folder has the ID {which:?}"))?;
+            root.label = label;
+            let root = root.clone();
+            config.save(&paths)?;
+            Ok::<_, anyhow::Error>(root)
+        })
+        .await??;
+        let mut entry = AuditEntry::event("root_labeled");
+        entry.detail = Some(format!("{} ({})", root.id, root.label));
+        self.audit.append(&entry);
+        self.reload().await?;
+        Ok(json!({ "root": root }))
+    }
+
+    async fn deny(&self) -> Value {
+        let config = self.config.lock().await.clone();
+        let removed = &config.deny.remove;
+        let builtin: Vec<&str> = DEFAULT_DENY
+            .iter()
+            .copied()
+            .filter(|p| {
+                !removed
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(p.trim_end_matches('/')))
+            })
+            .collect();
+        let own: Vec<PathBuf> = self
+            .paths
+            .all_dirs()
+            .iter()
+            .map(|p| p.to_path_buf())
+            .collect();
+        json!({
+            "builtin": builtin,
+            "extra": config.deny.extra,
+            "removed": removed,
+            "own_dirs": own,
+            "allow_hardlinks": config.deny.allow_hardlinks,
+            "config_file": self.paths.config_file(),
+        })
+    }
 }
 
 impl ControlHandler for Daemon {
@@ -506,6 +565,8 @@ impl ControlHandler for Daemon {
                 Ok(json!({ "entries": entries }))
             }
             ControlRequest::SuggestedRoots => Ok(self.suggested_roots().await),
+            ControlRequest::RootsLabel { root, label } => self.label_root(root, label).await,
+            ControlRequest::Deny => Ok(self.deny().await),
             ControlRequest::Subscribe { .. } => {
                 anyhow::bail!("subscribe is handled by the control channel")
             }

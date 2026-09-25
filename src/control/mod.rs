@@ -81,6 +81,15 @@ pub enum ControlRequest {
     /// whether they exist and are already shared. Nothing is shared until
     /// the user confirms with `roots_add`.
     SuggestedRoots,
+    /// Change the label Chat with Work sees for a folder. Its ID, and so
+    /// the paths the server already knows, stay the same.
+    RootsLabel {
+        root: String,
+        label: String,
+    },
+    /// The deny list in effect, to show. It can only be changed in
+    /// `config.toml`, never over this channel.
+    Deny,
     /// Stream events on this connection until it closes.
     Subscribe {
         #[serde(default = "all_topics")]
@@ -470,5 +479,21 @@ mod tests {
             serde_json::to_string(&ControlRequest::AuditTail { lines: Some(5) }).unwrap(),
             r#"{"cmd":"audit_tail","lines":5}"#
         );
+        for (request, wire) in [
+            (
+                ControlRequest::RootsLabel {
+                    root: "docs".into(),
+                    label: "Work".into(),
+                },
+                r#"{"cmd":"roots_label","root":"docs","label":"Work"}"#,
+            ),
+            (ControlRequest::Deny, r#"{"cmd":"deny"}"#),
+        ] {
+            assert_eq!(serde_json::to_string(&request).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<ControlRequest>(wire).unwrap(),
+                request
+            );
+        }
     }
 }
