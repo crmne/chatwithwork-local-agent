@@ -10,6 +10,9 @@
 //!
 //! One JSON request per line, one JSON response per line. A `subscribe`
 //! request turns the connection into a stream of events.
+//!
+//! The terminal UI's chats go through here too: the daemon relays them to
+//! Chat with Work with its own token, so no client ever holds one.
 
 #[cfg(unix)]
 mod unix;
@@ -81,11 +84,37 @@ pub enum ControlRequest {
     /// whether they exist and are already shared. Nothing is shared until
     /// the user confirms with `roots_add`.
     SuggestedRoots,
-    /// Stream events on this connection until it closes.
+    /// Stream events on this connection until it closes. With the `chat`
+    /// topic, `chat` names the chat to follow, which the daemon follows on
+    /// the server for as long as the subscription is open.
     Subscribe {
         #[serde(default = "all_topics")]
         topics: Vec<Topic>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat: Option<String>,
     },
+    /// The owner's chats, newest first, as the server lists them.
+    Chats,
+    /// One chat and its transcript.
+    Chat {
+        chat: String,
+    },
+    /// Ask a question in `chat`, or in a new chat without one.
+    ChatSend {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat: Option<String>,
+        text: String,
+        /// A project for a new chat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<u64>,
+    },
+    /// Stop the answer being written in `chat`.
+    ChatCancel {
+        chat: String,
+    },
+    /// Ask the owner to let this computer use their chats. Nothing is
+    /// allowed until they say yes in Chat with Work.
+    ChatAccess,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +124,9 @@ pub enum Topic {
     Audit,
     /// The full `status` result, whenever something in it changes.
     Status,
+    /// Updates of the chat named in `subscribe`: streamed answer text,
+    /// progress, and "read it again".
+    Chat,
 }
 
 fn all_topics() -> Vec<Topic> {
@@ -102,7 +134,7 @@ fn all_topics() -> Vec<Topic> {
 }
 
 /// Something a subscriber may want to know about.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ControlEvent {
     Audit {
@@ -111,6 +143,12 @@ pub enum ControlEvent {
     Status {
         status: Value,
     },
+    /// One update of a followed chat, as the server sent it, or a note from
+    /// the daemon about the subscription (`watching`, `refused`, `offline`).
+    Chat {
+        chat: String,
+        update: Value,
+    },
 }
 
 impl ControlEvent {
@@ -118,9 +156,48 @@ impl ControlEvent {
         match self {
             Self::Audit { .. } => Topic::Audit,
             Self::Status { .. } => Topic::Status,
+            Self::Chat { .. } => Topic::Chat,
+        }
+    }
+
+    fn concerns(&self, followed: Option<&str>) -> bool {
+        match self {
+            Self::Chat { chat, .. } => followed == Some(chat.as_str()),
+            _ => true,
         }
     }
 }
+
+/// A failure with a code a client can act on, such as
+/// `chat_access_required`. It reaches the client as
+/// `{"ok": false, "error": <message>, "code": <code>, ...details}`.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct Refusal {
+    pub code: String,
+    pub message: String,
+    /// More fields for the response, such as `approve_url`.
+    pub details: Value,
+}
+
+impl Refusal {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+            details: json!({}),
+        }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = details;
+        self
+    }
+}
+
+/// How often a chat subscription hears from the daemon while nothing
+/// happens, so a client that stopped listening is noticed.
+const CHAT_HEARTBEAT: Duration = Duration::from_secs(30);
 
 pub trait ControlHandler: Send + Sync + 'static {
     fn handle(&self, request: ControlRequest) -> impl Future<Output = Result<Value>> + Send;
@@ -134,6 +211,14 @@ pub trait ControlHandler: Send + Sync + 'static {
     fn initial_status(&self) -> impl Future<Output = Option<Value>> + Send {
         async { None }
     }
+
+    /// Start following `chat` for a new subscriber. Every call is matched
+    /// by one [`ControlHandler::unwatch_chat`] when the subscription ends.
+    fn watch_chat(&self, _chat: &str) -> impl Future<Output = Result<()>> + Send {
+        async { bail!("chats are not available") }
+    }
+
+    fn unwatch_chat(&self, _chat: &str) {}
 }
 
 /// Bind the control endpoint, refusing if another daemon is already
@@ -201,8 +286,8 @@ where
                 continue;
             }
         };
-        if let ControlRequest::Subscribe { topics } = request {
-            return stream_events(&mut write, handler.as_ref(), &topics, shutdown).await;
+        if let ControlRequest::Subscribe { topics, chat } = request {
+            return stream_events(&mut write, handler.as_ref(), &topics, chat, shutdown).await;
         }
         let response = match handler.handle(request).await {
             Ok(mut value) => {
@@ -212,23 +297,38 @@ where
                 value["ok"] = json!(true);
                 value
             }
-            Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
+            Err(e) => refusal_response(&e),
         };
         write_line(&mut write, &response).await?;
     }
+}
+
+fn refusal_response(e: &anyhow::Error) -> Value {
+    let mut response = json!({ "ok": false, "error": format!("{e:#}") });
+    if let Some(refusal) = e.downcast_ref::<Refusal>() {
+        if let Some(details) = refusal.details.as_object() {
+            for (key, value) in details {
+                response[key] = value.clone();
+            }
+        }
+        response["error"] = json!(refusal.message);
+        response["code"] = json!(refusal.code);
+    }
+    response
 }
 
 async fn stream_events<W, H>(
     write: &mut W,
     handler: &H,
     topics: &[Topic],
+    chat: Option<String>,
     shutdown: CancellationToken,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin,
     H: ControlHandler,
 {
-    let Some(mut events) = handler.events() else {
+    let Some(events) = handler.events() else {
         write_line(
             write,
             &json!({ "ok": false, "error": "events are not available" }),
@@ -236,6 +336,49 @@ where
         .await?;
         return Ok(());
     };
+    let followed = match (topics.contains(&Topic::Chat), chat) {
+        (false, _) => None,
+        (true, None) => {
+            let refusal = anyhow::Error::new(Refusal::new(
+                "bad_request",
+                "bad request: the chat topic needs a chat",
+            ));
+            return write_line(write, &refusal_response(&refusal)).await;
+        }
+        (true, Some(chat)) => {
+            if let Err(e) = handler.watch_chat(&chat).await {
+                return write_line(write, &refusal_response(&e)).await;
+            }
+            Some(chat)
+        }
+    };
+    let result = forward_events(
+        write,
+        handler,
+        topics,
+        followed.as_deref(),
+        events,
+        shutdown,
+    )
+    .await;
+    if let Some(chat) = &followed {
+        handler.unwatch_chat(chat);
+    }
+    result
+}
+
+async fn forward_events<W, H>(
+    write: &mut W,
+    handler: &H,
+    topics: &[Topic],
+    followed: Option<&str>,
+    mut events: broadcast::Receiver<ControlEvent>,
+    shutdown: CancellationToken,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    H: ControlHandler,
+{
     write_line(write, &json!({ "ok": true, "topics": topics })).await?;
     if topics.contains(&Topic::Status)
         && let Some(status) = handler.initial_status().await
@@ -246,13 +389,19 @@ where
         )
         .await?;
     }
+    let mut heartbeat = tokio::time::interval(CHAT_HEARTBEAT);
+    heartbeat.tick().await;
     loop {
         let event = tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
             event = events.recv() => event,
+            _ = heartbeat.tick(), if followed.is_some() => {
+                write_line(write, &json!({ "event": "heartbeat" })).await?;
+                continue;
+            }
         };
         match event {
-            Ok(event) if topics.contains(&event.topic()) => {
+            Ok(event) if topics.contains(&event.topic()) && event.concerns(followed) => {
                 write_line(write, &serde_json::to_value(&event)?).await?;
             }
             Ok(_) => {}
@@ -288,10 +437,7 @@ impl Client {
 
     /// Send one request and wait for its response.
     pub fn call(&mut self, request: &ControlRequest) -> Result<Value> {
-        self.send(request)?;
-        let value = self
-            .next_line()?
-            .context("the daemon closed the connection")?;
+        let value = self.call_raw(request)?;
         if value["ok"] != json!(true) {
             bail!(
                 "{}",
@@ -303,14 +449,37 @@ impl Client {
         Ok(value)
     }
 
+    /// Send one request and return its response as it came, `ok` or not,
+    /// for callers that act on a refusal's `code`.
+    pub fn call_raw(&mut self, request: &ControlRequest) -> Result<Value> {
+        self.send(request)?;
+        self.next_line()?
+            .context("the daemon closed the connection")
+    }
+
     /// Turn this connection into an event stream. Each item is one event
     /// object (`{"event":"audit",...}` or `{"event":"status",...}`).
     pub fn subscribe(mut self, topics: &[Topic]) -> Result<Events> {
         self.call(&ControlRequest::Subscribe {
             topics: topics.to_vec(),
+            chat: None,
         })?;
         transport::clear_timeout(self.reader.get_ref());
         Ok(Events { client: self })
+    }
+
+    /// Follow one chat: `{"event":"chat",...}` updates and heartbeats. A
+    /// refusal comes back as the response's `code`, like other chat calls.
+    pub fn follow_chat(mut self, chat: &str) -> Result<std::result::Result<Events, Value>> {
+        let response = self.call_raw(&ControlRequest::Subscribe {
+            topics: vec![Topic::Chat],
+            chat: Some(chat.to_string()),
+        })?;
+        if response["ok"] != json!(true) {
+            return Ok(Err(response));
+        }
+        transport::clear_timeout(self.reader.get_ref());
+        Ok(Ok(Events { client: self }))
     }
 
     fn send(&mut self, request: &ControlRequest) -> Result<()> {
@@ -336,6 +505,35 @@ impl Client {
 /// Events from [`Client::subscribe`]. Ends when the daemon stops.
 pub struct Events {
     client: Client,
+}
+
+impl Events {
+    /// Something that ends this stream from another thread, where the
+    /// platform allows it. Otherwise the stream ends at the next event,
+    /// at the latest the next heartbeat.
+    pub fn closer(&self) -> Option<Closer> {
+        #[cfg(unix)]
+        {
+            self.client.reader.get_ref().try_clone().ok().map(Closer)
+        }
+        #[cfg(windows)]
+        {
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+pub struct Closer(std::os::unix::net::UnixStream);
+
+#[cfg(windows)]
+pub struct Closer;
+
+impl Closer {
+    pub fn close(&self) {
+        #[cfg(unix)]
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 impl Iterator for Events {
@@ -463,8 +661,27 @@ mod tests {
         assert_eq!(
             sub,
             ControlRequest::Subscribe {
-                topics: vec![Topic::Audit, Topic::Status]
+                topics: vec![Topic::Audit, Topic::Status],
+                chat: None,
             }
+        );
+        let follow: ControlRequest =
+            serde_json::from_str(r#"{"cmd":"subscribe","topics":["chat"],"chat":"42"}"#).unwrap();
+        assert_eq!(
+            follow,
+            ControlRequest::Subscribe {
+                topics: vec![Topic::Chat],
+                chat: Some("42".into()),
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&ControlRequest::ChatSend {
+                chat: None,
+                text: "hi".into(),
+                project: None
+            })
+            .unwrap(),
+            r#"{"cmd":"chat_send","text":"hi"}"#
         );
         assert_eq!(
             serde_json::to_string(&ControlRequest::AuditTail { lines: Some(5) }).unwrap(),

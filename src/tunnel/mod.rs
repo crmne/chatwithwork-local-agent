@@ -6,6 +6,9 @@
 //! the token and a fresh proof in the upgrade headers. Tokens never go in
 //! the URL. If the server rejects the refresh credential, the device was
 //! revoked: the tunnel stops and waits for `cww login`.
+//!
+//! The same socket carries the chats the terminal UI follows (see
+//! [`crate::chats`]), and the same tokens open the chat API.
 
 pub mod framing;
 pub mod session;
@@ -21,17 +24,17 @@ use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{AuditEntry, AuditLog};
-use crate::auth::client::{AuthClient, RefreshError, ServerUrl, TokenResponse};
+use crate::auth::client::{AuthClient, RefreshError, ServerUrl};
 use crate::auth::key::DeviceKey;
-use crate::auth::secrets::{REFRESH_TOKEN, SecretStore};
+use crate::auth::secrets::SecretStore;
+use crate::auth::tokens::Tokens;
+use crate::chats::ChatHub;
 use crate::proxy::{Proxy, ProxyStream};
 use crate::status::{Connection, SharedStatus};
 use crate::tools::LocalFiles;
 use framing::{Framing, OFFERED_SUBPROTOCOLS};
 use session::{SessionEnd, SessionOptions};
 
-/// Refresh the access token this long before it expires.
-const TOKEN_MARGIN: Duration = Duration::from_secs(60);
 /// A session that lasted this long resets the backoff.
 const STABLE_AFTER: Duration = Duration::from_secs(60);
 const BACKOFF_BASE: Duration = Duration::from_secs(1);
@@ -51,15 +54,16 @@ pub struct TunnelSettings {
     pub max_message_bytes: usize,
     /// The proxy to reach the server through, if any.
     pub proxy: Option<Proxy>,
+    /// Where the chats the terminal UI follows come and go, if anywhere.
+    pub chats: Option<Arc<ChatHub>>,
 }
 
 pub struct Tunnel {
     settings: TunnelSettings,
-    client: Arc<AuthClient>,
+    tokens: Arc<Tokens>,
     files: LocalFiles,
     audit: Arc<AuditLog>,
     status: SharedStatus,
-    token: Option<(String, Instant)>,
 }
 
 enum ConnectError {
@@ -80,14 +84,23 @@ impl Tunnel {
             settings.server.clone(),
             settings.proxy.as_ref(),
         )?);
+        let tokens = Arc::new(Tokens::new(
+            client,
+            Arc::clone(&settings.key),
+            settings.store.clone(),
+        ));
         Ok(Self {
             settings,
-            client,
+            tokens,
             files,
             audit,
             status,
-            token: None,
         })
+    }
+
+    /// The access tokens this tunnel uses, for the chat API.
+    pub fn tokens(&self) -> Arc<Tokens> {
+        Arc::clone(&self.tokens)
     }
 
     pub async fn run(mut self, shutdown: CancellationToken) -> TunnelExit {
@@ -128,6 +141,7 @@ impl Tunnel {
                         SessionOptions {
                             framing,
                             max_message_bytes: self.settings.max_message_bytes,
+                            chats: self.settings.chats.clone(),
                         },
                         shutdown.child_token(),
                     )
@@ -140,7 +154,7 @@ impl Tunnel {
                     }
                     match end {
                         SessionEnd::Shutdown => return TunnelExit::Shutdown,
-                        SessionEnd::Unauthorized(_) => self.token = None,
+                        SessionEnd::Unauthorized(_) => self.tokens.invalidate(),
                         _ => {}
                     }
                     self.status
@@ -152,9 +166,9 @@ impl Tunnel {
                         Some("the server rejected the connection".into()),
                     );
                     let fresh_nonce = nonce.is_some();
-                    self.client.set_nonce(nonce);
+                    self.tokens.client().set_nonce(nonce);
                     if !fresh_nonce {
-                        self.token = None;
+                        self.tokens.invalidate();
                     }
                     if !immediate_retry {
                         immediate_retry = true;
@@ -177,31 +191,10 @@ impl Tunnel {
 
     /// A live access token, refreshed if missing or about to expire.
     async fn access_token(&mut self) -> Result<String, RefreshError> {
-        if let Some((token, expires)) = &self.token
-            && Instant::now() + TOKEN_MARGIN < *expires
-        {
-            return Ok(token.clone());
-        }
-        let client = Arc::clone(&self.client);
-        let key = Arc::clone(&self.settings.key);
-        let store = self.settings.store.clone();
-        let response: TokenResponse = tokio::task::spawn_blocking(move || {
-            let refresh = store
-                .get(REFRESH_TOKEN)?
-                .ok_or_else(|| RefreshError::Revoked("no refresh credential stored".into()))?;
-            let response = client.refresh(&key, &refresh)?;
-            if let Some(rotated) = &response.refresh_token
-                && rotated != &refresh
-            {
-                store.set(REFRESH_TOKEN, rotated)?;
-            }
-            Ok::<_, RefreshError>(response)
-        })
-        .await
-        .map_err(|e| RefreshError::Other(anyhow!("token refresh task failed: {e}")))??;
-        let expires = Instant::now() + Duration::from_secs(response.expires_in.clamp(1, 3600));
-        self.token = Some((response.access_token.clone(), expires));
-        Ok(response.access_token)
+        let tokens = Arc::clone(&self.tokens);
+        tokio::task::spawn_blocking(move || tokens.access_token())
+            .await
+            .map_err(|e| RefreshError::Other(anyhow!("token refresh task failed: {e}")))?
     }
 
     async fn connect(&self, token: &str) -> Result<(Socket, Framing), ConnectError> {
@@ -214,7 +207,7 @@ impl Tunnel {
         let proof = self.settings.key.proof(
             "GET",
             &server.websocket_htu(),
-            self.client.nonce().as_deref(),
+            self.tokens.client().nonce().as_deref(),
             Some(token),
         );
         let headers = request.headers_mut();

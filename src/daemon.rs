@@ -12,8 +12,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::{AuditEntry, AuditLog};
 use crate::auth::load_credentials;
+use crate::chats::{ChatClient, ChatHub, chat_number};
 use crate::config::Config;
-use crate::control::{self, ControlEvent, ControlHandler, ControlRequest, PROTOCOL_VERSION};
+use crate::control::{
+    self, ControlEvent, ControlHandler, ControlRequest, PROTOCOL_VERSION, Refusal,
+};
 use crate::limits::Limiter;
 use crate::paths::Paths;
 use crate::reader::Reader;
@@ -40,7 +43,14 @@ struct Daemon {
     changes: Changes,
     /// Cancelled by a `shutdown` request.
     shutdown: CancellationToken,
+    /// The chats terminal UIs follow over the tunnel.
+    chats: Arc<ChatHub>,
+    /// The chat API as this device, while it's paired.
+    chat_client: Mutex<Option<Arc<ChatClient>>>,
 }
+
+/// The longest question the terminal may send, as the server allows.
+const MAX_QUESTION_CHARS: usize = 20_000;
 
 /// Set when a newly shared folder is outside the sandbox: the worker exits
 /// with `sandbox::RESTART_CODE` and its supervisor starts it again.
@@ -190,6 +200,8 @@ pub async fn run(paths: Paths, shutdown: CancellationToken, handle_signals: bool
         status: SharedStatus::new(changes.clone()),
         tunnel_token: Mutex::new(shutdown.child_token()),
         reloaded: Notify::new(),
+        chats: Arc::new(ChatHub::new(events.clone())),
+        chat_client: Mutex::new(None),
         events,
         changes,
         shutdown: shutdown.clone(),
@@ -261,6 +273,7 @@ impl Daemon {
                 }
             };
             let Some(credentials) = credentials else {
+                *self.chat_client.lock().await = None;
                 if self.status.get().connection != Connection::NotPaired {
                     self.status.set(Connection::NotPaired, None);
                 }
@@ -295,6 +308,7 @@ impl Daemon {
                             store: credentials.store,
                             max_message_bytes,
                             proxy,
+                            chats: Some(Arc::clone(&self.chats)),
                         },
                         files,
                         Arc::clone(&self.audit),
@@ -302,8 +316,13 @@ impl Daemon {
                     )
                 });
             let tunnel = match tunnel {
-                Ok(tunnel) => tunnel,
+                Ok(tunnel) => {
+                    *self.chat_client.lock().await =
+                        Some(Arc::new(ChatClient::new(tunnel.tokens())));
+                    tunnel
+                }
                 Err(e) => {
+                    *self.chat_client.lock().await = None;
                     // A proxy setting that can't work: wait for a fixed config.
                     tracing::error!("can't reach the server: {e:#}");
                     self.status.set(Connection::Offline, Some(format!("{e:#}")));
@@ -429,6 +448,44 @@ impl Daemon {
         json!({ "suggestions": suggestions })
     }
 
+    /// Run one chat API call on a blocking thread, as this device.
+    async fn chat<F>(&self, call: F) -> Result<Value>
+    where
+        F: FnOnce(&ChatClient) -> Result<Value> + Send + 'static,
+    {
+        let client = self.chat_client.lock().await.clone().ok_or_else(|| {
+            Refusal::new(
+                "not_paired",
+                "This computer isn't paired with Chat with Work. Pair it with cww login.",
+            )
+        })?;
+        tokio::task::spawn_blocking(move || call(&client)).await?
+    }
+
+    async fn send_question(
+        &self,
+        chat: Option<String>,
+        text: String,
+        project: Option<u64>,
+    ) -> Result<Value> {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return Err(Refusal::new("invalid", "Write a question first").into());
+        }
+        if text.chars().count() > MAX_QUESTION_CHARS {
+            return Err(Refusal::new(
+                "invalid",
+                format!("Questions can be at most {MAX_QUESTION_CHARS} characters"),
+            )
+            .into());
+        }
+        if let Some(chat) = &chat {
+            chat_number(chat)?;
+        }
+        self.chat(move |client| client.send(chat.as_deref(), &text, project))
+            .await
+    }
+
     async fn set_paused(&self, paused: bool) -> Result<()> {
         self.paused.store(paused, Ordering::SeqCst);
         let mut config = self.config.lock().await;
@@ -497,6 +554,23 @@ impl ControlHandler for Daemon {
         Some(self.status_json().await)
     }
 
+    async fn watch_chat(&self, chat: &str) -> Result<()> {
+        chat_number(chat)?;
+        if self.chat_client.lock().await.is_none() {
+            return Err(Refusal::new(
+                "not_paired",
+                "This computer isn't paired with Chat with Work. Pair it with cww login.",
+            )
+            .into());
+        }
+        self.chats.watch(chat);
+        Ok(())
+    }
+
+    fn unwatch_chat(&self, chat: &str) {
+        self.chats.unwatch(chat);
+    }
+
     async fn handle(&self, request: ControlRequest) -> Result<Value> {
         match request {
             ControlRequest::Hello => Ok(json!({
@@ -540,6 +614,17 @@ impl ControlHandler for Daemon {
                 Ok(json!({ "entries": entries }))
             }
             ControlRequest::SuggestedRoots => Ok(self.suggested_roots().await),
+            ControlRequest::Chats => self.chat(|client| client.list()).await,
+            ControlRequest::Chat { chat } => self.chat(move |client| client.show(&chat)).await,
+            ControlRequest::ChatSend {
+                chat,
+                text,
+                project,
+            } => self.send_question(chat, text, project).await,
+            ControlRequest::ChatCancel { chat } => {
+                self.chat(move |client| client.cancel(&chat)).await
+            }
+            ControlRequest::ChatAccess => self.chat(|client| client.request_access()).await,
             ControlRequest::Subscribe { .. } => {
                 anyhow::bail!("subscribe is handled by the control channel")
             }

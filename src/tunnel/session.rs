@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_util::sync::CancellationToken;
 
 use super::framing::{Framing, Inbound};
+use crate::chats::{ChatHub, Follow};
 use crate::tools::LocalFiles;
 
 /// How often the daemon pings the server.
@@ -78,6 +79,8 @@ pub struct SessionOptions {
     pub framing: Framing,
     /// Largest JSON-RPC message accepted or sent.
     pub max_message_bytes: usize,
+    /// The chats the terminal UI follows, if any.
+    pub chats: Option<Arc<ChatHub>>,
 }
 
 pub async fn run_session<S>(
@@ -131,6 +134,7 @@ where
     let mut last_seen = Instant::now();
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
+    let mut follows = options.chats.as_ref().map(|hub| hub.attach());
 
     let end = loop {
         tokio::select! {
@@ -164,6 +168,21 @@ where
                                 }
                             }
                             Inbound::Rejected => break SessionEnd::Unauthorized("subscription rejected".into()),
+                            Inbound::Chat { chat, update } => {
+                                if let Some(hub) = &options.chats {
+                                    hub.publish(&chat, update);
+                                }
+                            }
+                            Inbound::ChatConfirmed(chat) => {
+                                if let Some(hub) = &options.chats {
+                                    hub.note(&chat, "watching");
+                                }
+                            }
+                            Inbound::ChatRejected(chat) => {
+                                if let Some(hub) = &options.chats {
+                                    hub.note(&chat, "refused");
+                                }
+                            }
                             Inbound::Disconnect { reason, reconnect } => {
                                 if !reconnect || reason == "unauthorized" {
                                     break SessionEnd::Unauthorized(reason);
@@ -188,6 +207,28 @@ where
                     break SessionEnd::Error(e.to_string());
                 }
             }
+            follow = next_follow(&mut follows) => {
+                let (frame, chat) = match &follow {
+                    Some(Follow::Watch(chat)) => (framing.follow_chat(chat), chat),
+                    Some(Follow::Unwatch(chat)) => (framing.unfollow_chat(chat), chat),
+                    None => {
+                        follows = None;
+                        continue;
+                    }
+                };
+                match frame {
+                    Some(frame) => {
+                        if let Err(e) = sink.send(Message::text(frame)).await {
+                            break SessionEnd::Error(e.to_string());
+                        }
+                    }
+                    None => {
+                        if let (Some(hub), Some(Follow::Watch(_))) = (&options.chats, &follow) {
+                            hub.note(chat, "unsupported");
+                        }
+                    }
+                }
+            }
             _ = ping.tick() => {
                 if last_seen.elapsed() > IDLE_TIMEOUT {
                     break SessionEnd::IdleTimeout;
@@ -202,7 +243,18 @@ where
     session.cancel();
     drop(in_tx);
     mcp_task.abort();
+    if let Some(hub) = &options.chats {
+        hub.detach();
+    }
     end
+}
+
+/// What to follow next, or never without a hub.
+async fn next_follow(follows: &mut Option<mpsc::UnboundedReceiver<Follow>>) -> Option<Follow> {
+    match follows {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Validate one inbound JSON-RPC message and hand it to rmcp. Returns an

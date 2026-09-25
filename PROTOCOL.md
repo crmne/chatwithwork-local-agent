@@ -17,6 +17,7 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119.
 9. [Errors](#9-errors)
 10. [Limits](#10-limits)
 11. [Decisions this spec makes](#11-decisions-this-spec-makes)
+12. [Chats for the terminal UI](#12-chats-for-the-terminal-ui)
 
 ## 1. Roles and overview
 
@@ -87,7 +88,7 @@ Accept: application/json
 DPoP: <proof, htm=POST, htu=https://<host>/local_agent/device_authorizations>
 
 client_id=cww
-&scope=local_agent:serve
+&scope=local_agent:serve local_agent:chat
 &public_key=<base64url Ed25519 public key>
 &name=<device name, defaults to the hostname>
 &platform=<linux | macos | windows>
@@ -176,7 +177,7 @@ grant_type=refresh_token
 }
 ```
 
-- The access token is opaque to the daemon. The design calls for a signed token with a 10-minute lifetime, `aud` equal to the server origin, `scope=local_agent:serve`, and binding to the device key (`cnf.jkt`). That scope MUST NOT grant access to any other API.
+- The access token is opaque to the daemon. The design calls for a signed token with a 10-minute lifetime, `aud` equal to the server origin, `scope=local_agent:serve`, and binding to the device key (`cnf.jkt`). That scope MUST NOT grant access to any other API. While the owner lets the computer use their chats, the scope also carries `local_agent:chat`, which opens the chat API of section 12 and nothing else.
 - `refresh_token` in the response is OPTIONAL. If present and different, the daemon replaces the stored one (rotation). Servers that rotate SHOULD accept the previous refresh token for a short grace period, because the daemon may crash between receiving and storing it.
 - The daemon caches the access token in memory and refreshes it 60 seconds before `expires_in` runs out, or after the server rejects it.
 - The refresh request MUST be rejected with `400 {"error":"invalid_grant"}` once the device is revoked. On `invalid_grant`, `unauthorized_client` or `access_denied`, the daemon marks itself **revoked**, closes the tunnel, stops reconnecting, and waits for the user to run `cww login`. Any other failure (network error, 5xx, other error codes) is retried with backoff.
@@ -226,10 +227,10 @@ Any other selection is an error, and the daemon disconnects.
 
 1. The server MAY send `{"type":"welcome"}`.
 2. The daemon sends `{"command":"subscribe","identifier":"{\"channel\":\"LocalAgent::Channel\"}"}`.
-3. The server answers `{"identifier":"…","type":"confirm_subscription"}`, or `reject_subscription`, which the daemon treats as unauthorized (see 6.4).
+3. The server answers `{"identifier":"…","type":"confirm_subscription"}`, or `reject_subscription`, which the daemon treats as unauthorized (see 6.4). Only this channel's rejection counts: a refused chat channel (section 12) is just a chat that can't be followed.
 4. **Server to daemon:** each JSON-RPC message is the `message` of a channel transmission:
    `{"identifier":"{\"channel\":\"LocalAgent::Channel\"}","message":{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{…}}}`.
-   `message` SHOULD be a JSON object. A string containing serialized JSON is also accepted. Frames for other identifiers are ignored.
+   `message` SHOULD be a JSON object. A string containing serialized JSON is also accepted. Frames for other identifiers are ignored, except the chat channels of section 12, whose messages go to the terminal UI and never to the MCP server.
 5. **Daemon to server:** each JSON-RPC message is sent as a `message` command whose `data` is the serialized JSON-RPC message:
    `{"command":"message","identifier":"{\"channel\":\"LocalAgent::Channel\"}","data":"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{…}}"}`.
    JSON-RPC messages never contain an `action` key, so Rails dispatches them to `LocalAgent::Channel#receive(data)`, where `data` is the parsed JSON-RPC message.
@@ -507,3 +508,31 @@ These are enforced by the daemon whatever the server does. The defaults can be c
 13. **Offsets** count Unicode scalar values.
 14. **Revocation handling.** `invalid_grant`, `unauthorized_client` and `access_denied` on refresh stop the daemon's reconnect loop until `cww login`. Everything else is retried.
 15. **One server per daemon.** Open question 1 in the design is answered as one pairing at a time. `cww login` again replaces it.
+16. **Chats for the terminal** use the device's own token with a second scope, not a separate grant, and the daemon makes every call, so the terminal UI never holds a token. Answers stream over the tunnel's socket (section 12) rather than Server-Sent Events.
+
+## 12. Chats for the terminal UI
+
+`cww tui` shows the owner's chats and asks questions. It never talks to the server: it asks the daemon over the control socket (CONTROL.md), and the daemon calls the server as the device.
+
+**Permission.** Chats are a second permission, apart from answering tools. `cww login` asks for `local_agent:chat` in its scope (`--no-chats` leaves it out), and the approval page lets the user decline it. A computer paired without it asks on first use with `POST /local_agent/chat_access_request`, and the owner answers in the server's settings. The owner can take chats back at any time without unpairing; the server then refuses the chat API and closes the socket with 4001, so followed chats stop.
+
+**Requests.** JSON over HTTPS, each with `Authorization: DPoP <access token>` and a `DPoP` proof for that method and URL with `ath`, exactly as the upgrade in 6.1. Errors are `{"error": <code>, "error_description": <sentence>, ...}`.
+
+| Request | Answers |
+|---|---|
+| `GET /local_agent/chats` | `chats` (newest first: `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`), `projects`, `account`, `user`, `locked_reason` |
+| `GET /local_agent/chats/<number>` | `chat`, `locked_reason`, and `entries`: `user`, `activity` (title, details, `pending`, steps with file names), `assistant` (Markdown, `sources`), `notice` |
+| `POST /local_agent/chats` `{"content":…}` | `201 {"chat":…}`: a new chat with its first question |
+| `POST /local_agent/chats/<number>/messages` `{"content":…}` | `202 {"chat":…}`, or `409 chat_busy` while an answer is written |
+| `POST /local_agent/chats/<number>/cancellation` | `202`: stops the answer |
+| `POST /local_agent/chat_access_request` | `202 {"granted","requested","approve_url"}` |
+
+`403 chat_access_required` (with `requested` and `approve_url`) means the owner hasn't allowed chats. `403 insufficient_scope` means the token predates the permission: the daemon refreshes the token and retries once. `401` is handled the same way. Other codes (`locked`, `rate_limited`, `invalid`, `not_found`, `forbidden`) are passed to the terminal as they are. An answer that isn't this JSON means the server has no chat API, and the terminal says so.
+
+**Streaming.** With Action Cable framing, the daemon follows a chat by subscribing to one more channel on the same socket:
+
+```
+{"command":"subscribe","identifier":"{\"channel\":\"LocalAgent::ChatChannel\",\"chat\":\"42\"}"}
+```
+
+The server confirms it only for a device allowed to chat and a chat its owner may watch, and then sends updates as the channel's `message`: `{"type":"chunk","message_id":5,"text":"…"}` (answer text as it's written), `{"type":"progress","text":"…"}` (what the running step does), and `{"type":"changed"}` (anything else: read the chat again). The daemon subscribes once per chat however many terminals follow it, unsubscribes when the last one stops, and subscribes again after a reconnect. A refused chat channel never ends the session. With `mcp` framing there are no chat channels.

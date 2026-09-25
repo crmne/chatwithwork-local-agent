@@ -10,6 +10,10 @@
 //!   command.
 //! - `mcp`: one JSON-RPC message per text frame, nothing else. For servers or
 //!   relays that don't use Action Cable.
+//!
+//! With Action Cable framing the daemon may also subscribe to
+//! `LocalAgent::ChatChannel`, once per chat the terminal UI follows, and
+//! receive that chat's updates. Those never reach the MCP server.
 
 use serde_json::{Value, json};
 
@@ -19,6 +23,8 @@ pub const SUBPROTOCOL_MCP: &str = "mcp";
 pub const OFFERED_SUBPROTOCOLS: &str = "actioncable-v1-json, mcp";
 /// The Action Cable channel identifier, byte for byte.
 pub const CHANNEL_IDENTIFIER: &str = r#"{"channel":"LocalAgent::Channel"}"#;
+/// The channel for one followed chat: `{"channel":…,"chat":"42"}`.
+pub const CHAT_CHANNEL: &str = "LocalAgent::ChatChannel";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Framing {
@@ -34,6 +40,13 @@ pub enum Inbound {
     Ping,
     Confirmed,
     Rejected,
+    /// An update of a followed chat. Never handed to the MCP server.
+    Chat {
+        chat: String,
+        update: Value,
+    },
+    ChatConfirmed(String),
+    ChatRejected(String),
     Disconnect {
         reason: String,
         reconnect: bool,
@@ -63,6 +76,24 @@ impl Framing {
         }
     }
 
+    /// The command that follows `chat`, when this framing can.
+    pub fn follow_chat(self, chat: &str) -> Option<String> {
+        self.chat_command("subscribe", chat)
+    }
+
+    pub fn unfollow_chat(self, chat: &str) -> Option<String> {
+        self.chat_command("unsubscribe", chat)
+    }
+
+    fn chat_command(self, command: &str, chat: &str) -> Option<String> {
+        match self {
+            Self::ActionCable => {
+                Some(json!({ "command": command, "identifier": chat_identifier(chat) }).to_string())
+            }
+            Self::Mcp => None,
+        }
+    }
+
     /// Wrap one serialized JSON-RPC message.
     pub fn encode(self, jsonrpc: &str) -> String {
         match self {
@@ -87,12 +118,36 @@ impl Framing {
     }
 }
 
+pub fn chat_identifier(chat: &str) -> String {
+    json!({ "channel": CHAT_CHANNEL, "chat": chat }).to_string()
+}
+
+/// The chat a chat channel identifier names.
+fn chat_of(identifier: Option<&str>) -> Option<String> {
+    let value: Value = serde_json::from_str(identifier?).ok()?;
+    if value["channel"] != CHAT_CHANNEL {
+        return None;
+    }
+    value["chat"].as_str().map(str::to_string)
+}
+
 fn decode_action_cable(mut value: Value) -> Inbound {
+    let identifier = value.get("identifier").and_then(Value::as_str);
+    let chat = chat_of(identifier);
     match value.get("type").and_then(Value::as_str) {
         Some("welcome") => return Inbound::Welcome,
         Some("ping") => return Inbound::Ping,
-        Some("confirm_subscription") => return Inbound::Confirmed,
-        Some("reject_subscription") => return Inbound::Rejected,
+        Some("confirm_subscription") => {
+            return chat.map_or(Inbound::Confirmed, Inbound::ChatConfirmed);
+        }
+        // Only the device's own channel being refused ends the session.
+        Some("reject_subscription") => {
+            return match chat {
+                Some(chat) => Inbound::ChatRejected(chat),
+                None if identifier.is_none_or(|i| i == CHANNEL_IDENTIFIER) => Inbound::Rejected,
+                None => Inbound::Ignored,
+            };
+        }
         Some("disconnect") => {
             return Inbound::Disconnect {
                 reason: value["reason"].as_str().unwrap_or_default().to_string(),
@@ -102,7 +157,13 @@ fn decode_action_cable(mut value: Value) -> Inbound {
         Some(_) => return Inbound::Ignored,
         None => {}
     }
-    if value.get("identifier").and_then(Value::as_str) != Some(CHANNEL_IDENTIFIER) {
+    if let Some(chat) = chat {
+        return match value.get_mut("message").map(Value::take) {
+            Some(update @ Value::Object(_)) => Inbound::Chat { chat, update },
+            _ => Inbound::Ignored,
+        };
+    }
+    if identifier != Some(CHANNEL_IDENTIFIER) {
         return Inbound::Ignored;
     }
     match value.get_mut("message").map(Value::take) {
@@ -154,6 +215,44 @@ mod tests {
         );
         let other_channel = json!({ "identifier": "{\"channel\":\"Other\"}", "message": {} });
         assert_eq!(f.decode(&other_channel.to_string()), Inbound::Ignored);
+    }
+
+    #[test]
+    fn chat_updates_stay_apart_from_mcp() {
+        let f = Framing::ActionCable;
+        let identifier = chat_identifier("42");
+        let follow: Value = serde_json::from_str(&f.follow_chat("42").unwrap()).unwrap();
+        assert_eq!(follow["command"], "subscribe");
+        assert_eq!(follow["identifier"], identifier.as_str());
+        assert!(Framing::Mcp.follow_chat("42").is_none());
+
+        let update = json!({ "identifier": identifier, "message": { "type": "chunk", "message_id": 5, "text": "Hi" } });
+        assert_eq!(
+            f.decode(&update.to_string()),
+            Inbound::Chat {
+                chat: "42".into(),
+                update: json!({ "type": "chunk", "message_id": 5, "text": "Hi" })
+            }
+        );
+        let confirmed = json!({ "identifier": identifier, "type": "confirm_subscription" });
+        assert_eq!(
+            f.decode(&confirmed.to_string()),
+            Inbound::ChatConfirmed("42".into())
+        );
+        // A refused chat doesn't end the session; a refused device does.
+        let rejected = json!({ "identifier": identifier, "type": "reject_subscription" });
+        assert_eq!(
+            f.decode(&rejected.to_string()),
+            Inbound::ChatRejected("42".into())
+        );
+        let device = json!({ "identifier": CHANNEL_IDENTIFIER, "type": "reject_subscription" });
+        assert_eq!(f.decode(&device.to_string()), Inbound::Rejected);
+        // A chat update shaped like a JSON-RPC request is still not one.
+        let sneaky = json!({ "identifier": identifier, "message": { "jsonrpc": "2.0", "id": 1, "method": "tools/call" } });
+        assert!(matches!(
+            f.decode(&sneaky.to_string()),
+            Inbound::Chat { .. }
+        ));
     }
 
     #[test]

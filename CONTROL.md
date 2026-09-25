@@ -195,6 +195,40 @@ What to offer on first run: the user's Documents folder (the XDG user directory 
 
 The last `lines` entries (default 50, at most 1000), oldest first. See [Audit entries](#audit-entries).
 
+### Chats
+
+The terminal UI's chats go through the daemon, which asks Chat with Work as this computer (PROTOCOL.md, section 12). No client ever holds a token. These requests work while the computer is paired and the owner lets it use their chats; otherwise they fail with a `code` (see [Failures with a code](#failures-with-a-code)).
+
+```json
+{"cmd": "chats"}
+```
+
+The server's list, as it sent it: `chats` (newest first, each with `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`), `projects`, `account`, `user`, and `locked_reason`, the sentence the composer shows when a question can't be asked.
+
+```json
+{"cmd": "chat", "chat": "42"}
+```
+
+One chat: `chat`, `locked_reason`, and `entries`, each with a `kind`: `user`, `activity` (a title such as "Searched Drive and Slack", `details`, `pending`, and `steps` with file names), `assistant` (Markdown `content` and `sources`), or `notice` (a failure or running out of credits). Chat numbers are digits only.
+
+```json
+{"cmd": "chat_send", "text": "And Q4?", "chat": "42"}
+```
+
+Asks in chat 42, or in a new chat without `chat` (`project` puts a new chat in a project). Answers `{"chat": {...}}`. Follow the chat to see the answer.
+
+```json
+{"cmd": "chat_cancel", "chat": "42"}
+```
+
+Stops the answer being written.
+
+```json
+{"cmd": "chat_access"}
+```
+
+Asks the owner to let this computer use their chats: `{"granted": false, "requested": true, "approve_url": "https://…/settings?tab=connectors#computers"}`. Nothing is allowed until they say yes in Chat with Work.
+
 ### `shutdown`
 
 ```json
@@ -209,7 +243,15 @@ Answers `{"ok": true, "stopping": true}`, then the daemon exits cleanly. systemd
 {"cmd": "subscribe", "topics": ["audit", "status"]}
 ```
 
-`topics` defaults to both. The response is `{"ok": true, "topics": [...]}`, and from then on the connection carries events. Send nothing else on it.
+`topics` defaults to `audit` and `status`. The response is `{"ok": true, "topics": [...]}`, and from then on the connection carries events. Send nothing else on it.
+
+To follow a chat, subscribe to the `chat` topic with its number:
+
+```json
+{"cmd": "subscribe", "topics": ["chat"], "chat": "42"}
+```
+
+The daemon follows the chat on the server for as long as the connection stays open, once however many clients follow it. A refusal (not paired, a bad number) comes back as a failure with a `code` instead of `ok`.
 
 ## 5. Events
 
@@ -226,6 +268,14 @@ Each event is one line with an `event` field.
 ```json
 {"event": "audit", "entry": { "ts": "2026-09-25T08:14:05Z", "event": "tool", "tool": "read", "path": "work-docs:plans/q3.md", "decision": "denied", "code": "denied", "reason": "this path is on the deny list (.env*)" }}
 ```
+
+**`chat`**: an update of the followed chat. `update.type` is `chunk` (answer text as it's written: `message_id`, `text`), `progress` (what the running step does: `text`), `changed` (anything else: read the chat again), or a note from the daemon: `watching` (the server follows it now, so catch up), `offline` (no connection to the server; the daemon keeps trying and says `watching` again later) or `refused` (the server won't let this computer follow it).
+
+```json
+{"event": "chat", "chat": "42", "update": { "type": "chunk", "message_id": 5, "text": "The Q3 budget is " }}
+```
+
+**`heartbeat`**: sent every 30 seconds on a chat subscription while nothing else happens, so a client that stopped reading is noticed and the chat is no longer followed for it.
 
 **`lagged`**: the client read too slowly and `missed` events were dropped. Ask for `status` or `audit_tail` on another connection to catch up.
 
@@ -251,6 +301,24 @@ The daemon never polls to produce events, and a client that waits on a subscript
 | `detail` | daemon events | A short description, such as the server URL on `connected`. |
 
 Unknown fields may appear later; ignore them.
+
+### Failures with a code
+
+Some failures carry a `code` for clients to act on, with more fields where they help:
+
+```json
+{"ok": false, "error": "Allow this computer to use your chats in Settings", "code": "chat_access_required", "requested": false, "approve_url": "https://chatwithwork.com/482139075/settings?tab=connectors#computers"}
+```
+
+| `code` | Means |
+|---|---|
+| `not_paired` | This computer isn't paired. |
+| `revoked` | The server revoked it; pair again. |
+| `unreachable` | The server can't be reached right now. |
+| `unsupported` | The server has no chat API for the terminal. |
+| `chat_access_required` | The owner hasn't allowed chats (yet): `requested` says whether they were asked, `approve_url` where to answer. |
+| `locked` | A question can't be asked now; `error` says why (for example, out of credits). |
+| `chat_busy`, `not_found`, `rate_limited`, `invalid`, `forbidden`, `bad_request` | As they say. |
 
 ## 6. When the daemon isn't running
 
