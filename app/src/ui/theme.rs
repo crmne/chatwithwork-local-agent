@@ -51,6 +51,9 @@ pub struct Theme {
     pub dark: bool,
     pub palette: Palette,
     pub metrics: Metrics,
+    /// How the desktop renders text: hinting, sub-pixel positions, and how
+    /// glyph coverage becomes ink.
+    pub text: fastframe_text::TextRendering,
 }
 
 const fn rgb(hex: u32) -> Color32 {
@@ -121,6 +124,9 @@ impl Theme {
             dark,
             palette,
             metrics,
+            // Tests and previews get the platform's fixed rendering;
+            // `detect` asks the desktop.
+            text: fastframe_text::TextRendering::platform_default(),
         }
     }
 
@@ -130,7 +136,10 @@ impl Theme {
             Some(theme) => theme == egui::Theme::Dark,
             None => crate::platform::prefers_dark().unwrap_or(false),
         };
-        Self::new(Platform::current(), dark, crate::platform::accent_color())
+        Self {
+            text: crate::platform::text_rendering(),
+            ..Self::new(Platform::current(), dark, crate::platform::accent_color())
+        }
     }
 
     pub fn apply(&self, ctx: &egui::Context) {
@@ -163,9 +172,7 @@ impl Theme {
             Color32::from_gray(232)
         };
         visuals.override_text_color = Some(p.text);
-        // Linear coverage, as GTK and cairo draw text. egui's dark-mode curve
-        // thickens glyphs against the native apps beside this window.
-        visuals.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
+        self.text.apply_to_visuals(&mut visuals);
         visuals.weak_text_color = Some(p.weak);
         visuals.hyperlink_color = p.accent;
         visuals.selection.bg_fill = p.accent.gamma_multiply(if self.dark { 0.55 } else { 0.35 });
@@ -390,8 +397,8 @@ fn palette(platform: Platform, dark: bool, accent: Option<Color32>) -> Palette {
 }
 
 /// Load the platform's UI font, with egui's own fonts behind it for any
-/// character it lacks.
-pub fn install_fonts(ctx: &egui::Context) {
+/// character it lacks, hinted as the desktop asks.
+pub fn install_fonts(ctx: &egui::Context, text: &fastframe_text::TextRendering) {
     let mut fonts = egui::FontDefinitions::default();
     let fallback = fonts
         .families
@@ -421,11 +428,12 @@ pub fn install_fonts(ctx: &egui::Context) {
     fonts
         .families
         .insert(FontFamily::Name(BOLD.into()), bold_family);
+    text.apply_to(&mut fonts);
     ctx.set_fonts(fonts);
 }
 
 /// Without the system fonts, as in tests, the bold family still exists.
-pub fn install_default_fonts(ctx: &egui::Context) {
+pub fn install_default_fonts(ctx: &egui::Context, text: &fastframe_text::TextRendering) {
     let mut fonts = egui::FontDefinitions::default();
     let proportional = fonts
         .families
@@ -435,6 +443,7 @@ pub fn install_default_fonts(ctx: &egui::Context) {
     fonts
         .families
         .insert(FontFamily::Name(BOLD.into()), proportional);
+    text.apply_to(&mut fonts);
     ctx.set_fonts(fonts);
 }
 
@@ -442,15 +451,24 @@ pub fn install_default_fonts(ctx: &egui::Context) {
 mod tests {
     use super::*;
 
+    /// fastframe-text tests its own mapping; this checks that the style
+    /// carries the theme's rendering and nothing overrides it afterwards.
     #[test]
-    fn text_coverage_is_linear_in_both_themes() {
+    fn the_style_draws_text_as_the_desktop_asks() {
         for dark in [false, true] {
-            let style = Theme::new(Platform::Linux, dark, None).style();
+            let text = fastframe_text::TextRendering::default();
+            let theme = Theme {
+                text,
+                ..Theme::new(Platform::Linux, dark, None)
+            };
+            let options = theme.style().visuals.text_options;
+            assert_eq!(
+                options.color_transfer_function,
+                text.color_transfer_function(dark),
+                "dark={dark}"
+            );
             assert!(
-                matches!(
-                    style.visuals.text_options.color_transfer_function,
-                    egui::epaint::FontColorTransferFunction::Off
-                ),
+                options.font_hinting && options.subpixel_binning,
                 "dark={dark}"
             );
         }
