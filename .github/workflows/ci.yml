@@ -53,15 +53,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mr-boxington-action@v1
         with:
-          key: app
+          cache-generation: app-v1
       - run: cargo fmt -p cww-app --check
-      - run: cargo clippy -p cww-app --all-targets --locked -- -D warnings
-      - run: cargo clippy -p cww-app --features demo --all-targets --locked -- -D warnings
-      - run: cargo test -p cww-app --locked --no-run
-      - run: cargo test -p cww-app --locked
+      - run: mbx clippy -p cww-app --all-targets --locked -- -D warnings
+      - run: mbx clippy -p cww-app --features demo --all-targets --locked -- -D warnings
+      - run: mbx test -p cww-app --locked --no-run
+      - run: mbx test -p cww-app --locked
         timeout-minutes: 5
+      # Built by cargo itself, like the published binaries, since these are
+      # downloadable.
       - run: cargo build -p cww-app -p cww --release --locked
 
       - name: Bundle the macOS app

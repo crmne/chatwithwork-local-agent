@@ -42,9 +42,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: desktop-preview-macos
+      # No compiler cache: these binaries are published as a prerelease.
 
       - name: Build both architectures
         run: |
@@ -159,9 +157,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: desktop-preview-${{ matrix.target }}
+      # No compiler cache: these binaries are published as a prerelease.
 
       - run: cargo build --locked --release --target ${{ matrix.target }} -p cww -p cww-app --bin cww --bin cww-agent --bin cww-app
 
