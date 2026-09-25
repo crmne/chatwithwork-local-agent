@@ -564,9 +564,10 @@ impl SettingsApp {
                     match event {
                         // `cww login` opens the approval page itself.
                         PairEvent::Code(code) => self.account.pairing = Some(Some(code)),
-                        PairEvent::Paired => {
+                        PairEvent::Paired { daemon_error } => {
                             self.account.pairing = None;
                             self.account.cancel = None;
+                            self.account.error = daemon_error;
                         }
                         PairEvent::Failed(e) => {
                             self.account.pairing = None;

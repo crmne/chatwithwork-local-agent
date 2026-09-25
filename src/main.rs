@@ -180,9 +180,9 @@ fn run(cli: Cli) -> Result<()> {
             name,
             no_browser,
             no_chats,
+            no_daemon,
             json: true,
-            ..
-        } => login_json(&paths, &server, name, !no_browser, no_chats)?,
+        } => login_json(&paths, &server, name, !no_browser, no_chats, !no_daemon)?,
         Command::Login {
             server,
             name,
@@ -204,10 +204,14 @@ fn run(cli: Cli) -> Result<()> {
                 offer_documents(&paths)?;
             }
             proxy_hint(&paths);
-            if no_daemon {
-                notify_daemon(&paths, START_DAEMON_HINT);
-            } else {
-                start_daemon(&paths);
+            match daemon_after_login(&paths, !no_daemon) {
+                AfterLogin::Reloaded => println!("The daemon picked up the pairing."),
+                AfterLogin::Started => {
+                    println!("Started the daemon. It runs in the background and at every login.");
+                }
+                AfterLogin::NotRunning => println!("{START_DAEMON_HINT}"),
+                AfterLogin::Failed(e) if no_daemon => eprintln!("warning: {e}"),
+                AfterLogin::Failed(e) => eprintln!("warning: {e}\n{START_DAEMON_HINT}"),
             }
         }
         Command::Logout => {
@@ -450,21 +454,46 @@ fn pause(paths: &Paths, paused: bool) -> Result<()> {
 
 const START_DAEMON_HINT: &str = "Start the daemon with `cww daemon install` (or `cww daemon run`).";
 
-/// After pairing: a running daemon re-reads the config, and otherwise the
-/// daemon is installed as a service, which starts it now and at every login.
-fn start_daemon(paths: &Paths) {
+/// What became of the daemon after pairing.
+#[derive(Debug)]
+enum AfterLogin {
+    /// It was running and re-read the config.
+    Reloaded,
+    /// It wasn't running, so its service was installed, which starts it.
+    Started,
+    /// It isn't running, and wasn't to be started.
+    NotRunning,
+    Failed(String),
+}
+
+impl AfterLogin {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Reloaded => "reloaded",
+            Self::Started => "started",
+            Self::NotRunning => "not_running",
+            Self::Failed(_) => "failed",
+        }
+    }
+}
+
+/// After pairing: a running daemon re-reads the config, and otherwise,
+/// when `start`, the daemon is installed as a service, which starts it now
+/// and at every login.
+fn daemon_after_login(paths: &Paths, start: bool) -> AfterLogin {
     match control::request(&paths.socket_path(), ControlRequest::Reload) {
-        Ok(Some(_)) => println!("The daemon picked up the pairing."),
+        Ok(Some(_)) => AfterLogin::Reloaded,
+        Ok(None) if !start => AfterLogin::NotRunning,
         Ok(None) => match service::install(
             paths,
             &service::InstallOptions {
                 no_hardening: false,
             },
         ) {
-            Ok(_) => println!("Started the daemon. It runs in the background and at every login."),
-            Err(e) => eprintln!("warning: couldn't start the daemon: {e:#}\n{START_DAEMON_HINT}"),
+            Ok(_) => AfterLogin::Started,
+            Err(e) => AfterLogin::Failed(format!("couldn't start the daemon: {e:#}")),
         },
-        Err(e) => eprintln!("warning: couldn't reach the daemon: {e:#}"),
+        Err(e) => AfterLogin::Failed(format!("couldn't reach the daemon: {e:#}")),
     }
 }
 
@@ -479,13 +508,16 @@ fn proxy_hint(paths: &Paths) {
 
 /// `cww login --json`: one JSON object per line on stdout. First
 /// `{"event":"code",...}` with what to show and open, then `{"event":"paired",...}`
-/// or `{"event":"error",...}`. The daemon is told to reload on success.
+/// or `{"event":"error",...}`. On success the daemon is started as by
+/// `cww login` (reloaded if running, else installed unless `start` is
+/// false), and `paired` says how that went.
 fn login_json(
     paths: &Paths,
     server: &str,
     name: Option<String>,
     open: bool,
     without_chats: bool,
+    start: bool,
 ) -> Result<()> {
     use std::sync::atomic::AtomicBool;
 
@@ -512,12 +544,19 @@ fn login_json(
     });
     match result {
         Ok(paired) => {
-            let _ = control::request(&paths.socket_path(), ControlRequest::Reload);
-            emit(serde_json::json!({
+            // The pairing is saved either way: a daemon that couldn't pick it
+            // up is reported, not an error.
+            let daemon = daemon_after_login(paths, start);
+            let mut event = serde_json::json!({
                 "event": "paired",
                 "server": paired.url,
                 "device_id": paired.device_id,
-            }));
+                "daemon": daemon.name(),
+            });
+            if let AfterLogin::Failed(e) = &daemon {
+                event["daemon_error"] = Value::String(e.clone());
+            }
+            emit(event);
             Ok(())
         }
         Err(e) => {

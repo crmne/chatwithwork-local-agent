@@ -443,7 +443,7 @@ impl crate::pairing::Account for Account {
                 s.status["paired"] = json!(true);
                 s.status["connection"] = json!({ "connection": "connected", "since": ago(0) });
             });
-            report(PairEvent::Paired);
+            report(PairEvent::Paired { daemon_error: None });
         });
         let demo = Arc::clone(&self.0);
         Box::new(move || {

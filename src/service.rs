@@ -432,9 +432,12 @@ mod windows_task {
     }
 }
 
+/// Run a service manager. What it prints goes to stderr: stdout may be
+/// `cww login --json`'s, which only carries JSON.
 fn run(program: &str, args: &[&str]) -> Result<()> {
     let status = Command::new(program)
         .args(args)
+        .stdout(std::io::stderr())
         .status()
         .with_context(|| format!("running {program}"))?;
     if !status.success() {

@@ -24,7 +24,11 @@ pub struct Code {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PairEvent {
     Code(Code),
-    Paired,
+    /// Paired. `daemon_error` says why the running Local Agent didn't pick
+    /// the pairing up, or couldn't be started; the pairing is saved anyway.
+    Paired {
+        daemon_error: Option<String>,
+    },
     Failed(String),
 }
 
@@ -90,18 +94,10 @@ impl Account for Cli {
                 let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
-                match event["event"].as_str() {
-                    Some("code") => {
-                        if let Ok(code) = serde_json::from_value(event) {
-                            report(PairEvent::Code(code));
-                        }
-                    }
-                    Some("paired") => outcome = Some(PairEvent::Paired),
-                    Some("error") => {
-                        let error = event["error"].as_str().unwrap_or("pairing failed");
-                        outcome = Some(PairEvent::Failed(sentence(error)));
-                    }
-                    _ => {}
+                match read_event(event) {
+                    Some(PairEvent::Code(code)) => report(PairEvent::Code(code)),
+                    Some(done) => outcome = Some(done),
+                    None => {}
                 }
             }
             if let Some(mut process) = running.lock().expect("pairing lock").take() {
@@ -134,6 +130,26 @@ impl Account for Cli {
     }
 }
 
+/// One line of `cww login --json`, as what the window shows.
+fn read_event(event: serde_json::Value) -> Option<PairEvent> {
+    match event["event"].as_str()? {
+        "code" => serde_json::from_value(event).ok().map(PairEvent::Code),
+        "paired" => {
+            let daemon_error = event["daemon_error"].as_str().map(|e| {
+                sentence(&format!(
+                    "Paired, but the Local Agent didn't pick it up: {e}"
+                ))
+            });
+            Some(PairEvent::Paired { daemon_error })
+        }
+        "error" => {
+            let error = event["error"].as_str().unwrap_or("pairing failed");
+            Some(PairEvent::Failed(sentence(error)))
+        }
+        _ => None,
+    }
+}
+
 fn sentence(message: &str) -> String {
     let mut chars = message.chars();
     let mut out: String = match chars.next() {
@@ -144,4 +160,38 @@ fn sentence(message: &str) -> String {
         out.push('.');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reads_what_cww_login_says() {
+        assert_eq!(
+            read_event(
+                json!({ "event": "paired", "server": "https://x", "device_id": "42", "daemon": "reloaded" })
+            ),
+            Some(PairEvent::Paired { daemon_error: None })
+        );
+        assert_eq!(
+            read_event(json!({ "event": "paired", "daemon": "failed", "daemon_error": "couldn't reach the daemon: refused" })),
+            Some(PairEvent::Paired {
+                daemon_error: Some(
+                    "Paired, but the Local Agent didn't pick it up: couldn't reach the daemon: refused."
+                        .into()
+                )
+            })
+        );
+        assert_eq!(
+            read_event(json!({ "event": "error", "error": "the code expired" })),
+            Some(PairEvent::Failed("The code expired.".into()))
+        );
+        assert!(matches!(
+            read_event(json!({ "event": "code", "user_code": "WDJB-MJHT" })),
+            Some(PairEvent::Code(Code { user_code, .. })) if user_code == "WDJB-MJHT"
+        ));
+        assert_eq!(read_event(json!({ "event": "later" })), None);
+    }
 }

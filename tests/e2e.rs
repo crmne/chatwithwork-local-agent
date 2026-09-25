@@ -1340,18 +1340,59 @@ async fn the_settings_app_manages_folders_over_the_control_channel() {
 }
 
 /// `cww login --json`, which the desktop app runs to pair: the code first,
-/// then the outcome, one JSON object per line.
+/// then the outcome, one JSON object per line, saying what became of the
+/// daemon. `--no-daemon` keeps these tests from installing a service.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn login_json_reports_the_code_and_the_pairing() {
     let fx = fixture();
-    let server = FakeServer::start().await;
-    let (base, origin) = (fx.base.join("cww"), server.origin.clone());
+    let mut server = FakeServer::start().await;
+    let lines = login_json(&fx, &server.origin).await;
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["event"], "code");
+    assert_eq!(lines[0]["user_code"], "WDJB-MJHT");
+    assert_eq!(lines[0]["device_name"], "Test laptop");
+    assert_eq!(
+        lines[0]["browser_url"],
+        json!(format!("{}/device", server.origin))
+    );
+    assert_eq!(lines[0]["opened"], false, "--no-browser");
+    assert_eq!(lines[1]["event"], "paired");
+    assert_eq!(lines[1]["device_id"], "42");
+    assert_eq!(lines[1]["daemon"], "not_running");
+    assert_eq!(
+        Config::load(&fx.paths).unwrap().server.unwrap().device_id,
+        "42"
+    );
+
+    // Paired again with the daemon running: it picks the pairing up.
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    tokio::time::timeout(Duration::from_secs(20), server.sockets.recv())
+        .await
+        .expect("the daemon connects")
+        .unwrap();
+    let lines = login_json(&fx, &server.origin).await;
+    assert_eq!(lines[1]["event"], "paired", "{lines:?}");
+    assert_eq!(lines[1]["daemon"], "reloaded", "{lines:?}");
+    assert!(lines[1].get("daemon_error").is_none(), "{lines:?}");
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+}
+
+async fn login_json(fx: &Fixture, origin: &str) -> Vec<Value> {
+    let (base, origin) = (fx.base.join("cww"), origin.to_string());
     let out = tokio::task::spawn_blocking(move || {
         std::process::Command::new(env!("CARGO_BIN_EXE_cww"))
             .args([
                 "login",
                 "--json",
                 "--no-browser",
+                "--no-daemon",
                 "--server",
                 &origin,
                 "--name",
@@ -1369,26 +1410,11 @@ async fn login_json_reports_the_code_and_the_pairing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let lines: Vec<Value> = String::from_utf8(out.stdout)
+    String::from_utf8(out.stdout)
         .unwrap()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 2, "{lines:?}");
-    assert_eq!(lines[0]["event"], "code");
-    assert_eq!(lines[0]["user_code"], "WDJB-MJHT");
-    assert_eq!(lines[0]["device_name"], "Test laptop");
-    assert_eq!(
-        lines[0]["browser_url"],
-        json!(format!("{}/device", server.origin))
-    );
-    assert_eq!(lines[0]["opened"], false, "--no-browser");
-    assert_eq!(lines[1]["event"], "paired");
-    assert_eq!(lines[1]["device_id"], "42");
-    assert_eq!(
-        Config::load(&fx.paths).unwrap().server.unwrap().device_id,
-        "42"
-    );
+        .collect()
 }
 
 #[cfg(unix)]
