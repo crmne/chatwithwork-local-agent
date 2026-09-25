@@ -43,6 +43,7 @@ fn fixture(scenario: Scenario, page: Option<Page>) -> Fixture {
     let shared = Shared::new(
         Client::new(server.paths.socket_path()),
         server.paths.clone(),
+        server.account(),
     );
     let watcher = Arc::clone(&shared);
     shared
@@ -132,15 +133,22 @@ fn nothing_is_shared_until_the_user_says_so() {
 }
 
 #[test]
-fn pairing_opens_the_browser_and_shows_the_code() {
+fn pairing_shows_the_code_and_can_reopen_the_page() {
     OPENED.with(|o| o.borrow_mut().clear());
     let mut fx = fixture(Scenario::Fresh, Some(Page::Account));
     fx.wait_for_label("This computer isn't paired");
     fx.harness.get_by_label("Pair with Chat with Work…").click();
     fx.wait_for_request("pair");
     fx.wait_for_label("WDJB-MJHT");
+    // `cww login` opens the page; the window only offers to open it again.
+    assert!(OPENED.with(|o| o.borrow().is_empty()));
+    fx.harness.get_by_label("Open Page Again").click();
+    fx.harness.run_steps(2);
     let opened = OPENED.with(|o| o.borrow().clone());
-    assert_eq!(opened, ["https://chatwithwork.com/device"], "opened once");
+    assert_eq!(
+        opened,
+        ["https://chatwithwork.com/device?user_code=WDJB-MJHT"]
+    );
 
     fx.harness.get_by_label("Cancel").click();
     fx.wait_for_request("pair_cancel");
@@ -236,7 +244,11 @@ fn a_stopped_agent_can_be_started_from_the_window() {
     let tmp = tempfile::tempdir().unwrap();
     let paths = crate::paths::Paths::under(tmp.path());
     AppState { onboarded: true }.save(&paths);
-    let shared = Shared::new(Client::new(paths.socket_path()), paths);
+    let shared = Shared::new(
+        Client::new(paths.socket_path()),
+        paths,
+        Arc::new(crate::pairing::Cli),
+    );
     shared.set_status(None);
     let app = SettingsApp::new(shared, Theme::new(Platform::current(), true, None));
     let mut harness = Harness::builder()

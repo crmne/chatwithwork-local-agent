@@ -43,7 +43,7 @@ rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "w
 pollster = "0.4"
 # The Documents folder of each platform (XDG user dirs, Known Folders).
 directories = "6"
-# Opens the pairing page in the browser and files in their default apps.
+# Opens the config file and the log in their default apps.
 open = "5"
 # Local times in the activity log.
 jiff = "0.2"

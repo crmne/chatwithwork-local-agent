@@ -24,7 +24,6 @@ pub struct Status {
     /// Counts audit events, so every new entry is a change the window sees.
     #[serde(skip)]
     pub activity: u64,
-    pub pairing: Option<Pairing>,
     pub config_file: Option<PathBuf>,
     pub audit_file: Option<PathBuf>,
 }
@@ -66,21 +65,6 @@ pub struct AuditEntry {
     pub bytes: Option<u64>,
     pub results: Option<u64>,
     pub detail: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Pairing {
-    /// `waiting` or `failed`.
-    pub state: String,
-    pub server: String,
-    pub device_name: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub verification_uri_complete: Option<String>,
-    pub expires_at: String,
-    pub fingerprint: String,
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -339,7 +323,6 @@ mod tests {
                         "index": "ready", "indexed_files": 12, "local_path": "/home/u/Documents" }],
             "last_access": { "ts": "2026-09-25T09:12:03Z", "event": "tool", "tool": "read",
                              "path": "documents:plans/q3.md", "decision": "allowed" },
-            "pairing": null,
             "something_new": [1, 2, 3],
         }));
         assert!(s.is_paired());

@@ -58,7 +58,7 @@ impl SettingsApp {
                 None => {
                     ui.label(theme.weak("Start the Local Agent first."));
                 }
-                Some(s) if s.is_paired() && s.pairing.is_none() => {
+                Some(s) if s.is_paired() && self.account.pairing.is_none() => {
                     ui.label(theme.weak(format!(
                         "Paired with {}.",
                         s.server_host().unwrap_or_default()
