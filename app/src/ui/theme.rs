@@ -418,7 +418,6 @@ pub fn install_fonts(ctx: &egui::Context) {
     fonts
         .families
         .insert(FontFamily::Name(BOLD.into()), bold_family);
-    crisp(&mut fonts);
     ctx.set_fonts(fonts);
 }
 
@@ -433,54 +432,12 @@ pub fn install_default_fonts(ctx: &egui::Context) {
     fonts
         .families
         .insert(FontFamily::Name(BOLD.into()), proportional);
-    crisp(&mut fonts);
     ctx.set_fonts(fonts);
-}
-
-/// Fits every font's stems to the pixel grid and places each glyph on a
-/// whole pixel. egui's default hinting keeps linear metrics, so it never
-/// snaps stems horizontally, and sub-pixel binning then moves glyphs by
-/// quarter pixels: at a fractional scale such as 133% every vertical stem
-/// straddled two pixels and text looked soft. Line breaks are unchanged,
-/// since egui lays text out from the unhinted advances.
-fn crisp(fonts: &mut egui::FontDefinitions) {
-    use egui::epaint::text::{HintingTarget, SmoothHinting};
-    for data in fonts.font_data.values_mut() {
-        let tweak = &mut std::sync::Arc::make_mut(data).tweak;
-        tweak.hinting_target = HintingTarget::Smooth(SmoothHinting {
-            light: false,
-            symmetric_rendering: true,
-            preserve_linear_metrics: false,
-        });
-        tweak.subpixel_binning = Some(false);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_font_snaps_to_whole_pixels() {
-        use egui::epaint::text::{HintingTarget, SmoothHinting};
-        let mut fonts = egui::FontDefinitions::default();
-        crisp(&mut fonts);
-        assert!(!fonts.font_data.is_empty());
-        for (name, data) in &fonts.font_data {
-            assert!(
-                matches!(
-                    data.tweak.hinting_target,
-                    HintingTarget::Smooth(SmoothHinting {
-                        light: false,
-                        preserve_linear_metrics: false,
-                        ..
-                    })
-                ),
-                "{name}"
-            );
-            assert_eq!(data.tweak.subpixel_binning, Some(false), "{name}");
-        }
-    }
 
     #[test]
     fn every_platform_has_readable_palettes() {
