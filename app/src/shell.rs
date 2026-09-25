@@ -34,6 +34,8 @@ pub struct Options {
     pub page: Option<Page>,
     /// Save a picture of the window here and quit (for docs and tests).
     pub screenshot: Option<std::path::PathBuf>,
+    /// How to pair; `cww login` unless the demo replaces it.
+    pub account: Option<Arc<dyn crate::pairing::Account>>,
 }
 
 /// Our own wake-ups travel as a repaint request for a viewport that
@@ -93,7 +95,11 @@ pub fn run(paths: Paths, options: Options) -> anyhow::Result<()> {
     }
 
     let onboarded = AppState::load(&paths).onboarded;
-    let shared = Shared::new(Client::new(paths.socket_path()), paths);
+    let account = options
+        .account
+        .clone()
+        .unwrap_or_else(|| Arc::new(crate::pairing::Cli));
+    let shared = Shared::new(Client::new(paths.socket_path()), paths, account);
     {
         let events = events.clone();
         shared

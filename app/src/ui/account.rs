@@ -5,7 +5,8 @@ use egui::{RichText, Ui};
 
 use super::widgets::{self, group, row_separator};
 use super::{SettingsApp, open_url, status_color};
-use crate::model::{Health, Pairing, Status, host_of};
+use crate::model::{Health, Status, host_of};
+use crate::pairing::Code;
 use crate::time;
 
 impl SettingsApp {
@@ -27,22 +28,15 @@ impl SettingsApp {
     /// Pairing state and actions, shared with the welcome page.
     pub(super) fn pairing_section(&mut self, ui: &mut Ui, status: &Status) {
         let theme = self.theme;
-        if let Some(pairing) = status.pairing.clone() {
-            if pairing.state == "failed" {
-                widgets::notice(
-                    ui,
-                    &theme,
-                    &format!(
-                        "Pairing didn't finish: {}",
-                        pairing.error.as_deref().unwrap_or("unknown error")
-                    ),
-                    theme.palette.danger,
-                );
-                ui.add_space(6.0);
-                self.pair_button(ui, "Try Again");
-            } else {
-                self.open_pairing_page(&pairing);
-                self.pairing_card(ui, &pairing);
+        if let Some(pairing) = self.account.pairing.clone() {
+            match pairing {
+                Some(code) => self.pairing_card(ui, &code),
+                None => {
+                    ui.label(theme.weak("Asking Chat with Work for a code…"));
+                    if ui.button("Cancel").clicked() {
+                        self.cancel_pairing();
+                    }
+                }
             }
         } else if status.is_paired() {
             self.paired_card(ui, status);
@@ -94,14 +88,13 @@ impl SettingsApp {
         }
     }
 
-    fn pairing_card(&mut self, ui: &mut Ui, pairing: &Pairing) {
+    fn pairing_card(&mut self, ui: &mut Ui, pairing: &Code) {
         let theme = self.theme;
         group(ui, &theme, |ui| {
             ui.label(theme.strong("Approve this computer in your browser"));
             ui.add(
                 egui::Label::new(theme.weak(format!(
-                    "Chat with Work opened at {}. Check that it shows this code, then approve \
-                     “{}”.",
+                    "Open {} and check that it shows this code, then approve “{}”.",
                     host_of(&pairing.verification_uri),
                     pairing.device_name
                 )))
@@ -121,25 +114,19 @@ impl SettingsApp {
             });
             ui.add_space(6.0);
             // No spinner: it would repaint the window many times a second.
-            ui.label(theme.weak(format!(
-                "Waiting for approval… The code expires at {}.",
-                time::short(&pairing.expires_at)
-            )));
+            ui.label(theme.weak("Waiting for approval…"));
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("Open Page Again").clicked() {
-                    open_url(
-                        pairing
-                            .verification_uri_complete
-                            .as_deref()
-                            .unwrap_or(&pairing.verification_uri),
-                    );
-                }
+                let again = pairing.browser_url.clone();
                 if ui
-                    .add_enabled(!self.account.requesting, egui::Button::new("Cancel"))
+                    .add_enabled(again.is_some(), egui::Button::new("Open Page Again"))
                     .clicked()
+                    && let Some(url) = again
                 {
-                    self.cancel_pairing(ui.ctx());
+                    open_url(&url);
+                }
+                if ui.button("Cancel").clicked() {
+                    self.cancel_pairing();
                 }
             });
             ui.add_space(2.0);

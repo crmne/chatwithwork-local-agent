@@ -41,6 +41,11 @@ pub struct Server {
 }
 
 impl Server {
+    /// Pairing and logging out, without a Chat with Work server.
+    pub fn account(&self) -> Arc<dyn crate::pairing::Account> {
+        Arc::new(Account(Arc::clone(&self.demo)))
+    }
+
     /// Every request received so far, except `status` and `watch`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn requests(&self) -> Vec<Value> {
@@ -277,31 +282,6 @@ impl Demo {
                 let log = &self.state.lock().expect("demo lock").log;
                 json!({ "ok": true, "entries": log[log.len().saturating_sub(n)..] })
             }
-            "pair" => {
-                let pairing = json!({
-                    "state": "waiting", "server": "https://chatwithwork.com",
-                    "device_name": "carmine-laptop", "user_code": "WDJB-MJHT",
-                    "verification_uri": "https://chatwithwork.com/device",
-                    "expires_at": ago(-900), "fingerprint": "3sQ2kX9vY0a1Lr8TqZ4mN7pC6bW5eD2fH1gJ0kA9sE",
-                });
-                self.change(|s| s.status["pairing"] = pairing.clone());
-                let mut answer = pairing;
-                answer["ok"] = json!(true);
-                answer
-            }
-            "pair_cancel" => {
-                self.change(|s| s.status["pairing"] = Value::Null);
-                json!({ "ok": true })
-            }
-            "logout" => {
-                self.change(|s| {
-                    s.status["server"] = Value::Null;
-                    s.status["device_id"] = Value::Null;
-                    s.status["connection"] = json!({ "connection": "not_paired", "since": ago(0) });
-                    Self::event(s, "logged_out");
-                });
-                json!({ "ok": true, "was_paired": true })
-            }
             _ => json!({ "ok": false, "error": format!("the demo doesn't do {cmd:?}") }),
         }
     }
@@ -423,4 +403,64 @@ pub fn start(scenario: Scenario) -> anyhow::Result<Server> {
         });
     });
     Ok(Server { paths, demo })
+}
+
+/// Pairs instantly-ish and records what it was asked, in place of
+/// `cww login --json`.
+struct Account(Arc<Demo>);
+
+impl crate::pairing::Account for Account {
+    fn pair(
+        &self,
+        _server: Option<String>,
+        report: crate::pairing::Report,
+    ) -> crate::pairing::Cancel {
+        use crate::pairing::{Code, PairEvent};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let demo = Arc::clone(&self.0);
+        demo.change(|s| s.requests.push(json!({ "cmd": "pair" })));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            report(PairEvent::Code(Code {
+                user_code: "WDJB-MJHT".into(),
+                verification_uri: "https://chatwithwork.com/device".into(),
+                browser_url: Some("https://chatwithwork.com/device?user_code=WDJB-MJHT".into()),
+                device_name: "carmine-laptop".into(),
+                fingerprint: "3sQ2kX9vY0a1Lr8TqZ4mN7pC6bW5eD2fH1gJ0kA9sE".into(),
+            }));
+            // Long enough for a test to cancel it first.
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(100));
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+            }
+            demo.change(|s| {
+                s.status["server"] = json!("https://chatwithwork.com");
+                s.status["device_id"] = json!("42");
+                s.status["paired"] = json!(true);
+                s.status["connection"] = json!({ "connection": "connected", "since": ago(0) });
+            });
+            report(PairEvent::Paired);
+        });
+        let demo = Arc::clone(&self.0);
+        Box::new(move || {
+            cancelled.store(true, Ordering::SeqCst);
+            demo.change(|s| s.requests.push(json!({ "cmd": "pair_cancel" })));
+        })
+    }
+
+    fn logout(&self) -> Result<(), String> {
+        self.0.change(|s| {
+            s.requests.push(json!({ "cmd": "logout" }));
+            s.status["server"] = Value::Null;
+            s.status["device_id"] = Value::Null;
+            s.status["paired"] = json!(false);
+            s.status["connection"] = json!({ "connection": "not_paired", "since": ago(0) });
+            Demo::event(s, "logged_out");
+        });
+        Ok(())
+    }
 }

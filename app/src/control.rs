@@ -8,7 +8,7 @@ use std::time::Duration;
 use cww::control::{self as api, ControlRequest, Topic};
 use serde_json::Value;
 
-use crate::model::{AuditEntry, DenyList, Pairing, Status};
+use crate::model::{AuditEntry, DenyList, Status};
 
 /// How long to wait for the daemon's socket before trying again anyway,
 /// in case a file-system notification was missed.
@@ -130,22 +130,6 @@ impl Client {
     pub fn log(&self, lines: usize) -> Result<Vec<AuditEntry>> {
         let mut value = self.request(&ControlRequest::AuditTail { lines: Some(lines) })?;
         Ok(serde_json::from_value(value["entries"].take())?)
-    }
-
-    pub fn pair(&self, server: Option<&str>) -> Result<Pairing> {
-        let value = self.request(&ControlRequest::Pair {
-            server: server.map(str::to_string),
-            name: None,
-        })?;
-        Ok(serde_json::from_value(value)?)
-    }
-
-    pub fn cancel_pairing(&self) -> Result<()> {
-        self.request(&ControlRequest::PairCancel).map(drop)
-    }
-
-    pub fn logout(&self) -> Result<()> {
-        self.request(&ControlRequest::Logout).map(drop)
     }
 
     /// Follow the daemon for as long as the process runs. `on_change` gets

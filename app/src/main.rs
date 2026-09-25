@@ -18,6 +18,7 @@ mod events;
 mod icons;
 mod instance;
 mod model;
+mod pairing;
 mod paths;
 mod platform;
 mod screenshot;
@@ -77,6 +78,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, String>
         background: false,
         page: None,
         screenshot: None,
+        account: None,
     };
     let mut demo = None;
     while let Some(arg) = args.next() {
@@ -136,7 +138,9 @@ fn run(args: Args) -> anyhow::Result<()> {
             demo::Scenario::Sample
         };
         let server = demo::start(scenario)?;
-        return shell::run(server.paths.clone(), args.shell);
+        let mut options = args.shell;
+        options.account = Some(server.account());
+        return shell::run(server.paths.clone(), options);
     }
     let paths = paths::Paths::from_env()?;
     shell::run(paths, args.shell)

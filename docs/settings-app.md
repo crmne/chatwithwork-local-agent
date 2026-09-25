@@ -7,6 +7,7 @@
 - **Menu bar / tray item:** the state (online, paused, offline, not paired, not running), indexing progress or the last access, Pause Sharing / Resume Sharing, Settings, and Quit. The menu is the platform's own: an `NSMenu` on macOS, a Win32 menu on Windows, and DBusMenu on Linux, drawn by the panel.
 - **Settings window:** shared folders (added with the native folder picker, renamed, removed, with each folder's index state), the deny list as information, the local activity log, pairing with the browser-based device flow, start at login, and pausing.
 - **First run:** a welcome page starts the agent (`cww daemon install`), pairs, and offers to share the Documents folder. Nothing is shared until the user clicks a button that says so.
+- **Pairing** runs `cww login --json` (CONTROL.md, "Pairing"): the same flow as `cww login` and the terminal UI. The device key is created by the `cww` binary that reads it, so the sandboxed daemon never writes to the keychain and macOS doesn't ask the daemon for permission to use another program's keychain item. `cww login` opens the approval page with the shared `cww::browser` helper, which only hands plain http(s) links on the server being paired with to the system; the window offers to open it again. Disconnecting runs `cww logout`.
 
 ## Screenshots
 

@@ -24,7 +24,7 @@ use egui::{Color32, CornerRadius, Margin, RichText, Sense, Ui, Vec2};
 use serde::{Deserialize, Serialize};
 
 use crate::control::Client;
-use crate::model::{AuditEntry, DenyList, Health, Pairing, Platform, Status};
+use crate::model::{AuditEntry, DenyList, Health, Platform, Status};
 use crate::paths::Paths;
 use theme::Theme;
 
@@ -32,6 +32,8 @@ use theme::Theme;
 pub struct Shared {
     pub client: Client,
     pub paths: Paths,
+    /// Pairs and forgets the pairing: `cww login` and `cww logout`.
+    pub account: Arc<dyn crate::pairing::Account>,
     status: Mutex<Option<Status>>,
     /// False until the first answer (or silence) from the daemon.
     known: AtomicBool,
@@ -42,10 +44,15 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new(client: Client, paths: Paths) -> Arc<Self> {
+    pub fn new(
+        client: Client,
+        paths: Paths,
+        account: Arc<dyn crate::pairing::Account>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client,
             paths,
+            account,
             status: Mutex::new(None),
             known: AtomicBool::new(false),
             generation: AtomicU64::new(0),
@@ -174,8 +181,7 @@ enum Done {
     Paused(Result<(), String>),
     Deny(Result<DenyList, String>),
     Log(Result<Vec<AuditEntry>, String>),
-    Paired(Result<Pairing, String>),
-    PairCancelled,
+    Pairing(crate::pairing::PairEvent),
     LoggedOut(Result<(), String>),
     Started(Result<String, String>),
     Picked(Option<PathBuf>),
@@ -250,8 +256,9 @@ struct AccountState {
     custom_server: bool,
     confirm_logout: bool,
     error: Option<String>,
-    /// The code whose page was opened in the browser.
-    opened_code: Option<String>,
+    /// A pairing in progress: the code, once the server has given one.
+    pairing: Option<Option<crate::pairing::Code>>,
+    cancel: Option<crate::pairing::Cancel>,
 }
 
 #[derive(Default)]
@@ -548,17 +555,23 @@ impl SettingsApp {
                         Err(e) => self.activity.error = Some(e),
                     }
                 }
-                Done::Paired(result) => {
+                Done::Pairing(event) => {
+                    use crate::pairing::PairEvent;
                     self.account.requesting = false;
-                    match result {
-                        Ok(pairing) => {
-                            self.account.error = None;
-                            self.open_pairing_page(&pairing);
+                    match event {
+                        // `cww login` opens the approval page itself.
+                        PairEvent::Code(code) => self.account.pairing = Some(Some(code)),
+                        PairEvent::Paired => {
+                            self.account.pairing = None;
+                            self.account.cancel = None;
                         }
-                        Err(e) => self.account.error = Some(e),
+                        PairEvent::Failed(e) => {
+                            self.account.pairing = None;
+                            self.account.cancel = None;
+                            self.account.error = Some(e);
+                        }
                     }
                 }
-                Done::PairCancelled => self.account.requesting = false,
                 Done::LoggedOut(result) => {
                     self.account.requesting = false;
                     self.account.error = result.err();
@@ -653,34 +666,34 @@ impl SettingsApp {
     fn pair(&mut self, ctx: &egui::Context) {
         self.account.requesting = true;
         self.account.error = None;
-        self.account.opened_code = None;
+        self.account.pairing = Some(None);
         let server = self
             .account
             .custom_server
             .then(|| self.account.server.trim().to_string())
             .filter(|s| !s.is_empty());
-        let client = self.shared.client.clone();
-        self.jobs.spawn(ctx, move || {
-            Done::Paired(client.pair(server.as_deref()).map_err(|e| e.to_string()))
+        let (tx, ctx) = (self.jobs.tx.clone(), ctx.clone());
+        let report: crate::pairing::Report = Box::new(move |event| {
+            let _ = tx.send(Done::Pairing(event));
+            ctx.request_repaint();
         });
+        self.account.cancel = Some(self.shared.account.pair(server, report));
     }
 
-    fn cancel_pairing(&mut self, ctx: &egui::Context) {
-        self.account.requesting = true;
-        let client = self.shared.client.clone();
-        self.jobs.spawn(ctx, move || {
-            let _ = client.cancel_pairing();
-            Done::PairCancelled
-        });
+    fn cancel_pairing(&mut self) {
+        if let Some(cancel) = self.account.cancel.take() {
+            cancel();
+        }
+        self.account.pairing = None;
+        self.account.requesting = false;
     }
 
     fn logout(&mut self, ctx: &egui::Context) {
         self.account.requesting = true;
         self.account.confirm_logout = false;
-        let client = self.shared.client.clone();
-        self.jobs.spawn(ctx, move || {
-            Done::LoggedOut(client.logout().map_err(|e| e.to_string()))
-        });
+        let account = Arc::clone(&self.shared.account);
+        self.jobs
+            .spawn(ctx, move || Done::LoggedOut(account.logout()));
     }
 
     fn start_agent(&mut self, ctx: &egui::Context) {
@@ -689,19 +702,6 @@ impl SettingsApp {
         self.jobs.spawn(ctx, move || {
             Done::Started(crate::agent::start().map_err(|e| format!("{e:#}")))
         });
-    }
-
-    /// Open the approval page once per code.
-    fn open_pairing_page(&mut self, pairing: &Pairing) {
-        if self.account.opened_code.as_deref() == Some(pairing.user_code.as_str()) {
-            return;
-        }
-        self.account.opened_code = Some(pairing.user_code.clone());
-        let url = pairing
-            .verification_uri_complete
-            .as_deref()
-            .unwrap_or(&pairing.verification_uri);
-        open_url(url);
     }
 
     /// Shown on pages that need the daemon while it isn't running.
@@ -775,12 +775,13 @@ fn status_dot_for(ui: &mut Ui, theme: &Theme, health: Health, text: &str) {
     );
 }
 
+/// Open a web page, with the same checks as `cww login` and the terminal UI.
 pub fn open_url(url: &str) {
     #[cfg(test)]
     tests::OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
     #[cfg(not(test))]
-    if let Err(e) = open::that_detached(url) {
-        log::warn!("opening {url}: {e}");
+    if !cww::browser::open(url) {
+        log::warn!("not opening {url}");
     }
 }
 
