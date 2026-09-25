@@ -38,6 +38,9 @@ enum Command {
         /// Print the approval link without opening a browser.
         #[arg(long)]
         no_browser: bool,
+        /// Don't start the background daemon after pairing.
+        #[arg(long)]
+        no_daemon: bool,
     },
     /// Forget the pairing on this computer. Revoke it in Settings too.
     Logout,
@@ -169,6 +172,7 @@ fn run(cli: Cli) -> Result<()> {
             server,
             name,
             no_browser,
+            no_daemon,
         } => {
             let options = auth::LoginOptions {
                 name,
@@ -178,12 +182,13 @@ fn run(cli: Cli) -> Result<()> {
             let paired = auth::login(&paths, &server, options, |line| println!("{line}"))?;
             println!();
             println!("Paired with {} as device {}.", paired.url, paired.device_id);
-            notify_daemon(
-                &paths,
-                "Start the daemon with `cww daemon install` (or `cww daemon run`).",
-            );
             if Config::load(&paths)?.roots.is_empty() {
                 offer_documents(&paths)?;
+            }
+            if no_daemon {
+                notify_daemon(&paths, START_DAEMON_HINT);
+            } else {
+                start_daemon(&paths);
             }
         }
         Command::Logout => {
@@ -418,6 +423,26 @@ fn pause(paths: &Paths, paused: bool) -> Result<()> {
         }
     );
     Ok(())
+}
+
+const START_DAEMON_HINT: &str = "Start the daemon with `cww daemon install` (or `cww daemon run`).";
+
+/// After pairing: a running daemon re-reads the config, and otherwise the
+/// daemon is installed as a service, which starts it now and at every login.
+fn start_daemon(paths: &Paths) {
+    match control::request(&paths.socket_path(), ControlRequest::Reload) {
+        Ok(Some(_)) => println!("The daemon picked up the pairing."),
+        Ok(None) => match service::install(
+            paths,
+            &service::InstallOptions {
+                no_hardening: false,
+            },
+        ) {
+            Ok(_) => println!("Started the daemon. It runs in the background and at every login."),
+            Err(e) => eprintln!("warning: couldn't start the daemon: {e:#}\n{START_DAEMON_HINT}"),
+        },
+        Err(e) => eprintln!("warning: couldn't reach the daemon: {e:#}"),
+    }
 }
 
 /// Ask a running daemon to re-read the config.

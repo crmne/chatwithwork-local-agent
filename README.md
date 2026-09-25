@@ -102,8 +102,10 @@ Symlinks are not followed. `--follow-symlinks` allows links that stay inside the
 
 ## Run the daemon
 
+`cww login` starts the daemon after pairing (pass `--no-daemon` to skip that).
+
 ```sh
-cww daemon install     # systemd --user unit on Linux, LaunchAgent on macOS, logon task on Windows
+cww daemon install     # register it again: systemd --user unit on Linux, LaunchAgent on macOS, logon task on Windows
 cww status             # connection, roots and index state
 cww pause              # refuse every request until...
 cww resume
