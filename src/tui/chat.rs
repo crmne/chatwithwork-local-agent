@@ -191,6 +191,17 @@ pub enum Live {
 }
 
 impl Live {
+    /// What one event of the daemon's stream says about the followed chat.
+    /// Missed events (`lagged`) mean reading the chat again; anything else,
+    /// like a heartbeat, is nothing new but a chance to stop.
+    fn from_event(event: &Value) -> Option<Self> {
+        match event["event"].as_str() {
+            Some("chat") => Self::from_update(&event["update"]),
+            Some("lagged") => Some(Self::Changed),
+            _ => None,
+        }
+    }
+
     /// `None` only for a chunk it can't read; anything unknown means "read
     /// the chat again".
     fn from_update(update: &Value) -> Option<Self> {
@@ -271,13 +282,7 @@ impl Chats {
         on_start(events.closer());
         for event in events {
             let Ok(event) = event else { break };
-            // Anything else, like a heartbeat, is nothing new but a chance
-            // to stop.
-            let live = match event["event"].as_str() {
-                Some("chat") => Live::from_update(&event["update"]),
-                _ => None,
-            };
-            if !on_live(live) {
+            if !on_live(Live::from_event(&event)) {
                 break;
             }
         }
@@ -368,5 +373,18 @@ mod tests {
             Live::from_update(&json!({ "type": "unsupported" })),
             Some(Live::Unsupported)
         );
+    }
+
+    #[test]
+    fn missed_events_mean_reading_the_chat_again() {
+        assert_eq!(
+            Live::from_event(&json!({ "event": "lagged", "missed": 3 })),
+            Some(Live::Changed)
+        );
+        assert_eq!(
+            Live::from_event(&json!({ "event": "chat", "update": { "type": "refused" } })),
+            Some(Live::Refused)
+        );
+        assert_eq!(Live::from_event(&json!({ "event": "heartbeat" })), None);
     }
 }

@@ -277,7 +277,7 @@ Each event is one line with an `event` field.
 
 **`heartbeat`**: sent every 30 seconds on a chat subscription while nothing else happens, so a client that stopped reading is noticed and the chat is no longer followed for it.
 
-**`lagged`**: the client read too slowly and `missed` events were dropped. Ask for `status` or `audit_tail` on another connection to catch up.
+**`lagged`**: the client read too slowly and `missed` events were dropped. Ask for `status` or `audit_tail` on another connection to catch up; a chat follower reads the chat again.
 
 ```json
 {"event": "lagged", "missed": 12}
