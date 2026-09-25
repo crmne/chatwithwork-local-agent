@@ -28,6 +28,21 @@
             # Registry dependencies come straight from Cargo.lock, so a lock
             # file update needs no vendor hash refresh.
             cargoLock.lockFile = ./Cargo.lock;
+            # The lock file is the workspace's: the desktop app's git forks
+            # (egui, winit, fastframe) are in it, though cww never builds
+            # them. Fetched by their pinned revisions instead of listing a
+            # hash for every crate in them.
+            cargoLock.allowBuiltinFetchGit = true;
+            # Only cww; the app needs a desktop toolchain this package
+            # doesn't carry.
+            cargoBuildFlags = [
+              "-p"
+              "cww"
+            ];
+            cargoTestFlags = [
+              "-p"
+              "cww"
+            ];
 
             # The end-to-end test binds a local port; the rest touches only
             # temporary directories.
