@@ -188,22 +188,33 @@ pub fn systemd_unit(exe: &Path, paths: &Paths, options: &InstallOptions) -> Stri
         unit.push_str(&format!("Environment=\"CWW_HOME={}\"\n", home.display()));
     }
     if !options.no_hardening {
-        let writable: Vec<String> = [
-            &paths.config_dir,
-            &paths.data_dir,
-            &paths.state_dir,
-            &paths.runtime_dir,
-        ]
-        .iter()
-        .map(|p| format!("\"{}\"", p.display()))
-        .collect();
+        let mut dirs: Vec<&Path> = paths.all_dirs().to_vec();
+        // A long runtime directory moves the socket somewhere shorter.
+        let socket = paths.socket_path();
+        if let Some(dir) = socket.parent()
+            && !dirs.iter().any(|d| dir.starts_with(d))
+        {
+            dirs.push(dir);
+        }
+        // "-": a directory that doesn't exist yet mustn't stop the service.
+        let writable: Vec<String> = dirs
+            .iter()
+            .map(|p| format!("\"-{}\"", p.display()))
+            .collect();
+        // A private /tmp would hide cww's own directories if they live there.
+        let in_tmp = dirs
+            .iter()
+            .any(|d| d.starts_with("/tmp") || d.starts_with("/var/tmp"));
+        unit.push_str("NoNewPrivileges=yes\n");
+        if !in_tmp {
+            unit.push_str("PrivateTmp=yes\n");
+        }
         unit.push_str(&format!(
-            "NoNewPrivileges=yes\n\
-             PrivateTmp=yes\n\
-             ProtectSystem=strict\n\
+            "ProtectSystem=strict\n\
              ReadWritePaths={}\n\
              RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n\
-             SystemCallFilter=@system-service\n\
+             SystemCallFilter=@system-service @sandbox\n\
+             SystemCallErrorNumber=EPERM\n\
              SystemCallArchitectures=native\n\
              MemoryDenyWriteExecute=yes\n\
              LockPersonality=yes\n\
@@ -445,7 +456,17 @@ mod tests {
         );
         assert!(unit.contains("ExecStart=\"/usr/bin/cww\" daemon run"));
         assert!(unit.contains("ProtectSystem=strict"));
-        assert!(unit.contains("ReadWritePaths=\"/home/u/.cww/config\""));
+        assert!(unit.contains("ReadWritePaths=\"-/home/u/.cww/config\""));
+        assert!(unit.contains("SystemCallFilter=@system-service @sandbox"));
+        assert!(unit.contains("PrivateTmp=yes"));
+        let in_tmp = systemd_unit(
+            Path::new("/usr/bin/cww"),
+            &Paths::under(Path::new("/tmp/cww-test")),
+            &InstallOptions {
+                no_hardening: false,
+            },
+        );
+        assert!(!in_tmp.contains("PrivateTmp"), "{in_tmp}");
         let plain = systemd_unit(
             Path::new("/usr/bin/cww"),
             &paths,

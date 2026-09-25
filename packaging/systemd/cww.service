@@ -24,7 +24,9 @@ PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=%h/.config/cww %h/.local/share/cww %h/.local/state/cww
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-SystemCallFilter=@system-service
+# @sandbox: the daemon confines itself with Landlock.
+SystemCallFilter=@system-service @sandbox
+SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
 MemoryDenyWriteExecute=yes
 LockPersonality=yes
