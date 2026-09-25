@@ -34,9 +34,20 @@ pub fn claim(path: &Path, show: bool) -> std::io::Result<Instance> {
         use std::os::unix::net::{UnixListener, UnixStream};
 
         for _ in 0..3 {
-            if let Ok(mut stream) = UnixStream::connect(path) {
-                let _ = stream.write_all(if show { b"show\n" } else { b"ping\n" });
-                return Ok(Instance::Secondary);
+            match UnixStream::connect(path) {
+                Ok(mut stream) => {
+                    let _ = stream.write_all(if show { b"show\n" } else { b"ping\n" });
+                    return Ok(Instance::Secondary);
+                }
+                // Nobody is listening: no file, or one left by a crash.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) => {}
+                // Anything else (permissions, resources) says nothing about
+                // whether an instance runs, so never replace its socket.
+                Err(e) => return Err(e),
             }
             if let Some(dir) = path.parent() {
                 std::fs::DirBuilder::new()
@@ -46,7 +57,7 @@ pub fn claim(path: &Path, show: bool) -> std::io::Result<Instance> {
                         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
                     })?;
             }
-            // Nobody answered, so a file left there is stale.
+            // Nobody is listening, so a file left there is stale.
             let _ = std::fs::remove_file(path);
             match UnixListener::bind(path) {
                 Ok(listener) => {
@@ -235,6 +246,23 @@ mod tests {
             "only `show` opens the window"
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_socket_it_cannot_reach_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app.sock");
+        let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // root can connect anyway; the check needs an ordinary user.
+        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+            return;
+        }
+        let err = claim(&path, true).err().expect("an error, not a claim");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(path.exists(), "the live socket is still there");
+        drop(live);
     }
 
     #[test]
