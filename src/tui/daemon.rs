@@ -408,14 +408,19 @@ fn pair(paths: &Paths, tx: &Sender<Msg>, cancel: &AtomicBool, wake: &Sender<()>)
     finish(result.map_err(|e| format!("{e:#}")));
 }
 
+/// An http(s) URL made only of characters no shell or URL handler treats
+/// specially.
+fn plain_url(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && url
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":/?=._~%-".contains(c))
+}
+
 /// Open `url` in the default browser. Only plain http(s) URLs with
 /// unremarkable characters are handed to the system.
 fn open_in_browser(url: &str) -> bool {
-    let plain = (url.starts_with("https://") || url.starts_with("http://"))
-        && url
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ":/?=._~%-".contains(c));
-    if !plain {
+    if !plain_url(url) {
         return false;
     }
     let mut command = if cfg!(target_os = "macos") {
@@ -449,6 +454,24 @@ fn absolute(input: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_plain_urls_go_to_the_browser() {
+        assert!(super::plain_url(
+            "https://chatwithwork.com/device?user_code=WDJB-MJHT"
+        ));
+        assert!(super::plain_url("http://localhost:3417/device"));
+        for bad in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://x.example/a&calc.exe",
+            "https://x.example/a b",
+            "https://x.example/\"quoted\"",
+            "https://x.example/$(id)",
+        ] {
+            assert!(!super::plain_url(bad), "{bad}");
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -221,3 +221,62 @@ pub fn logout(paths: &Paths) -> Result<bool> {
     config.save(paths)?;
     Ok(was_paired)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(verification_uri: &str, complete: Option<&str>) -> PendingLogin {
+        let server = ServerUrl::parse("https://chatwithwork.com").unwrap();
+        PendingLogin {
+            paths: Paths::under(std::path::Path::new("/nonexistent")),
+            client: AuthClient::new(server.clone()),
+            server,
+            key: DeviceKey::generate().unwrap(),
+            info: DeviceInfo::current(Some("test".into())),
+            auth: DeviceAuthorization {
+                device_code: "d".into(),
+                user_code: "WDJB-MJHT".into(),
+                verification_uri: verification_uri.into(),
+                verification_uri_complete: complete.map(str::to_string),
+                expires_in: 60,
+                interval: 1,
+            },
+            store: None,
+            deadline: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn only_pages_on_the_server_are_opened_in_a_browser() {
+        let p = pending(
+            "https://chatwithwork.com/device",
+            Some("https://chatwithwork.com/device?user_code=WDJB-MJHT"),
+        );
+        assert_eq!(
+            p.browser_url(),
+            Some("https://chatwithwork.com/device?user_code=WDJB-MJHT")
+        );
+        // A server can't send the browser somewhere else...
+        let p = pending(
+            "https://chatwithwork.com/device",
+            Some("https://evil.example/device"),
+        );
+        assert_eq!(p.browser_url(), Some("https://chatwithwork.com/device"));
+        // ...including a look-alike host or another scheme.
+        let p = pending("https://chatwithwork.com.evil.example/device", None);
+        assert_eq!(p.browser_url(), None);
+        let p = pending("file:///etc/passwd", None);
+        assert_eq!(p.browser_url(), None);
+    }
+
+    #[test]
+    fn a_cancelled_wait_stops_promptly() {
+        let p = pending("https://chatwithwork.com/device", None);
+        let cancel = AtomicBool::new(true);
+        let started = Instant::now();
+        let err = p.wait(&cancel).unwrap_err();
+        assert!(err.to_string().contains("cancelled"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+}
