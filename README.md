@@ -153,6 +153,24 @@ The UI uses no CPU while nothing happens, follows `NO_COLOR`, and falls back to 
 
 Paths always look like `work-docs:plans/q3.pdf`.
 
+## Performance
+
+The daemon does nothing until something happens. There is no polling: the index follows file events (inotify, FSEvents, ReadDirectoryChangesW) and waits for a folder to be quiet for a moment before it updates, and only the directories that changed are rescanned. The only regular wake-ups are the server's WebSocket pings.
+
+Measured on real Documents folders, connected to a Chat with Work server:
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Machine | Ryzen 9 9900X, SATA SSD, Arch | Mac mini M4, macOS 27 | Zenbook S16, Ryzen AI 9 HX 370, Windows 11 |
+| Folder | 15 GB, 10,504 files indexed | 37 GB, 172,974 files indexed | 427 MB, 8,417 files indexed |
+| First index | 107 s from a cold disk, 15 s cached; 17 CPU s | 256 s cold, 115 s cached; 55 CPU s | 156 s cold (Defender scans each file once), 1.5 s cached; 9 CPU s |
+| Index on disk | 160 MB | 242 MB | 2 MB (mostly binary files, indexed by name) |
+| Search, 20 hits with snippets | 1.6 to 11 ms, median 5.6 ms | 3.6 to 52 ms, median 12 ms | 4 to 5 ms |
+| Idle CPU over 5 minutes | under 0.01 s | 0.01 s | 0.17 s (small folder) |
+| Memory while idle | 77 MB resident, 55 MB heap | 29 to 66 MB footprint | 31 MB working set |
+
+A search takes about 100 ms end to end through Chat with Work, most of it on the server. When the index has no answer, a live grep runs as well; over a folder of thousands of files that aren't text, that can take a second or more (at most 5 seconds). Indexing peaks at a few hundred megabytes while large PDFs and spreadsheets are extracted, and the memory is handed back when the pass ends.
+
 ## Configuration
 
 Everything lives in `~/.config/cww/config.toml`. The server can't change any of it.
