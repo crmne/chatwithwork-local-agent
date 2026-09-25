@@ -132,14 +132,20 @@ fn filetime(ft: windows_sys::Win32::Foundation::FILETIME) -> i64 {
     ((ft.dwHighDateTime as i64) << 32) | ft.dwLowDateTime as i64
 }
 
+fn lowered(p: &Path) -> Vec<String> {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .collect()
+}
+
+/// Whether two paths name the same place, ignoring case.
+fn same_path(a: &Path, b: &Path) -> bool {
+    lowered(a) == lowered(b)
+}
+
 /// Case-insensitive, component-wise containment for two real paths.
 fn within(root: &Path, candidate: &Path) -> bool {
-    let lower = |p: &Path| -> Vec<String> {
-        p.components()
-            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-            .collect()
-    };
-    lower(candidate).starts_with(&lower(root))
+    lowered(candidate).starts_with(&lowered(root))
 }
 
 impl RootHandle {
@@ -262,6 +268,35 @@ impl RootHandle {
         }
 
         let parts = rel.components();
+        let file = match self.open_direct(rel) {
+            Some(file) => file,
+            None => self.open_walk(parts)?,
+        };
+        self.check_opened(file, want, policy)
+    }
+
+    /// The fast path: one open, accepted only when the kernel's real path is
+    /// exactly the requested one (ignoring case). Any link, junction or 8.3
+    /// short name on the way makes the two differ, and then the careful walk
+    /// decides.
+    fn open_direct(&self, rel: &RelPath) -> Option<File> {
+        if rel.is_root() {
+            return None;
+        }
+        let mut logical = self.dir.real.clone();
+        logical.extend(rel.components());
+        let file = open_no_follow(&logical).ok()?;
+        let (attributes, _) = attribute_tag(&file).ok()?;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return None;
+        }
+        let real = final_path(&file).ok()?;
+        same_path(&real, &logical).then_some(file)
+    }
+
+    /// One component at a time, refusing links, so an error can say what
+    /// was wrong.
+    fn open_walk(&self, parts: &[String]) -> Result<File, ToolError> {
         let mut current = self.dir.real.clone();
         let mut opened = None;
         for (i, part) in parts.iter().enumerate() {
@@ -289,11 +324,19 @@ impl RootHandle {
                 });
             }
         }
-        let file = match opened {
-            Some(file) => file,
-            None => open_follow(&self.dir.real).map_err(|e| open_error(&e))?,
-        };
+        match opened {
+            Some(file) => Ok(file),
+            None => open_follow(&self.dir.real).map_err(|e| open_error(&e)),
+        }
+    }
 
+    /// The checks that matter, on the opened handle.
+    fn check_opened(
+        &self,
+        file: File,
+        want: Want,
+        policy: OpenPolicy<'_>,
+    ) -> Result<(File, BY_HANDLE_FILE_INFORMATION), ToolError> {
         if unsafe { GetFileType(raw(&file)) } != FILE_TYPE_DISK {
             return Err(ToolError::denied(
                 "only regular files and directories can be accessed",
