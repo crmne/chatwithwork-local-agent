@@ -88,10 +88,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
+      # No compiler cache: published binaries never build from outputs
+      # restored from an Actions cache.
       - run: cargo build --locked --release --target ${{ matrix.target }} --bins
 
       - name: Check the binary is static
@@ -223,10 +221,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: macos-universal
-
+      # No compiler cache, as above.
       - name: Build both architectures
         run: |
           cargo build --locked --release --target aarch64-apple-darwin --bin cww

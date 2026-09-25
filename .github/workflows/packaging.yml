@@ -70,9 +70,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+      # No compiler cache: these binaries become the published packages.
       - run: cargo build --locked --release --target ${{ matrix.target }} --bin cww
       - name: Release-shaped archives
         env:
