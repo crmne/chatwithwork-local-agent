@@ -77,7 +77,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist/cww-app-linux
-          cp target/release/cww-app packaging/linux/cww-app.desktop app/assets/mark.svg dist/cww-app-linux/
+          cp target/release/cww-app packaging/linux/cww-app.desktop dist/cww-app-linux/
+          # Named as the desktop entry's Icon=cww-app asks.
+          cp app/assets/mark.svg dist/cww-app-linux/cww-app.svg
       - name: Collect the Windows executable
         if: runner.os == 'Windows'
         shell: bash
