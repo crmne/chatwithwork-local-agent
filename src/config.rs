@@ -26,6 +26,21 @@ pub struct Config {
     pub deny: DenyConfig,
     pub limits: Limits,
     pub index: IndexConfig,
+    pub sandbox: SandboxConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Confine the daemon with Landlock (Linux) or Seatbelt (macOS), so the
+    /// kernel refuses files outside the shared folders even if cww had a bug.
+    pub enabled: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

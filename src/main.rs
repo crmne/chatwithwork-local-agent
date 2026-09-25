@@ -72,6 +72,12 @@ enum Command {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+    /// Diagnostics.
+    #[command(hide = true)]
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommand,
+    },
     /// Open the terminal UI (the default when run in a terminal).
     Tui,
 }
@@ -98,12 +104,27 @@ enum RootsCommand {
 }
 
 #[derive(Subcommand)]
+enum DebugCommand {
+    /// Confine this process as the daemon would, then try to read FILES.
+    Sandbox { files: Vec<PathBuf> },
+    /// Confine this process for a keychain-held key, then write, read and
+    /// delete a test secret in the OS keychain.
+    Keychain,
+}
+
+#[derive(Subcommand)]
 enum DaemonCommand {
     /// Run in the foreground.
     Run {
         /// Write the daemon's own log to this file instead of stderr.
         #[arg(long)]
         log_file: Option<PathBuf>,
+        /// Don't confine the daemon with Landlock or Seatbelt.
+        #[arg(long)]
+        no_sandbox: bool,
+        /// Run as the confined worker of a supervising `cww daemon run`.
+        #[arg(long, hide = true)]
+        worker: bool,
     },
     /// Ask the running daemon to stop.
     Stop,
@@ -175,8 +196,50 @@ fn run(cli: Cli) -> Result<()> {
             lines,
             json,
         } => log(&paths, lines, follow, json)?,
+        Command::Debug {
+            command: DebugCommand::Keychain,
+        } => {
+            let status = daemon::confine_for_check(&paths, Some(true))?;
+            println!("sandbox: {}", serde_json::to_string(&status)?);
+            let store = auth::secrets::SecretStore::Keyring;
+            let name = "sandbox-probe";
+            let result = store
+                .set(name, "ok")
+                .and_then(|()| store.get(name))
+                .and_then(|value| store.delete(name).map(|()| value));
+            match result {
+                Ok(Some(value)) if value == "ok" => {
+                    println!("keychain: write, read and delete work")
+                }
+                Ok(other) => println!("keychain: read back {other:?}"),
+                Err(e) => println!("keychain: {e:#}"),
+            }
+        }
+        Command::Debug {
+            command: DebugCommand::Sandbox { files },
+        } => {
+            let status = daemon::confine_for_check(&paths, None)?;
+            println!("sandbox: {}", serde_json::to_string(&status)?);
+            for file in files {
+                match std::fs::read(&file) {
+                    Ok(_) => println!("read {}", file.display()),
+                    Err(e) => println!("refused {} ({e})", file.display()),
+                }
+            }
+        }
         Command::Daemon { command } => match command {
-            DaemonCommand::Run { log_file } => daemon::run_foreground(paths, log_file.as_deref())?,
+            DaemonCommand::Run {
+                log_file,
+                no_sandbox,
+                worker,
+            } => daemon::run_foreground(
+                paths,
+                &daemon::Foreground {
+                    log_file,
+                    sandbox: !no_sandbox,
+                    worker,
+                },
+            )?,
             DaemonCommand::Stop => {
                 match control::request(&paths.socket_path(), ControlRequest::Shutdown)? {
                     Some(_) => println!("The daemon is stopping."),

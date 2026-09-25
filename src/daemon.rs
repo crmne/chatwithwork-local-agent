@@ -42,12 +42,123 @@ struct Daemon {
     shutdown: CancellationToken,
 }
 
-/// `cww daemon run` (and `cww-agent` on Windows): set up logging, then run
-/// the daemon on a fresh runtime until a signal or a `shutdown` request.
-pub fn run_foreground(paths: Paths, log_file: Option<&std::path::Path>) -> Result<()> {
-    crate::logging::init(log_file)?;
+/// Set when a newly shared folder is outside the sandbox: the worker exits
+/// with `sandbox::RESTART_CODE` and its supervisor starts it again.
+static RESTART_FOR_SANDBOX: AtomicBool = AtomicBool::new(false);
+
+/// How `cww daemon run` (or `cww-agent` on Windows) was started.
+pub struct Foreground {
+    pub log_file: Option<std::path::PathBuf>,
+    /// Confine the daemon, unless the config turns the sandbox off.
+    pub sandbox: bool,
+    /// This process is the confined worker of a supervisor.
+    pub worker: bool,
+}
+
+/// `cww daemon run`: set up logging, then run the daemon until a signal or
+/// a `shutdown` request. With the sandbox on (Linux, macOS), this process
+/// supervises a confined worker instead of running the daemon itself.
+pub fn run_foreground(paths: Paths, options: &Foreground) -> Result<()> {
+    crate::logging::init(options.log_file.as_deref())?;
+    let config = Config::load(&paths)?;
+    let sandboxed = options.sandbox
+        && config.sandbox.enabled
+        && cfg!(any(target_os = "linux", target_os = "macos"));
+    if sandboxed && !options.worker {
+        return supervise_worker(options);
+    }
+    if sandboxed {
+        confine(&config, &paths);
+    } else {
+        crate::sandbox::disabled(if options.sandbox && config.sandbox.enabled {
+            "no sandbox on this platform yet"
+        } else {
+            "turned off"
+        });
+    }
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(run(paths, CancellationToken::new(), true))
+    runtime.block_on(run(paths, CancellationToken::new(), true))?;
+    drop(runtime);
+    if RESTART_FOR_SANDBOX.load(Ordering::SeqCst) {
+        std::process::exit(crate::sandbox::RESTART_CODE);
+    }
+    Ok(())
+}
+
+/// Confine this process as the daemon would, for `cww debug`. `keychain`
+/// overrides whether the plan allows the OS keychain.
+pub fn confine_for_check(paths: &Paths, keychain: Option<bool>) -> Result<crate::sandbox::Status> {
+    let mut config = Config::load(paths)?;
+    if let Some(keychain) = keychain {
+        config.secret_store = Some(if keychain { "keyring" } else { "file" }.into());
+    }
+    confine(&config, paths);
+    Ok(crate::sandbox::status())
+}
+
+/// Apply the sandbox for the configured roots. Runs before any thread
+/// starts: Landlock only confines the calling thread and its children.
+fn confine(config: &Config, paths: &Paths) {
+    // Everything the sandbox would block later has to happen now: the OS
+    // certificate store is read once, here, and cww's directories must exist
+    // for rules to attach to them.
+    let _ = crate::tls::root_certificates();
+    let _ = paths.ensure();
+    if let Some(dir) = paths.socket_path().parent() {
+        let _ = crate::paths::ensure_private_dir(dir);
+    }
+    let keychain = crate::auth::secrets::SecretStore::for_config(config, paths)
+        == crate::auth::secrets::SecretStore::Keyring;
+    let plan =
+        crate::sandbox::Plan::new(config.roots.iter().map(|r| r.path.clone()), paths, keychain);
+    let status = crate::sandbox::confine(plan);
+    match status.state {
+        "enforced" => tracing::info!("sandbox: {} enforced", status.kind),
+        _ => tracing::warn!(
+            "sandbox: {} {}{}",
+            status.kind,
+            status.state,
+            status.detail.map(|d| format!(" ({d})")).unwrap_or_default()
+        ),
+    }
+}
+
+/// Run the confined worker, starting it again whenever it asks to be (to
+/// apply a new sandbox), and pass signals on to it.
+fn supervise_worker(options: &Foreground) -> Result<()> {
+    let exe = std::env::current_exe().context("finding the cww binary")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        loop {
+            let mut command = tokio::process::Command::new(&exe);
+            command.args(["daemon", "run", "--worker"]);
+            if let Some(log) = &options.log_file {
+                command.arg("--log-file").arg(log);
+            }
+            let mut child = command.spawn().context("starting the daemon")?;
+            let status = tokio::select! {
+                status = child.wait() => status?,
+                () = wait_for_signal() => {
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id().and_then(|id| rustix::process::Pid::from_raw(id as i32)) {
+                        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+                    }
+                    let _ = child.wait().await;
+                    return Ok(());
+                }
+            };
+            match status.code() {
+                Some(code) if code == crate::sandbox::RESTART_CODE => {
+                    tracing::info!("restarting the daemon with a sandbox for the new folders");
+                }
+                Some(0) => return Ok(()),
+                Some(code) => std::process::exit(code),
+                None => anyhow::bail!("the daemon was killed ({status})"),
+            }
+        }
+    })
 }
 
 /// Run the daemon until `shutdown` is cancelled (or SIGINT/SIGTERM when
@@ -194,6 +305,17 @@ impl Daemon {
     async fn reload(&self) -> Result<()> {
         let paths = self.paths.clone();
         let new = Config::load(&paths)?;
+        let roots: Vec<std::path::PathBuf> = new.roots.iter().map(|r| r.path.clone()).collect();
+        if crate::sandbox::plan().is_some_and(|plan| !plan.covers(&roots)) {
+            // The kernel won't let this process read the new folder. Exit
+            // and let the supervisor start a worker whose sandbox covers it.
+            let mut entry = AuditEntry::event("restarting");
+            entry.detail = Some("to confine the daemon to the new set of folders".into());
+            self.audit.append(&entry);
+            RESTART_FOR_SANDBOX.store(true, Ordering::SeqCst);
+            self.shutdown.cancel();
+            return Ok(());
+        }
         let reader = Arc::clone(&self.reader);
         let (cfg, p) = (new.clone(), paths.clone());
         tokio::task::spawn_blocking(move || reader.reload(&cfg, &p)).await??;
@@ -320,6 +442,7 @@ impl Daemon {
             "pid": std::process::id(),
             "connection": self.status.get(),
             "paired": config.server.is_some(),
+            "sandbox": crate::sandbox::status(),
             "config_file": self.paths.config_file(),
             "audit_file": self.paths.audit_file(),
             "server": config.server.as_ref().map(|s| &s.url),

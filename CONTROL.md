@@ -82,6 +82,7 @@ There is no authentication beyond this: any process running as the user can driv
   "server": "https://chatwithwork.com",
   "device_id": "42",
   "paused": false,
+  "sandbox": { "kind": "landlock", "state": "enforced" },
   "connection": {
     "connection": "connected",
     "since": "2026-09-25T08:14:03Z",
@@ -104,6 +105,7 @@ There is no authentication beyond this: any process running as the user can driv
 
 - `connection.connection` is `not_paired`, `connecting`, `connected`, `offline` or `revoked`. `since` is when it last changed. `last_error` is the most recent problem and may be absent.
 - `server` and `device_id` are `null` until the computer is paired.
+- `sandbox.kind` is `landlock`, `seatbelt` or `none`; `sandbox.state` is `enforced`, `partial` (an older kernel enforces some of the rules), `off` or `unavailable`, with a `detail` when it isn't enforced.
 - `roots[].index` is `pending`, `indexing`, `ready`, `error` or `disabled`. During the first pass, `indexed_files` counts files seen so far. `available` is false when the folder is missing, for example on an unmounted drive.
 - `local_path` is the absolute path. It is shown to the local user only and never sent to Chat with Work.
 
@@ -236,7 +238,7 @@ The daemon never polls to produce events, and a client that waits on a subscript
 | Field | Present | Meaning |
 |---|---|---|
 | `ts` | always | RFC 3339, UTC. |
-| `event` | always | `tool` for a tool call. Daemon events: `started`, `stopped`, `connected`, `disconnected`, `revoked`, `paused`, `resumed`, `reloaded`, `root_added`, `root_removed`, `shutdown_requested`. |
+| `event` | always | `tool` for a tool call. Daemon events: `started`, `stopped`, `connected`, `disconnected`, `revoked`, `paused`, `resumed`, `reloaded`, `root_added`, `root_removed`, `shutdown_requested`, `restarting` (to widen the sandbox for a new folder). |
 | `tool` | tool calls | `roots`, `search`, `list`, `read`, or an unknown name the server tried. |
 | `decision` | tool calls | `allowed`, `denied` or `error`. |
 | `path`, `query` | when given | The tool path (`root:relative`) or search query, truncated. |

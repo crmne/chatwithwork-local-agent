@@ -35,7 +35,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "local-offset"] }
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util", "fs"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util", "fs", "process"] }
 tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tracing = "0.1"
@@ -92,6 +92,10 @@ crossterm = "0.29"
 # Safe resolution (openat2, O_NOFOLLOW, F_GETPATH), peer credentials, umask.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process", "system", "alloc"] }
+
+# The kernel sandbox for the daemon on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
 
 # Handle-based resolution, the named pipe's DACL and peer checks.
 [target.'cfg(windows)'.dependencies]

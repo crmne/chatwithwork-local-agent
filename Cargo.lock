@@ -848,6 +848,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "keyring",
+ "landlock",
  "libmimalloc-sys",
  "lopdf",
  "mimalloc",
@@ -1797,6 +1798,17 @@ checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
  "bitflags",
  "libc",
+]
+
+[[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror",
 ]
 
 [[package]]

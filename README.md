@@ -181,6 +181,9 @@ read_chars_per_hour = 2000000
 enabled = true
 watch = true          # follow file events; the index sleeps between them
 rescan_secs = 1800    # full rescan interval, only when watching is off or unavailable
+
+[sandbox]
+enabled = true        # Landlock on Linux, Seatbelt on macOS
 ```
 
 Run `cww reload` after editing the file. The `cww roots` commands reload the daemon for you.
@@ -202,6 +205,7 @@ The rule behind the design: **every control that must hold against a compromised
 
 | Threat | How cww handles it |
 |---|---|
+| A bug in cww, or a malicious document that exploits a parser | The daemon runs in a kernel sandbox: Landlock on Linux, Seatbelt on macOS. It can read the shared folders, its own directories and system libraries, and write only its own directories, so the rest of your home folder (`~/.ssh`, other projects, the keychain files) is out of reach even for code the daemon didn't mean to run. `cww status --json` shows the sandbox's state. |
 | A compromised server, admin or database sends arbitrary tool calls | Only four read-only tools exist. Reads are confined to your shared folders and the deny list. Rate and volume limits, the audit log, and `cww pause` all run locally. |
 | Prompt injection ("read ~/.ssh/id_ed25519") | Paths outside shared folders don't resolve at all. The deny list applies inside shared folders, and it can only be changed in the local config file. |
 | Path tricks (`..`, absolute paths, symlinks, `/a/root2` vs `/a/root`, hard links) | Paths are parsed and rejected before any filesystem access. Resolution uses `openat2(RESOLVE_BENEATH \| RESOLVE_NO_MAGICLINKS \| RESOLVE_NO_SYMLINKS)` on Linux, a component-by-component `O_NOFOLLOW` walk on macOS followed by a check of the opened handle's real path (`F_GETPATH`), and on Windows a walk that opens each component as a reparse point, refuses symlinks and junctions, and checks the final handle's real path (`GetFinalPathNameByHandleW`), which also defeats 8.3 short names and alternate data streams. Checks run on the opened handle, not on strings, which rules out the CVE-2025-53109/53110 class of bugs. Files with more than one hard link, FIFOs, sockets and devices are refused. |
@@ -218,13 +222,20 @@ The rule behind the design: **every control that must hold against a compromised
 
 - **Anything inside a shared folder that isn't on the deny list can be read.** Share narrow folders. A secret stored in `notes.txt` is readable.
 - **Results do reach Chat with Work and the model provider.** "Private" means your files and the index stay on your computer, and only the snippets and chunks needed for an answer leave it. Once they leave, the server's retention and sharing rules apply.
-- **A malicious file could exploit a parser** (PDF, Office). Extraction runs with size caps and panic isolation. Running it in a separate, sandboxed process with no network access (Landlock/seccomp, Seatbelt) is planned for the next phase; the `reader` module is structured for that split.
+- **A malicious file could exploit a parser** (PDF, Office). Extraction runs with size caps and panic isolation, inside the kernel sandbox, which keeps it to the shared folders. The sandboxed daemon can still use the network, so an exploit could send what it can read to someone else; a separate reader process without network access is planned, and the `reader` module is structured for that split.
+- **Windows has no kernel sandbox yet.** The path checks hold there as everywhere, but nothing stops a bug at the kernel level.
 - **Local malware running as your user** can read your files directly and doesn't need cww.
 - **Content-based secret redaction** (API keys inside ordinary text files) and "ask before every read" approvals are planned, not built.
 
+### The sandbox
+
+`cww daemon run` starts a small supervisor, which runs the daemon itself as a confined child. Landlock and Seatbelt can't be widened once they are applied, so when you share a folder the current sandbox doesn't cover, the daemon exits and the supervisor starts it again with rules that do; it reconnects within a second. Turn it off with `[sandbox] enabled = false` or `cww daemon run --no-sandbox` if it gets in the way, and please report why.
+
+On Linux, Landlock needs kernel 5.13 or newer with Landlock enabled (the default on current Ubuntu, Debian, Fedora and Arch kernels); an older kernel runs the daemon unconfined and says so in `cww status --json`.
+
 ### Planned hardening
 
-- Split into a network process and a sandboxed reader process (Landlock + seccomp on Linux, Seatbelt on macOS).
+- Split into a network process and a reader process without network access (seccomp on Linux, a stricter Seatbelt profile on macOS).
 - A signed and notarized macOS app bundle registered through `SMAppService`, so folder permissions survive updates.
 - A restricted token or AppContainer for the reader on Windows.
 - Local approval prompts, secret redaction, reproducible builds, and an external audit before general availability.

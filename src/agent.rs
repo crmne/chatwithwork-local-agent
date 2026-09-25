@@ -37,8 +37,13 @@ fn main() {
             }
         }
     }
+    let options = cww::daemon::Foreground {
+        log_file,
+        sandbox: true,
+        worker: false,
+    };
     let result = cww::paths::Paths::from_env()
-        .and_then(|paths| cww::daemon::run_foreground(paths, log_file.as_deref()));
+        .and_then(|paths| cww::daemon::run_foreground(paths, &options));
     if let Err(e) = result {
         // Without a console, the log file is the only place this can go.
         tracing::error!("cww-agent stopped: {e:#}");
