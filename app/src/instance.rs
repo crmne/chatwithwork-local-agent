@@ -30,8 +30,31 @@ pub struct Primary(std::path::PathBuf, windows::Pipe);
 pub fn claim(path: &Path, show: bool) -> std::io::Result<Instance> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         use std::os::unix::net::{UnixListener, UnixStream};
+
+        if let Some(dir) = path.parent() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .create(dir)
+                .and_then(|()| {
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                })?;
+        }
+        // Launches claim one at a time. Otherwise two could both find
+        // nobody listening, and the second would remove the socket the first
+        // just bound and bind its own: two primaries. Under the lock, the
+        // second finds the first listening. The kernel drops the lock if the
+        // process dies, so a crash never leaves it held.
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let claiming = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(&lock_path)?;
+        claiming.lock()?;
 
         for _ in 0..3 {
             match UnixStream::connect(path) {
@@ -49,14 +72,6 @@ pub fn claim(path: &Path, show: bool) -> std::io::Result<Instance> {
                 // whether an instance runs, so never replace its socket.
                 Err(e) => return Err(e),
             }
-            if let Some(dir) = path.parent() {
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .create(dir)
-                    .and_then(|()| {
-                        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                    })?;
-            }
             // Nobody is listening, so a file left there is stale.
             let _ = std::fs::remove_file(path);
             match UnixListener::bind(path) {
@@ -64,7 +79,8 @@ pub fn claim(path: &Path, show: bool) -> std::io::Result<Instance> {
                     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
                     return Ok(Instance::Primary(Primary(listener)));
                 }
-                // Another instance bound it between our connect and bind.
+                // Bound between our connect and bind by an app that didn't
+                // take the lock.
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
                 Err(e) => return Err(e),
             }
@@ -263,6 +279,34 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(path.exists(), "the live socket is still there");
         drop(live);
+    }
+
+    #[test]
+    fn simultaneous_launches_make_one_primary() {
+        for _ in 0..20 {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("app.sock");
+            // A crash left the socket: every launch finds nobody listening.
+            drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let launches: Vec<_> = (0..4)
+                .map(|_| {
+                    let (path, barrier) = (path.clone(), std::sync::Arc::clone(&barrier));
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        claim(&path, false).unwrap()
+                    })
+                })
+                .collect();
+            let primaries: Vec<Primary> = launches
+                .into_iter()
+                .filter_map(|l| match l.join().unwrap() {
+                    Instance::Primary(p) => Some(p),
+                    Instance::Secondary => None,
+                })
+                .collect();
+            assert_eq!(primaries.len(), 1);
+        }
     }
 
     #[test]
