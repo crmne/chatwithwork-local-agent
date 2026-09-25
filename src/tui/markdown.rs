@@ -343,7 +343,6 @@ pub fn wrap_spans(
 ) -> Vec<Line<'static>> {
     // Words keep their style; a word may span styles ("**Q3**'s").
     let mut words: Vec<Vec<Span<'static>>> = vec![Vec::new()];
-    let mut spaces: Vec<bool> = vec![false];
     for span in spans {
         let style = span.style;
         let mut piece = String::new();
@@ -357,7 +356,6 @@ pub fn wrap_spans(
                 }
                 if !words.last().unwrap().is_empty() {
                     words.push(Vec::new());
-                    spaces.push(true);
                 }
             } else {
                 piece.push(c);
