@@ -44,6 +44,10 @@ enum Command {
         /// Only share folders: don't ask to use your chats from `cww tui`.
         #[arg(long)]
         no_chats: bool,
+        /// Print JSON lines for a program to read (the desktop app): the
+        /// code, then the outcome. Never asks anything.
+        #[arg(long)]
+        json: bool,
     },
     /// Forget the pairing on this computer. Revoke it in Settings too.
     Logout,
@@ -175,8 +179,17 @@ fn run(cli: Cli) -> Result<()> {
             server,
             name,
             no_browser,
+            no_chats,
+            json: true,
+            ..
+        } => login_json(&paths, &server, name, !no_browser, no_chats)?,
+        Command::Login {
+            server,
+            name,
+            no_browser,
             no_daemon,
             no_chats,
+            json: false,
         } => {
             let options = auth::LoginOptions {
                 name,
@@ -461,6 +474,56 @@ fn proxy_hint(paths: &Paths) {
     if let Some(hint) = cww::proxy::service_hint(setting.as_deref(), &paths.config_file()) {
         println!();
         println!("{hint}");
+    }
+}
+
+/// `cww login --json`: one JSON object per line on stdout. First
+/// `{"event":"code",...}` with what to show and open, then `{"event":"paired",...}`
+/// or `{"event":"error",...}`. The daemon is told to reload on success.
+fn login_json(
+    paths: &Paths,
+    server: &str,
+    name: Option<String>,
+    open: bool,
+    without_chats: bool,
+) -> Result<()> {
+    use std::sync::atomic::AtomicBool;
+
+    let emit = |value: Value| println!("{value}");
+    let options = auth::LoginOptions {
+        name,
+        store: None,
+        open_browser: false,
+        without_chats,
+    };
+    let result = auth::start_login(paths, server, options).and_then(|pending| {
+        let opened = open && pending.browser_url().is_some_and(cww::browser::open);
+        emit(serde_json::json!({
+            "event": "code",
+            "user_code": pending.user_code(),
+            "verification_uri": pending.verification_uri(),
+            "verification_uri_complete": pending.verification_uri_complete(),
+            "browser_url": pending.browser_url(),
+            "device_name": pending.device_name(),
+            "fingerprint": pending.fingerprint(),
+            "opened": opened,
+        }));
+        pending.wait(&AtomicBool::new(false))
+    });
+    match result {
+        Ok(paired) => {
+            let _ = control::request(&paths.socket_path(), ControlRequest::Reload);
+            emit(serde_json::json!({
+                "event": "paired",
+                "server": paired.url,
+                "device_id": paired.device_id,
+            }));
+            Ok(())
+        }
+        Err(e) => {
+            emit(serde_json::json!({ "event": "error", "error": format!("{e:#}") }));
+            std::process::exit(1);
+        }
     }
 }
 

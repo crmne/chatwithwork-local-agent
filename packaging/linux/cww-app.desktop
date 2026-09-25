@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Chat with Work Local Agent
+GenericName=File Sharing for Chat with Work
+Comment=Choose the folders Chat with Work can search on this computer
+Exec=cww-app
+Icon=cww-app
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=chat;work;files;folders;share;assistant;
+StartupWMClass=cww-app
+SingleMainWindow=true

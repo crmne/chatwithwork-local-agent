@@ -1,0 +1,99 @@
+[package]
+name = "cww-app"
+version = "0.1.0"
+edition = "2024"
+# eframe 0.36 needs 1.95; the daemon itself builds with 1.90.
+rust-version = "1.95"
+description = "Chat with Work Local Agent: the menu bar app and settings window for the cww daemon"
+license = "MIT OR Apache-2.0"
+authors = ["Carmine Paolino <carmine@paolino.me>"]
+repository = "https://github.com/crmne/chatwithwork-local-agent"
+homepage = "https://chatwithwork.com"
+readme = "../README.md"
+publish = false
+
+[[bin]]
+name = "cww-app"
+path = "src/main.rs"
+
+[dependencies]
+# The daemon's paths and control client, so the app finds its socket or pipe
+# exactly where it listens and checks the pipe's owner on Windows. Only the
+# control client and paths are linked in.
+cww = { path = ".." }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+# The settings window. glow keeps the binary and the dependency tree small;
+# a settings window needs no wgpu. AccessKit connects the controls to the
+# platform screen readers.
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "wayland", "x11"] }
+egui = "0.36"
+# The event loop the tray and the window share. eframe already compiles it.
+winit = { version = "0.30", default-features = false }
+# PNG decoding for the icons and encoding for --screenshot. eframe already
+# compiles it with png.
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The native folder picker: NSOpenPanel, IFileDialog, or the XDG portal.
+# The dialog is built on the main thread and awaited on another with
+# pollster, so the window keeps drawing and AppKit runs no nested loop.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "wayland"] }
+pollster = "0.4"
+# The Documents folder of each platform (XDG user dirs, Known Folders).
+directories = "6"
+# Opens the pairing page in the browser and files in their default apps.
+open = "5"
+# Local times in the activity log.
+jiff = "0.2"
+# Maps the system UI font instead of reading it: San Francisco is 8 MB.
+memmap2 = "0.9"
+# Waits for the daemon's socket to appear instead of polling for it.
+notify = "8.2"
+# Only for --demo, whose stand-in daemon uses the real listener.
+tokio = { version = "1.53", features = ["rt-multi-thread"], optional = true }
+tokio-util = { version = "0.7", features = ["io-util"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# StatusNotifierItem over D-Bus, which Waybar, KDE, GNOME (with the
+# AppIndicator extension) and most Linux panels show.
+ksni = { version = "0.3", features = ["blocking"] }
+# Not used directly. zbus runs AccessKit's screen reader bridge on this
+# pool, and in blocking 1.7.0 an idle pool thread never exits: its exit test
+# needs the pool to be over its 500-thread limit as well as idle, so it
+# wakes every 500 ms for the life of the process once the window has been
+# opened. 1.6.2 lets idle threads exit. Drop this once a fixed release is out.
+blocking = "=1.6.2"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+# NSStatusItem on macOS and the notification area on Windows, with native
+# menus (muda).
+tray-icon = { version = "0.25", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSColor", "NSColorSpace", "NSResponder", "NSRunningApplication"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_IO"] }
+
+[target.'cfg(windows)'.build-dependencies]
+# The icon and version information Windows shows for the executable.
+winresource = "0.1"
+
+[features]
+# --demo: runs against a built-in fake daemon with sample folders and
+# activity, for screenshots and trying the window. Never in release builds.
+demo = ["dep:tokio", "dep:tokio-util"]
+
+[dev-dependencies]
+# Drives the settings window through its accessibility tree, without a GPU.
+egui_kittest = "0.36"
+tempfile = "3.27"
+
+# The stand-in daemon, and a test that runs the real one.
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7", features = ["io-util"] }
+

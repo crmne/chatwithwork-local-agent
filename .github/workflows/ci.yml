@@ -38,6 +38,50 @@ jobs:
       - run: mbx test --locked
         timeout-minutes: 5
 
+  # The desktop app, on the three platforms it runs on.
+  app:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt -p cww-app --check
+      - run: cargo clippy -p cww-app --all-targets --locked -- -D warnings
+      - run: cargo clippy -p cww-app --features demo --all-targets --locked -- -D warnings
+      - run: cargo test -p cww-app --locked --no-run
+      - run: cargo test -p cww-app --locked
+        timeout-minutes: 5
+      - run: cargo build -p cww-app -p cww --release --locked
+
+      - name: Bundle the macOS app
+        if: runner.os == 'macOS'
+        run: |
+          packaging/macos/bundle.sh target/release/cww-app target/release/cww \
+            "dist/Chat with Work Local Agent.app" "$(cargo pkgid -p cww-app | sed 's/.*[#@]//')"
+          ditto -c -k --keepParent "dist/Chat with Work Local Agent.app" dist/cww-app-macos.zip
+          rm -rf "dist/Chat with Work Local Agent.app"
+      - name: Collect the Linux binary and desktop entry
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/cww-app-linux
+          cp target/release/cww-app packaging/linux/cww-app.desktop app/assets/mark.svg dist/cww-app-linux/
+      - name: Collect the Windows executable
+        if: runner.os == 'Windows'
+        shell: bash
+        run: mkdir -p dist && cp target/release/cww-app.exe dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cww-app-${{ runner.os }}
+          path: dist/
+          if-no-files-found: error
+
   deny:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -153,6 +153,16 @@ Chats in the terminal are a separate permission from sharing folders. `cww login
 
 The UI uses no CPU while nothing happens, follows `NO_COLOR`, and falls back to 256 colours on terminals without true colour.
 
+## Desktop app
+
+`cww-app` is a menu bar (macOS), notification area (Windows) or tray (Linux) app for the same daemon. It shows whether Chat with Work can reach this computer, pauses and resumes sharing, and has a settings window for shared folders, the deny list, the activity log, pairing, and start at login. On first run it starts the agent, pairs, and offers to share your Documents folder, and it shares nothing until you say so. It uses no CPU while idle.
+
+```sh
+cargo run --release -p cww-app
+```
+
+It is a client of the control channel, like the terminal UI. See [docs/settings-app.md](docs/settings-app.md).
+
 ## What the assistant can do
 
 | Tool | What it does |
@@ -314,6 +324,7 @@ cargo deny check                            # licenses, advisories, bans, source
 | `auth` | Device key, DPoP proofs, device flow, secret storage. |
 | `daemon`, `control`, `service` | The daemon, its control channel ([CONTROL.md](CONTROL.md)), and systemd, launchd and Scheduled Task registration. |
 | `tui` | The terminal UI, a client of the control socket. Screens are pinned as text snapshots in `src/tui/snapshots`; `UPDATE_SNAPSHOTS=1 cargo test` rewrites them. |
+| `app/` | The desktop app (`cww-app`): tray item and settings window, another client of the control socket. See [docs/settings-app.md](docs/settings-app.md). |
 
 Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed, and packaged with [native-packages](https://github.com/crmne/native-packages); see [PACKAGING.md](PACKAGING.md).
 
@@ -330,4 +341,4 @@ Licensed under either of
 
 at your option. Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in this project, as defined in the Apache-2.0 license, is dual licensed as above, without any additional terms or conditions.
 
-"Chat with Work" is a trademark of Plenty UG. The license covers the code, not the name.
+"Chat with Work" and its logo are trademarks of Plenty UG. The license covers the code, not the name or the logo in `app/assets`.

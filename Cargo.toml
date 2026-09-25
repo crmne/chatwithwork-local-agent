@@ -13,6 +13,11 @@ keywords = ["mcp", "search", "files", "agent"]
 categories = ["command-line-utilities", "filesystem"]
 publish = false
 
+[workspace]
+# The desktop app lives in app/. It links this crate's control client and
+# paths, and talks to the daemon over the control channel (CONTROL.md).
+members = [".", "app"]
+
 [lib]
 name = "cww"
 path = "src/lib.rs"

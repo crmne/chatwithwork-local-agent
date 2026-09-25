@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Chat with Work Local Agent</string>
+    <key>CFBundleDisplayName</key><string>Chat with Work Local Agent</string>
+    <key>CFBundleIdentifier</key><string>com.chatwithwork.local-agent</string>
+    <key>CFBundleExecutable</key><string>cww-app</string>
+    <key>CFBundleIconFile</key><string>cww-app</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundleVersion</key><string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+    <!-- A menu bar app: no Dock icon and no menu bar of its own. -->
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSHumanReadableCopyright</key><string>MIT or Apache 2.0. Chat with Work is a trademark of Plenty UG.</string>
+</dict>
+</plist>
