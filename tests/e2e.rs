@@ -1231,7 +1231,10 @@ async fn the_settings_app_manages_folders_over_the_control_channel() {
         })
         .await;
     assert_eq!(ready["roots"][0]["label"], "Docs");
-    assert_eq!(ready["roots"][0]["local_path"], json!(docs));
+    // The daemon shows Windows paths without the \\?\ prefix that
+    // canonicalize() adds.
+    let shown = docs.to_string_lossy().replace(r"\\?\", "");
+    assert_eq!(ready["roots"][0]["local_path"], json!(shown));
     assert!(
         ready["roots"][0]["indexed_files"].as_u64().unwrap() >= 2,
         "{ready}"
