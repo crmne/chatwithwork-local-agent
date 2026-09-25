@@ -17,6 +17,10 @@ use crate::proxy::Proxy;
 
 pub const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 pub const SCOPE: &str = "local_agent:serve";
+/// Asked for as well when pairing, unless the user opts out: the terminal
+/// UI's chats, relayed by the daemon. The server asks the user about it
+/// separately and may leave it out.
+pub const CHAT_SCOPE: &str = "local_agent:chat";
 
 /// A validated server origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,11 +286,22 @@ impl AuthClient {
     }
 
     /// Step 1 of pairing: register the device key and get a user code.
-    pub fn start_pairing(&self, key: &DeviceKey, info: &DeviceInfo) -> Result<DeviceAuthorization> {
+    /// With `chats`, also ask for the terminal UI's chats.
+    pub fn start_pairing(
+        &self,
+        key: &DeviceKey,
+        info: &DeviceInfo,
+        chats: bool,
+    ) -> Result<DeviceAuthorization> {
         let public_key = key.public_key();
+        let scope = if chats {
+            format!("{SCOPE} {CHAT_SCOPE}")
+        } else {
+            SCOPE.to_string()
+        };
         let form = [
             ("client_id", "cww"),
-            ("scope", SCOPE),
+            ("scope", scope.as_str()),
             ("public_key", public_key.as_str()),
             ("name", info.name.as_str()),
             ("platform", info.platform.as_str()),
@@ -322,6 +337,73 @@ impl AuthClient {
             Some("expired_token") => Ok(PollOutcome::Expired),
             _ => Err(oauth_error(status, &body)),
         }
+    }
+
+    /// A JSON request to the server's API as this device: the access token
+    /// in `Authorization: DPoP`, and a proof bound to it for this method and
+    /// URL. Retries once when the server asks for a fresh nonce. Returns the
+    /// status and the JSON body (`null` when the body isn't JSON).
+    pub fn send_json(
+        &self,
+        key: &DeviceKey,
+        method: &str,
+        path: &str,
+        access_token: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(u16, serde_json::Value)> {
+        let url = self.server.endpoint(path);
+        for attempt in 0..2 {
+            let proof = key.proof(method, &url, self.nonce().as_deref(), Some(access_token));
+            let authorization = format!("DPoP {access_token}");
+            let result = match (method, body) {
+                ("GET", _) => self
+                    .agent
+                    .get(&url)
+                    .header("Authorization", &authorization)
+                    .header("DPoP", &proof)
+                    .header("Accept", "application/json")
+                    .call(),
+                (_, Some(body)) => self
+                    .agent
+                    .post(&url)
+                    .header("Authorization", &authorization)
+                    .header("DPoP", &proof)
+                    .header("Accept", "application/json")
+                    .send_json(body),
+                (_, None) => self
+                    .agent
+                    .post(&url)
+                    .header("Authorization", &authorization)
+                    .header("DPoP", &proof)
+                    .header("Accept", "application/json")
+                    .send_empty(),
+            };
+            let mut response = result.with_context(|| format!("contacting {url}"))?;
+            let status = response.status().as_u16();
+            self.set_nonce(
+                response
+                    .headers()
+                    .get("DPoP-Nonce")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+            );
+            if (300..400).contains(&status) {
+                bail!(
+                    "the server answered {url} with a redirect ({status}); redirects are never followed"
+                );
+            }
+            let body: serde_json::Value = response
+                .body_mut()
+                .with_config()
+                .limit(4 * 1024 * 1024)
+                .read_json()
+                .unwrap_or(serde_json::Value::Null);
+            if attempt == 0 && body["error"] == "use_dpop_nonce" {
+                continue;
+            }
+            return Ok((status, body));
+        }
+        unreachable!("the loop returns on the second attempt")
     }
 
     /// Exchange the refresh credential for a short-lived access token.

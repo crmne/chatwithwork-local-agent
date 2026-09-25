@@ -7,6 +7,7 @@
 pub mod client;
 pub mod key;
 pub mod secrets;
+pub mod tokens;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -51,6 +52,8 @@ pub struct LoginOptions {
     pub store: Option<SecretStore>,
     /// Open the approval page in the default browser.
     pub open_browser: bool,
+    /// Don't ask for the terminal UI's chats, only for sharing folders.
+    pub without_chats: bool,
 }
 
 /// A pairing started with [`start_login`], waiting for the user to approve
@@ -167,14 +170,19 @@ impl PendingLogin {
 /// Start pairing this computer with a server: create a key and ask the
 /// server for a code. [`PendingLogin::wait`] finishes it.
 pub fn start_login(paths: &Paths, server: &str, options: LoginOptions) -> Result<PendingLogin> {
-    let LoginOptions { name, store, .. } = options;
+    let LoginOptions {
+        name,
+        store,
+        without_chats,
+        ..
+    } = options;
     let server = ServerUrl::parse(server)?;
     let proxy = crate::proxy::for_server(Config::load(paths)?.proxy.as_deref(), &server)?;
     let client = AuthClient::new(server.clone(), proxy.as_ref())?;
     let key = DeviceKey::generate()?;
     let info = DeviceInfo::current(name);
     let auth = client
-        .start_pairing(&key, &info)
+        .start_pairing(&key, &info, !without_chats)
         .context("starting pairing")?;
     let deadline = Instant::now() + Duration::from_secs(auth.expires_in.max(1));
     Ok(PendingLogin {

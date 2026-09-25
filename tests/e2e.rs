@@ -259,7 +259,8 @@ fn oauth(
     }
     match (path, form.get("grant_type").map(String::as_str)) {
         ("/local_agent/device_authorizations", _) => {
-            assert_eq!(form["scope"], "local_agent:serve");
+            let scopes: Vec<&str> = form["scope"].split(' ').collect();
+            assert!(scopes.contains(&"local_agent:serve"), "{scopes:?}");
             assert!(!form["name"].is_empty() && !form["platform"].is_empty());
             st.public_key = Some(key);
             (

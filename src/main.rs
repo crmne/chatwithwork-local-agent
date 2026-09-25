@@ -41,6 +41,9 @@ enum Command {
         /// Don't start the background daemon after pairing.
         #[arg(long)]
         no_daemon: bool,
+        /// Only share folders: don't ask to use your chats from `cww tui`.
+        #[arg(long)]
+        no_chats: bool,
     },
     /// Forget the pairing on this computer. Revoke it in Settings too.
     Logout,
@@ -173,11 +176,13 @@ fn run(cli: Cli) -> Result<()> {
             name,
             no_browser,
             no_daemon,
+            no_chats,
         } => {
             let options = auth::LoginOptions {
                 name,
                 store: None,
                 open_browser: !no_browser,
+                without_chats: no_chats,
             };
             let paired = auth::login(&paths, &server, options, |line| println!("{line}"))?;
             println!();
