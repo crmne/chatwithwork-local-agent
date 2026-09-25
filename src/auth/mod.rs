@@ -253,11 +253,14 @@ pub fn start_login(paths: &Paths, server: &str, options: LoginOptions) -> Result
     let client = AuthClient::new(server.clone(), proxy.as_ref())?;
     let key = DeviceKey::generate()?;
     let info = DeviceInfo::current(name);
+    // Numbered before asking the server, so attempts are ordered by when
+    // they started: a logout or a newer attempt made while this request is
+    // out supersedes it, however long the server takes to answer.
+    let attempt = begin_attempt(paths)?;
     let auth = client
         .start_pairing(&key, &info, !without_chats)
         .context("starting pairing")?;
     let deadline = Instant::now() + Duration::from_secs(auth.expires_in.max(1));
-    let attempt = begin_attempt(paths)?;
     Ok(PendingLogin {
         attempt,
         paths: paths.clone(),
