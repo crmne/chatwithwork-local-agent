@@ -173,8 +173,19 @@ pub fn home_dir() -> Result<PathBuf> {
 /// The user's Documents folder, if the platform knows one: the XDG user
 /// directory on Linux, `~/Documents` on macOS, the Documents known folder
 /// (which may be redirected to OneDrive) on Windows.
+///
+/// Worked out once per process: the sandboxed daemon can't read the XDG
+/// configuration later, so it asks before confining itself.
 pub fn documents_dir() -> Option<PathBuf> {
-    dirs::document_dir().filter(|p| p.is_absolute())
+    static DOCUMENTS: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DOCUMENTS
+        .get_or_init(|| {
+            dirs::document_dir()
+                .filter(|p| p.is_absolute())
+                .or_else(|| home_dir().ok().map(|h| h.join("Documents")))
+                .filter(|p| p.is_dir())
+        })
+        .clone()
 }
 
 /// On Windows, the profile folder is private to the user by default, so

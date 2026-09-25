@@ -103,6 +103,7 @@ fn confine(config: &Config, paths: &Paths) {
     // certificate store is read once, here, and cww's directories must exist
     // for rules to attach to them.
     let _ = crate::tls::root_certificates();
+    let _ = crate::paths::documents_dir();
     let _ = paths.ensure();
     if let Some(dir) = paths.socket_path().parent() {
         let _ = crate::paths::ensure_private_dir(dir);
