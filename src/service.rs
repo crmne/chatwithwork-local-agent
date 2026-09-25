@@ -29,8 +29,10 @@ pub fn install(paths: &Paths, options: &InstallOptions) -> Result<PathBuf> {
         let plist = launch_agent_path()?;
         write_file(&plist, &launch_agent(&exe, paths))?;
         let domain = launchd_domain();
+        // Fails harmlessly when nothing is loaded yet; keep that quiet.
         let _ = Command::new("launchctl")
             .args(["bootout", &format!("{domain}/{LAUNCHD_LABEL}")])
+            .stderr(std::process::Stdio::null())
             .status();
         run(
             "launchctl",
@@ -72,8 +74,10 @@ pub fn uninstall(paths: &Paths, purge: bool) -> Result<Vec<PathBuf>> {
     if cfg!(target_os = "macos") {
         let plist = launch_agent_path()?;
         let domain = launchd_domain();
+        // Fails harmlessly when nothing is loaded yet; keep that quiet.
         let _ = Command::new("launchctl")
             .args(["bootout", &format!("{domain}/{LAUNCHD_LABEL}")])
+            .stderr(std::process::Stdio::null())
             .status();
         if plist.exists() {
             std::fs::remove_file(&plist)?;
