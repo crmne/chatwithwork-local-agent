@@ -167,6 +167,11 @@ fn history() -> Vec<AuditEntry> {
         denied,
         list,
         error,
+        event(
+            "2026-09-25T08:19:00Z",
+            "shutdown_requested",
+            Some("over the control channel"),
+        ),
         search,
     ]
 }
@@ -600,13 +605,14 @@ fn the_log_view_scrolls_and_follows() {
     app.update(char('l'));
     assert_eq!(app.view, View::Log);
     app.update(key(KeyCode::PageUp));
-    assert_eq!(app.log_scroll, 6, "at most to the first entry");
+    let first = history().len() - 1;
+    assert_eq!(app.log_scroll, first, "at most to the first entry");
     app.update(Msg::Daemon(DaemonMsg::Audit(Box::new(event(
         "2026-09-25T08:20:00Z",
         "resumed",
         None,
     )))));
-    assert_eq!(app.log_scroll, 7, "scrolled view stays put");
+    assert_eq!(app.log_scroll, first + 1, "scrolled view stays put");
     app.update(key(KeyCode::End));
     assert_eq!(app.log_scroll, 0);
     app.update(key(KeyCode::Esc));

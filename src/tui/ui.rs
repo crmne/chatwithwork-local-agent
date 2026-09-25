@@ -866,6 +866,16 @@ fn log_view(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(Paragraph::new(lines), body);
 }
 
+/// `text` padded to `width`, and always followed by at least one space, so
+/// a long event name can't run into the next column.
+fn column(text: &str, width: usize) -> String {
+    if text.chars().count() < width {
+        format!("{text:<width$}")
+    } else {
+        format!("{text} ")
+    }
+}
+
 /// Where the DETAIL column starts.
 const LOG_DETAIL: usize = 31;
 
@@ -886,7 +896,7 @@ fn log_lines(entry: &AuditEntry, app: &App, theme: &Theme, width: usize) -> Vec<
         };
         spans.push(Span::styled(format!("{word:<9}"), theme.signal_ink(signal)));
         spans.push(Span::styled(
-            format!("{:<12}", entry.tool.as_deref().unwrap_or("?")),
+            column(entry.tool.as_deref().unwrap_or("?"), 12),
             theme.ink(),
         ));
         let target = target(entry);
@@ -900,6 +910,9 @@ fn log_lines(entry: &AuditEntry, app: &App, theme: &Theme, width: usize) -> Vec<
             _ => {
                 spans.push(Span::styled(" → ", theme.faint()));
                 spans.push(Span::styled(outcome(entry).0, theme.muted()));
+                if let Some(ms) = entry.duration_ms {
+                    spans.push(Span::styled(format!(" · {}", duration(ms)), theme.faint()));
+                }
             }
         }
         if let Some(chat) = &entry.chat_id {
@@ -908,7 +921,7 @@ fn log_lines(entry: &AuditEntry, app: &App, theme: &Theme, width: usize) -> Vec<
     } else {
         spans.push(Span::styled(format!("{:<9}", "·"), theme.faint()));
         spans.push(Span::styled(
-            format!("{:<12}", entry.event.replace('_', " ")),
+            column(&entry.event.replace('_', " "), 12),
             theme.signal_ink(entry_signal(entry)),
         ));
         if let Some(detail) = &entry.detail {
