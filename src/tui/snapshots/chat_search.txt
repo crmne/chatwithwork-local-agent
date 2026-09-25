@@ -1,7 +1,12 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
                                │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Loading…                      │
+ ━━ CHATS                    2 │
+  + New chat                   │  New chat
+  / pla                        │
+  TODAY                        │  Ask anything.
+ ▌ Launch plan for Falcon      │  Chat with Work searches your shared folders and the services you
+  EARLIER                      │  connected, and the chat stays in Chat with Work on the web too.
+   Hiring plan                 │
                                │
                                │
                                │
@@ -15,16 +20,11 @@
                                │
                                │
                                │
-                               │
-                               │
-                               │
-                               │
-                               │
- ━━ ROOTS                    1 │
- ▌● Work docs                  │
+ ROOTS                       1 │
+  ● Work docs                  │
     work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
  ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Loading your chats…                                          │
+   chatwithwork.com · #42      │ │ ❯ Ask anything…                                                │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- ↑↓ select   a add folder   d remove   l audit log   p pause   ? help   q quit
+ type to search   ↑↓ select   enter open   esc stop searching

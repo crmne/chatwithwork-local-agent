@@ -9,12 +9,13 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use time::OffsetDateTime;
 
 use super::app::{
-    App, Daemon, DaemonStatus, Focus, Modal, Offline, Pairing, RootState, View, parse_ts,
+    Access, App, ChatPane, Daemon, DaemonStatus, Focus, Following, Modal, Offline, Pairing,
+    RootState, View, parse_ts,
 };
-use super::chat::{Availability, ChatMessage, Role, ToolState};
+use super::chat::{ChatSummary, Entry};
+use super::markdown::{self, Footnotes};
 use super::theme::{Signal, Theme};
 use crate::audit::{AuditEntry, Decision};
-use crate::config::DEFAULT_SERVER;
 
 const DOT: &str = "●";
 const RING: &str = "○";
@@ -55,12 +56,14 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetD
     let inner = pad(block.inner(area), 1, 0);
     frame.render_widget(block, area);
 
-    let chats = chats_section(app, theme, inner.width);
     let daemon = daemon_section(app, theme, inner.width);
+    let roots = app.daemon.roots().len() as u16;
+    // A blank line, the label, then two lines per folder, at most three.
+    let roots_height = if roots == 0 { 4 } else { 2 + 2 * roots.min(3) };
     let [brand, chats_area, roots_area, daemon_area] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(chats.len() as u16 + 1),
         Constraint::Min(0),
+        Constraint::Length(roots_height),
         Constraint::Length(daemon.len() as u16),
     ])
     .areas(inner);
@@ -70,8 +73,8 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetD
         Span::styled("  LOCAL AGENT", theme.micro()),
     ]);
     frame.render_widget(Paragraph::new(name), brand);
-    frame.render_widget(Paragraph::new(chats), chats_area);
-    roots_section(frame, roots_area, app, theme, now);
+    chats_section(frame, chats_area, app, theme, now);
+    roots_section(frame, below(roots_area, 1), app, theme, now);
     frame.render_widget(Paragraph::new(daemon), daemon_area);
 }
 
@@ -87,29 +90,169 @@ fn label(text: &str, focused: bool, theme: &Theme) -> Vec<Span<'static>> {
     }
 }
 
-fn chats_section(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+/// "New chat", the search, then the chats by day, as the web's history
+/// groups them.
+fn chats_section(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetDateTime) {
+    if area.height == 0 {
+        return;
+    }
+    let pane = &app.chat;
     let focused = app.focus == Focus::Chats;
-    let mut lines = vec![Line::from(label("CHATS", focused, theme))];
-    if !app.chat.available() {
-        lines.push(Line::styled("In the browser for now", theme.faint()));
-        return lines;
+    let width = area.width as usize;
+    let visible = pane.visible();
+    let count = if pane.ready() && !pane.list.chats.is_empty() {
+        visible.len().to_string()
+    } else {
+        String::new()
+    };
+    let header = spread(
+        label("CHATS", focused, theme),
+        vec![Span::styled(count, theme.faint())],
+        area.width,
+    );
+    frame.render_widget(Paragraph::new(header), row(area, 0));
+    let body = below(area, 1);
+    if !pane.ready() {
+        let text = match &pane.access {
+            Access::Loading => "Loading…".to_string(),
+            Access::NeedsApproval {
+                requested: false, ..
+            } => "Need your OK · o asks".into(),
+            Access::NeedsApproval { .. } => "Waiting for your OK".into(),
+            Access::Unavailable(_) => "Not available here".into(),
+            Access::Ready | Access::Unknown => match &app.daemon {
+                Daemon::NotRunning(_) => "Start the daemon to chat".into(),
+                Daemon::Running(s) if !s.paired || s.connection.connection == "revoked" => {
+                    "Pair this computer to chat".into()
+                }
+                _ => "Looking for the daemon…".into(),
+            },
+        };
+        frame.render_widget(
+            Paragraph::new(Line::styled(ellipsize(&text, width), theme.faint())),
+            body,
+        );
+        return;
     }
-    if app.chat.chats.is_empty() {
-        lines.push(Line::styled("No chats yet", theme.faint()));
-    }
-    let start = app.chat.selected.saturating_sub(4);
-    for (i, chat) in app.chat.chats.iter().enumerate().skip(start).take(5) {
-        let selected = i == app.chat.selected && focused;
-        let open = app.chat.open.as_ref() == Some(&chat.id);
-        let style = if open { theme.strong() } else { theme.muted() };
-        let line = Line::styled(ellipsize(&chat.title, width as usize - 2), style);
-        lines.push(if selected {
-            line.patch_style(theme.selected())
+
+    // Rows, and which of them is the selection.
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut selected_row = 0;
+    let marker = |selected: bool| {
+        if selected && focused {
+            Span::styled("▌", theme.ink())
         } else {
-            line
-        });
+            Span::raw(" ")
+        }
+    };
+    let new_selected = pane.selected == 0;
+    let new_style = if pane.open.is_none() {
+        theme.strong()
+    } else {
+        theme.muted()
+    };
+    let mut new_chat = Line::from(vec![
+        marker(new_selected),
+        Span::styled("+ ", theme.rainbow(0.2)),
+        Span::styled("New chat", new_style),
+    ]);
+    if new_selected && focused {
+        new_chat = new_chat.patch_style(theme.selected());
     }
-    lines
+    rows.push(new_chat);
+    if let Some(query) = &pane.search {
+        let mut spans = vec![
+            Span::raw(" "),
+            Span::styled("/ ", theme.signal_ink(Signal::Live)),
+            Span::styled(tail(query, width.saturating_sub(4)), theme.ink()),
+        ];
+        if visible.is_empty() {
+            spans.push(Span::styled("  no match", theme.faint()));
+        }
+        rows.push(Line::from(spans));
+    } else if pane.list.chats.is_empty() {
+        rows.push(Line::styled(" No chats yet", theme.faint()));
+    }
+    let mut group = "";
+    for (i, chat) in visible.iter().enumerate() {
+        let this = day_group(&chat.updated_at, now, app);
+        if this != group {
+            group = this;
+            rows.push(Line::styled(format!(" {this}"), theme.micro()));
+        }
+        let selected = pane.selected == i + 1;
+        if selected {
+            selected_row = rows.len();
+        }
+        rows.push(chat_row(
+            chat,
+            pane,
+            selected && focused,
+            marker(selected),
+            width,
+            theme,
+            now,
+        ));
+    }
+
+    let height = body.height as usize;
+    let start = (selected_row + 1).saturating_sub(height);
+    let shown: Vec<Line> = rows.into_iter().skip(start).take(height).collect();
+    frame.render_widget(Paragraph::new(shown), body);
+}
+
+fn chat_row(
+    chat: &ChatSummary,
+    pane: &ChatPane,
+    highlighted: bool,
+    marker: Span<'static>,
+    width: usize,
+    theme: &Theme,
+    now: OffsetDateTime,
+) -> Line<'static> {
+    let open = pane.open == Some(chat.number);
+    let style = if open { theme.strong() } else { theme.muted() };
+    let live = chat.processing();
+    let room = width.saturating_sub(if live { 5 } else { 3 });
+    let title = ellipsize(&chat.title, room);
+    let mut spans = vec![marker, Span::raw(" "), Span::styled(title.clone(), style)];
+    if let Some(project) = &chat.project {
+        let left = room.saturating_sub(title.chars().count() + 3);
+        if left >= 4 {
+            spans.push(Span::styled(
+                format!(" · {}", ellipsize(&project.name, left)),
+                theme.faint(),
+            ));
+        }
+    }
+    let mut line = if live {
+        spread(
+            spans,
+            vec![Span::styled(spinner(now), theme.signal(Signal::Live))],
+            width as u16,
+        )
+    } else {
+        Line::from(spans)
+    };
+    if highlighted {
+        line = line.patch_style(theme.selected());
+    }
+    line
+}
+
+/// "TODAY", "YESTERDAY" or "EARLIER", in local time.
+fn day_group(updated_at: &str, now: OffsetDateTime, app: &App) -> &'static str {
+    let Some(at) = parse_ts(updated_at) else {
+        return "EARLIER";
+    };
+    let (day, today) = (local(at, app).date(), local(now, app).date());
+    if day >= today {
+        "TODAY"
+    } else if today.previous_day() == Some(day) {
+        "YESTERDAY"
+    } else {
+        "EARLIER"
+    }
 }
 
 fn roots_section(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetDateTime) {
@@ -340,9 +483,9 @@ fn main_pane(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: Offse
     ])
     .areas(area);
     header_bar(frame, header, app, theme, now);
-    chat_view(frame, pad(body, 2, 1), app, theme);
+    chat_view(frame, pad(body, 2, 1), app, theme, now);
     activity_line(frame, activity, app, theme, now);
-    composer_box(frame, pad(composer, 1, 0), app, theme);
+    composer_box(frame, pad(composer, 1, 0), app, theme, now);
 }
 
 fn header_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetDateTime) {
@@ -541,6 +684,9 @@ fn cards(app: &App) -> Vec<Card> {
             }
         }
     }
+    if let Some(card) = chat_card(app) {
+        cards.push(card);
+    }
     if let Some(suggestion) = app.offer() {
         cards.push(Card {
             signal: Signal::Live,
@@ -575,6 +721,64 @@ fn cards(app: &App) -> Vec<Card> {
     cards
 }
 
+/// What stands between this computer and the chats, when something does.
+fn chat_card(app: &App) -> Option<Card> {
+    match &app.chat.access {
+        Access::NeedsApproval {
+            requested: false, ..
+        } => Some(Card {
+            signal: Signal::Attention,
+            title: "Chats need your OK".into(),
+            lines: vec![
+                CardLine::Text(
+                    "This computer shares folders with Chat with Work. To read and send your \
+                     chats here too, allow it in Chat with Work. It's a separate permission, \
+                     and you can turn it off without unsharing anything."
+                        .into(),
+                ),
+                CardLine::Keys(vec![("o", "ask, and open the page to allow it")]),
+            ],
+        }),
+        Access::NeedsApproval { url, .. } => {
+            let mut lines = vec![CardLine::Text(
+                "Allow chats for this computer in Chat with Work, under Settings, Computers:"
+                    .into(),
+            )];
+            if let Some(url) = url {
+                lines.push(CardLine::Value(url.clone()));
+            }
+            lines.push(CardLine::Text("This updates by itself once you do.".into()));
+            lines.push(CardLine::Keys(vec![
+                ("o", "open the page"),
+                ("r", "check now"),
+            ]));
+            Some(Card {
+                signal: Signal::Attention,
+                title: "Waiting for your OK".into(),
+                lines,
+            })
+        }
+        Access::Unavailable(failure) => {
+            let (signal, title) = match failure.code.as_str() {
+                "unsupported" => (Signal::Idle, "This server doesn't offer chats here"),
+                "revoked" => (Signal::Negative, "Chat with Work revoked this computer"),
+                "unreachable" => (Signal::Attention, "Can't reach Chat with Work"),
+                "forbidden" => (Signal::Attention, "Chats aren't available to you here"),
+                _ => (Signal::Negative, "Chats aren't available"),
+            };
+            Some(Card {
+                signal,
+                title: title.into(),
+                lines: vec![
+                    CardLine::Text(failure.message.clone()),
+                    CardLine::Keys(vec![("r", "try again")]),
+                ],
+            })
+        }
+        _ => None,
+    }
+}
+
 fn card_lines(card: &Card, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let (glyph, style) = match card.signal {
         Signal::Idle => (RING, theme.faint()),
@@ -597,10 +801,14 @@ fn card_lines(card: &Card, width: usize, theme: &Theme) -> Vec<Line<'static>> {
                 Span::raw("  "),
                 Span::styled(ellipsize_start(path, width.saturating_sub(2)), theme.ink()),
             ])),
-            CardLine::Value(value) => lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(value.clone(), theme.strong()),
-            ])),
+            // Links and codes wrap rather than lose their end.
+            CardLine::Value(value) => lines.extend(
+                wrap(value, width.saturating_sub(2))
+                    .into_iter()
+                    .map(|part| {
+                        Line::from(vec![Span::raw("  "), Span::styled(part, theme.strong())])
+                    }),
+            ),
             CardLine::Keys(keys) => lines.push(key_hints(keys, theme)),
         }
     }
@@ -632,10 +840,16 @@ fn render_card(
     }
 }
 
-fn chat_view(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn chat_view(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetDateTime) {
     let mut y = area.y;
     let width = area.width.min(76);
+    // Inside a conversation, only what needs doing stays on top of it.
+    let in_chat =
+        app.chat.ready() && (app.chat.open.is_some() || app.chat.pending_question.is_some());
     for card in cards(app) {
+        if in_chat && matches!(card.signal, Signal::Live | Signal::Idle) {
+            continue;
+        }
         let lines = card_lines(&card, width.saturating_sub(4) as usize, theme);
         let height = lines.len() as u16 + 2;
         if y + height > area.bottom() {
@@ -651,115 +865,350 @@ fn chat_view(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         y += height + 1;
     }
     let rest = Rect::new(area.x, y, area.width, area.bottom().saturating_sub(y));
-    match &app.chat.availability {
-        Availability::Unavailable { reason } => chat_unavailable(frame, rest, app, reason, theme),
-        Availability::Available => transcript(frame, rest, app, theme),
+    if app.chat.ready() {
+        conversation(frame, rest, app, theme, now);
     }
 }
 
-/// No chat here: say why, and where to chat instead.
-fn chat_unavailable(frame: &mut Frame, area: Rect, app: &App, reason: &str, theme: &Theme) {
-    let server = app.daemon.server().unwrap_or(DEFAULT_SERVER);
-    let url = format!("{}/chats", server.trim_end_matches('/'));
-    let shared = app.daemon.connection() == Some("connected")
-        && app.daemon.paused() == Some(false)
-        && !app.daemon.roots().is_empty();
-    let body = if shared {
-        format!("{reason} Your files are shared; chat in the browser at")
-    } else {
-        format!("{reason} Chat in the browser at")
-    };
-    let width = area.width.min(64) as usize;
-    let mut lines = vec![
-        Line::styled("Chat isn't available in the terminal yet", theme.strong()),
-        Line::raw(""),
-    ];
-    lines.extend(
-        wrap(&body, width)
-            .into_iter()
-            .map(|l| Line::styled(l, theme.muted())),
-    );
-    lines.push(Line::styled(url, theme.signal_ink(Signal::Live)));
-    let height = lines.len() as u16;
-    if area.height < height {
+/// The open chat: its title, then the transcript, newest at the bottom.
+fn conversation(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetDateTime) {
+    if area.height < 2 {
         return;
     }
-    let top = area.y + (area.height - height) / 2;
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        Rect::new(area.x, top, area.width, height),
+    let pane = &app.chat;
+    let width = area.width as usize;
+    let title = match pane.open_summary() {
+        Some(chat) => chat.title.clone(),
+        None if pane.open.is_some() => "Loading…".into(),
+        None => "New chat".into(),
+    };
+    let mut meta: Vec<Span<'static>> = Vec::new();
+    if let Some(chat) = pane.open_summary() {
+        let mut text = format!("#{}", chat.number);
+        if let Some(project) = &chat.project {
+            text.push_str(&format!(" · {}", project.name));
+        }
+        meta.push(Span::styled(text, theme.micro()));
+    }
+    match pane.following {
+        Following::Live if pane.working() => {
+            meta.push(Span::raw("  "));
+            meta.push(Span::styled(DOT, theme.signal(Signal::Positive)));
+            meta.push(Span::raw(" "));
+            meta.extend(theme.rainbow_text("LIVE"));
+        }
+        Following::Offline => {
+            meta.push(Span::raw("  "));
+            meta.push(Span::styled(
+                "reconnecting",
+                theme.signal_ink(Signal::Attention),
+            ));
+        }
+        Following::Refused => {
+            meta.push(Span::raw("  "));
+            meta.push(Span::styled(
+                "not live",
+                theme.signal_ink(Signal::Attention),
+            ));
+        }
+        _ => {}
+    }
+    let meta_width: usize = meta.iter().map(Span::width).sum();
+    let heading = spread(
+        vec![Span::styled(
+            ellipsize(&title, width.saturating_sub(meta_width + 2)),
+            theme.strong(),
+        )],
+        meta,
+        area.width,
     );
+    frame.render_widget(Paragraph::new(heading), row(area, 0));
+
+    let body = below(area, 2);
+    let mut lines = transcript_lines(app, body.width as usize, theme, now);
+    let height = body.height as usize;
+    let most = lines.len().saturating_sub(height);
+    let scroll = pane.scroll.min(most);
+    let end = lines.len() - scroll;
+    let start = end.saturating_sub(height);
+    lines.truncate(end);
+    let shown = lines.split_off(start);
+    frame.render_widget(Paragraph::new(shown), body);
+    if scroll > 0 && body.height > 0 {
+        let note = Line::styled(format!("↓ {scroll} more · end"), theme.faint())
+            .alignment(Alignment::Right);
+        frame.render_widget(Paragraph::new(note), row(body, body.height - 1));
+    }
 }
 
-fn transcript(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let width = area.width.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-    if app.chat.messages.is_empty() && app.chat.error.is_none() {
-        let text = if app.chat.open.is_some() {
-            "Loading…"
-        } else {
-            "Ask anything. Chat with Work searches your shared folders and connected services."
-        };
-        lines.extend(
-            wrap(text, width)
-                .into_iter()
-                .map(|l| Line::styled(l, theme.faint())),
-        );
-    }
-    for message in &app.chat.messages {
-        message_lines(&mut lines, message, width, theme);
-    }
-    if let Some(error) = &app.chat.error {
-        lines.extend(
-            wrap(error, width)
-                .into_iter()
-                .map(|l| Line::styled(l, theme.signal_ink(Signal::Negative))),
-        );
-    }
-    let skip = lines.len().saturating_sub(area.height as usize);
-    frame.render_widget(Paragraph::new(lines.split_off(skip)), area);
-}
-
-fn message_lines(
-    lines: &mut Vec<Line<'static>>,
-    message: &ChatMessage,
+/// The conversation as lines, oldest first.
+pub(super) fn transcript_lines(
+    app: &App,
     width: usize,
     theme: &Theme,
-) {
-    match message.role {
-        Role::User => {
-            lines.push(Line::styled("YOU", theme.micro()));
-            lines.extend(
-                wrap(&message.text, width)
-                    .into_iter()
-                    .map(|l| Line::styled(l, theme.ink())),
-            );
+    now: OffsetDateTime,
+) -> Vec<Line<'static>> {
+    let pane = &app.chat;
+    let width = width.max(16);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if pane.open.is_none() && pane.pending_question.is_none() {
+        lines.push(Line::styled("Ask anything.", theme.strong()));
+        lines.extend(
+            wrap(
+                "Chat with Work searches your shared folders and the services you connected, \
+                 and the chat stays in Chat with Work on the web too.",
+                width.min(72),
+            )
+            .into_iter()
+            .map(|l| Line::styled(l, theme.muted())),
+        );
+        if let Some(reason) = pane.locked_reason() {
+            lines.push(Line::raw(""));
+            lines.push(notice_line(reason, Signal::Attention, width, theme).remove(0));
         }
-        Role::Assistant => {
-            lines.push(Line::styled("CHAT WITH WORK", theme.micro()));
-            for step in &message.tools {
-                let (glyph, signal) = match step.state {
-                    ToolState::Running => ("…", Signal::Live),
-                    ToolState::Done => ("✓", Signal::Positive),
-                    ToolState::Failed => ("✕", Signal::Negative),
+        return lines;
+    }
+    if pane.transcript.is_none() && pane.loading {
+        lines.push(Line::from(vec![
+            Span::styled(spinner(now), theme.signal(Signal::Live)),
+            Span::styled(" Reading the chat…", theme.faint()),
+        ]));
+    }
+    let mut answered: Vec<u64> = Vec::new();
+    let mut live_activity = false;
+    let entries = pane.transcript.as_ref().map_or(&[][..], |t| &t.entries[..]);
+    for entry in entries {
+        match entry {
+            Entry::User {
+                content, author, ..
+            } => bubble(&mut lines, content, author.as_deref(), width, theme, false),
+            Entry::Activity {
+                title,
+                details,
+                progress,
+                pending,
+                steps,
+                ..
+            } => {
+                live_activity |= *pending;
+                let progress = if *pending {
+                    pane.progress.as_ref().or(progress.as_ref())
+                } else {
+                    None
                 };
+                activity_lines(
+                    &mut lines,
+                    ActivityView {
+                        title,
+                        details: details.as_deref(),
+                        progress: progress.map(String::as_str),
+                        pending: *pending,
+                        steps,
+                        expanded: pane.show_steps || *pending,
+                    },
+                    width,
+                    theme,
+                    now,
+                );
+            }
+            Entry::Assistant {
+                id,
+                content,
+                sources,
+            } => {
+                answered.push(*id);
+                let text = if content.trim().is_empty() {
+                    pane.streamed.get(id).map_or("", String::as_str)
+                } else {
+                    content.as_str()
+                };
+                if !text.trim().is_empty() {
+                    answer_lines(&mut lines, text, sources, width, theme);
+                }
+            }
+            Entry::Notice { tone, text } => {
+                let signal = if tone == "negative" {
+                    Signal::Negative
+                } else {
+                    Signal::Attention
+                };
+                lines.extend(notice_line(text, signal, width, theme));
+                lines.push(Line::raw(""));
+            }
+            Entry::Unknown => {}
+        }
+    }
+    // Answers still being written that the last read didn't have yet.
+    let mut writing = false;
+    for (id, text) in &pane.streamed {
+        if !answered.contains(id) && !text.trim().is_empty() {
+            answer_lines(&mut lines, text, &[], width, theme);
+            writing = true;
+        }
+    }
+    if let Some(question) = &pane.pending_question {
+        bubble(&mut lines, question, None, width, theme, true);
+    }
+    if pane.working() && !live_activity && !writing {
+        let word = if pane.stopping {
+            "Stopping…"
+        } else if pane.sending {
+            "Sending…"
+        } else {
+            "Thinking"
+        };
+        let mut spans = vec![
+            Span::styled(spinner(now), theme.signal(Signal::Live)),
+            Span::raw(" "),
+        ];
+        spans.extend(theme.rainbow_text(word));
+        if let Some(progress) = &pane.progress {
+            spans.push(Span::styled(format!(" · {progress}"), theme.faint()));
+        }
+        lines.push(Line::from(spans));
+    }
+    if let Some(error) = &pane.error {
+        lines.extend(notice_line(error, Signal::Negative, width, theme));
+    }
+    while lines.last().is_some_and(|l| l.width() == 0) {
+        lines.pop();
+    }
+    lines
+}
+
+/// A question, as a bubble on the right.
+fn bubble(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    author: Option<&str>,
+    width: usize,
+    theme: &Theme,
+    pending: bool,
+) {
+    let most = (width * 3 / 4).clamp(16, width);
+    let wrapped = wrap(text.trim(), most.saturating_sub(4));
+    let inner = wrapped.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let indent = " ".repeat(width.saturating_sub(inner + 4));
+    if let Some(author) = author {
+        lines.push(Line::styled(author.to_string(), theme.micro()).alignment(Alignment::Right));
+    }
+    let style = if pending {
+        theme.bubble().patch(theme.faint())
+    } else {
+        theme.bubble()
+    };
+    for line in wrapped {
+        let pad = inner - line.chars().count();
+        lines.push(Line::from(vec![
+            Span::raw(indent.clone()),
+            Span::styled(format!("  {line}{}  ", " ".repeat(pad)), style),
+        ]));
+    }
+    lines.push(Line::raw(""));
+}
+
+struct ActivityView<'a> {
+    title: &'a str,
+    details: Option<&'a str>,
+    progress: Option<&'a str>,
+    pending: bool,
+    steps: &'a [super::chat::Step],
+    expanded: bool,
+}
+
+/// The tool work between two things said: one line, like the web's
+/// collapsed activity, and its steps under it when expanded.
+fn activity_lines(
+    lines: &mut Vec<Line<'static>>,
+    activity: ActivityView,
+    width: usize,
+    theme: &Theme,
+    now: OffsetDateTime,
+) {
+    let mut spans = if activity.pending {
+        let mut spans = vec![
+            Span::styled(spinner(now), theme.signal(Signal::Live)),
+            Span::raw(" "),
+        ];
+        spans.extend(theme.rainbow_text(activity.title));
+        spans
+    } else {
+        let caret = if activity.expanded { "▾" } else { "▸" };
+        vec![
+            Span::styled(caret, theme.faint()),
+            Span::raw(" "),
+            Span::styled(activity.title.to_string(), theme.muted()),
+        ]
+    };
+    if let Some(details) = activity.progress.or(activity.details) {
+        let used: usize = spans.iter().map(Span::width).sum();
+        let room = width.saturating_sub(used + 3);
+        if room > 4 {
+            spans.push(Span::styled(
+                format!(" · {}", ellipsize(details, room)),
+                theme.faint(),
+            ));
+        }
+    }
+    lines.push(Line::from(spans));
+    if activity.expanded {
+        for step in activity.steps {
+            let (glyph, style) = if step.pending {
+                (RING, theme.signal(Signal::Live))
+            } else {
+                ("·", theme.faint())
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(glyph, style),
+                Span::raw(" "),
+                Span::styled(
+                    ellipsize(&step.summary, width.saturating_sub(4)),
+                    theme.muted(),
+                ),
+            ]));
+            for file in &step.files {
                 lines.push(Line::from(vec![
-                    Span::styled(glyph, theme.signal(signal)),
-                    Span::styled(format!(" {} ", step.service), theme.ink()),
-                    Span::styled(
-                        ellipsize(&step.summary, width.saturating_sub(4)),
-                        theme.muted(),
-                    ),
+                    Span::raw("      "),
+                    Span::styled(ellipsize(file, width.saturating_sub(6)), theme.faint()),
                 ]));
             }
-            lines.extend(
-                wrap(&message.text, width)
-                    .into_iter()
-                    .map(|l| Line::styled(l, theme.ink())),
-            );
         }
     }
     lines.push(Line::raw(""));
+}
+
+/// An answer: Markdown, then its sources and links as footnotes.
+fn answer_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    sources: &[super::chat::Source],
+    width: usize,
+    theme: &Theme,
+) {
+    let mut notes = Footnotes::new(sources.iter().map(|s| (s.title.clone(), s.url.clone())));
+    lines.extend(markdown::render(text, width, theme, &mut notes));
+    if !notes.notes.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("SOURCES", theme.micro()));
+        lines.extend(markdown::footnote_lines(&notes, width, theme));
+    }
+    lines.push(Line::raw(""));
+}
+
+fn notice_line(text: &str, signal: Signal, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    wrap(text, width.saturating_sub(2))
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let glyph = if i == 0 { DOT } else { " " };
+            Line::from(vec![
+                Span::styled(glyph, theme.signal(signal)),
+                Span::raw(" "),
+                Span::styled(l, theme.signal_ink(signal)),
+            ])
+        })
+        .collect()
 }
 
 fn activity_line(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetDateTime) {
@@ -801,40 +1250,77 @@ fn activity_line(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: O
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
-fn composer_box(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let available = app.chat.available();
+/// The composer, with the Live Wire rainbow for its edge: dimmed while it
+/// can't send, flowing while an answer is written. Without true colour it's
+/// the nearest 256 colours, and with `NO_COLOR` a bold or dim frame.
+fn composer_box(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetDateTime) {
+    let pane = &app.chat;
+    let locked = pane.locked_reason();
+    let usable = pane.ready() && locked.is_none();
     let block = Block::bordered().border_type(BorderType::Rounded);
     let inner = pad(block.inner(area), 1, 0);
     frame.render_widget(block, area);
-    rainbow_border(frame.buffer_mut(), area, theme, available);
+    let phase = if pane.working() {
+        // One trip around every two seconds.
+        (now.unix_timestamp_nanos() % 2_000_000_000) as f32 / 2_000_000_000.0
+    } else {
+        0.0
+    };
+    rainbow_border(frame.buffer_mut(), area, theme, usable, phase);
 
     let mut spans = vec![Span::styled(PROMPT, theme.rainbow(0.48)), Span::raw(" ")];
-    if !available {
-        let server = app.daemon.server().unwrap_or(DEFAULT_SERVER);
-        spans.push(Span::styled(
-            format!(
-                "Chat in the browser: {}/chats",
-                server.trim_end_matches('/')
-            ),
-            theme.faint(),
-        ));
-    } else if app.chat.streaming {
-        spans.push(Span::styled("Writing…  esc stops", theme.faint()));
-    } else if app.chat.input.is_empty() {
-        spans.push(Span::styled("Ask anything…", theme.faint()));
-    } else {
-        let room = inner.width.saturating_sub(3) as usize;
-        spans.push(Span::styled(tail(&app.chat.input, room), theme.ink()));
+    let room = inner.width.saturating_sub(3) as usize;
+    let typed = !pane.input.is_empty();
+    match (&pane.access, locked) {
+        (Access::Ready, Some(reason)) => {
+            spans.push(Span::styled(
+                ellipsize(reason, room),
+                theme.signal_ink(Signal::Attention),
+            ));
+        }
+        (Access::Ready, None) if typed => {
+            spans.push(Span::styled(tail(&pane.input, room), theme.ink()));
+        }
+        (Access::Ready, None) if pane.working() => {
+            let text = if pane.stopping {
+                "Stopping…"
+            } else {
+                "Writing…  esc stops"
+            };
+            spans.push(Span::styled(text, theme.faint()));
+        }
+        (Access::Ready, None) => {
+            let text = if pane.open.is_some() {
+                "Reply…"
+            } else {
+                "Ask anything…"
+            };
+            spans.push(Span::styled(text, theme.faint()));
+        }
+        (access, _) => {
+            let text = match access {
+                Access::Loading => "Loading your chats…",
+                Access::NeedsApproval {
+                    requested: false, ..
+                } => "Chats need your OK first: press o",
+                Access::NeedsApproval { .. } => "Waiting for your OK in Chat with Work",
+                Access::Unavailable(_) => "Chats aren't available here",
+                _ => match &app.daemon {
+                    Daemon::NotRunning(_) => "Start the daemon to chat here: press s",
+                    Daemon::Running(_) if app.can_pair() => {
+                        "Pair this computer to chat here: press c"
+                    }
+                    _ => "Looking for the daemon…",
+                },
+            };
+            spans.push(Span::styled(ellipsize(text, room), theme.faint()));
+        }
     }
     let line = Line::from(spans);
     let cursor_x = inner.x + line.width() as u16;
     frame.render_widget(Paragraph::new(line), inner);
-    if available && app.focus == Focus::Composer && app.modal.is_none() && !app.chat.streaming {
-        let x = if app.chat.input.is_empty() {
-            inner.x + 2
-        } else {
-            cursor_x
-        };
+    if usable && app.focus == Focus::Composer && app.modal.is_none() {
+        let x = if typed { cursor_x } else { inner.x + 2 };
         frame.set_cursor_position(Position::new(
             x.min(inner.right().saturating_sub(1)),
             inner.y,
@@ -842,8 +1328,9 @@ fn composer_box(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 }
 
-/// The composer's edge: the rainbow, dimmed while chat is unavailable.
-fn rainbow_border(buf: &mut Buffer, area: Rect, theme: &Theme, bright: bool) {
+/// The composer's edge: the rainbow, dimmed while it can't send, shifted
+/// by `phase` so it flows while an answer is written.
+fn rainbow_border(buf: &mut Buffer, area: Rect, theme: &Theme, bright: bool, phase: f32) {
     if area.width < 2 || area.height < 2 {
         return;
     }
@@ -857,7 +1344,14 @@ fn rainbow_border(buf: &mut Buffer, area: Rect, theme: &Theme, bright: bool) {
             if !edge {
                 continue;
             }
-            let t = (x - area.left()) as f32 / span;
+            let along = (x - area.left()) as f32 / span;
+            // Flowing: the gradient runs there and back so it never jumps.
+            let t = if phase > 0.0 {
+                let shifted = (along + phase) % 1.0;
+                1.0 - (2.0 * shifted - 1.0).abs()
+            } else {
+                along
+            };
             let style = if bright {
                 theme.rainbow(t)
             } else {
@@ -1112,12 +1606,41 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         None => {}
     }
     if app.focus == Focus::Composer {
+        let esc = if app.chat.working() {
+            ("esc", "stop")
+        } else {
+            ("esc", "back")
+        };
         return vec![
             ("enter", "send"),
-            ("esc", "back"),
+            esc,
+            ("pgup pgdn", "scroll"),
             ("tab", "focus"),
             ("ctrl-c", "quit"),
         ];
+    }
+    if app.focus == Focus::Chats && app.chat.search.is_some() {
+        return vec![
+            ("type", "to search"),
+            ("↑↓", "select"),
+            ("enter", "open"),
+            ("esc", "stop searching"),
+        ];
+    }
+    if app.focus == Focus::Chats && app.view == View::Chat {
+        let mut keys = vec![
+            ("↑↓", "select"),
+            ("enter", "open"),
+            ("n", "new chat"),
+            ("/", "search"),
+            ("tab", "focus"),
+            ("e", "steps"),
+        ];
+        if app.chat.open.is_some() || app.chat.selected_chat().is_some() {
+            keys.push(("o", "open in browser"));
+        }
+        keys.extend([("l", "audit log"), ("?", "help"), ("q", "quit")]);
+        return keys;
     }
     let mut keys = Vec::new();
     if app.pairing.is_some() {
@@ -1150,6 +1673,9 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     }
     if matches!(app.daemon, Daemon::NotRunning(_)) {
         keys.push(("r", "retry"));
+    }
+    if matches!(app.chat.access, Access::NeedsApproval { .. }) {
+        keys.push(("o", "allow chats"));
     }
     keys.extend([("?", "help"), ("q", "quit")]);
     keys
@@ -1274,12 +1800,20 @@ fn help_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
         ("pgup pgdn", "page through the audit log"),
         ("r", "look for the daemon again"),
     ];
-    if app.chat.available() {
+    if app.chat.ready() {
         keys.extend([
-            ("tab", "move between chats, folders and the composer"),
-            ("i", "write a message"),
+            ("tab", "move between chats, the composer and folders"),
+            ("↑ ↓  j k", "select a chat"),
             ("enter", "open a chat; send a message"),
+            ("n", "new chat"),
+            ("/", "search chats"),
+            ("i", "write a message"),
+            ("esc", "stop an answer; back to the chats"),
+            ("e", "show every tool step"),
+            ("o", "open the chat in the browser"),
         ]);
+    } else if matches!(app.chat.access, Access::NeedsApproval { .. }) {
+        keys.push(("o", "ask to use your chats here"));
     }
     keys.extend([("?", "this help"), ("q  ctrl-c", "quit")]);
     keys.into_iter()

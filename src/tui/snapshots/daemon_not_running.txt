@@ -1,11 +1,11 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                ○ DAEMON STOPPED
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
- In the browser for now        │  ╭──────────────────────────────────────────────────────────────╮
+ Start the daemon to chat      │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● The daemon isn't running                                   │
- ━━ ROOTS                    1 │  │ Chat with Work can't search your folders until it runs.      │
- ▌○ Work docs                  │  │ Start it in the background with:                             │
-    work-docs · not running    │  │   $ cww daemon install                                       │
+                               │  │ Chat with Work can't search your folders until it runs.      │
+                               │  │ Start it in the background with:                             │
+                               │  │   $ cww daemon install                                       │
                                │  │ This computer isn't paired yet either.                       │
                                │  │ Until then, this shows config.toml, and changes here are     │
                                │  │ saved there.                                                 │
@@ -15,16 +15,16 @@
                                │
                                │
                                │
-                               │              Chat isn't available in the terminal yet
-                               │
-                               │    Chat with Work has no chat API for it. Chat in the browser at
-                               │                   https://chatwithwork.com/chats
                                │
                                │
                                │
-                               │────────────────────────────────────────────────────────────────────
+                               │
+                               │
+ ━━ ROOTS                    1 │
+ ▌○ Work docs                  │
+    work-docs · not running    │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  ● connected · https://chatwithwork.com · 5m ago
  ○ not running                 │ ╭────────────────────────────────────────────────────────────────╮
-   $ cww daemon install        │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
+   $ cww daemon install        │ │ ❯ Start the daemon to chat here: press s                       │
    not paired                  │ ╰────────────────────────────────────────────────────────────────╯
  c pair   s start daemon   ↑↓ select   a add folder   d remove   l audit log   p pause   r retry

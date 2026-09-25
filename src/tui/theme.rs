@@ -147,6 +147,24 @@ impl Theme {
         }
     }
 
+    /// Inline and fenced code in answers.
+    pub fn code(&self) -> Style {
+        if self.mono() {
+            Style::new().add_modifier(Modifier::REVERSED)
+        } else {
+            self.fg(INK).patch(self.bg(SELECTED))
+        }
+    }
+
+    /// A question's bubble.
+    pub fn bubble(&self) -> Style {
+        if self.mono() {
+            Style::new().add_modifier(Modifier::BOLD)
+        } else {
+            self.fg(INK).patch(self.bg(SURFACE))
+        }
+    }
+
     /// Small uppercase mono labels: `ROOTS`, `DAEMON`, `ACTIVITY`.
     pub fn micro(&self) -> Style {
         self.faint()

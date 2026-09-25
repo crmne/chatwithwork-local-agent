@@ -1,11 +1,11 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
- In the browser for now        │  TIME      RESULT   TOOL        DETAIL                  8 entries
+ Loading…                      │  TIME      RESULT   TOOL        DETAIL                  8 entries
                                │  08:14:00  ·        started
- ━━ ROOTS                    1 │  08:14:03  ·        connected   https://chatwithwork.com
- ▌● Work docs                  │  08:16:10  allowed  read        work-docs:plans/q3.md → 5.1 KB ·
-    work-docs · 1,532 files    │  08:17:30  denied   read        work-docs:.env · chat 1234
+                               │  08:14:03  ·        connected   https://chatwithwork.com
+                               │  08:16:10  allowed  read        work-docs:plans/q3.md → 5.1 KB ·
+                               │  08:17:30  denied   read        work-docs:.env · chat 1234
                                │                                 this path is on the deny list
                                │                                 (.env*)
                                │  08:18:02  allowed  list        projects: → 12 entries · chat 123
@@ -20,9 +20,9 @@
                                │
                                │
                                │
-                               │
-                               │
-                               │
+ ━━ ROOTS                    1 │
+ ▌● Work docs                  │
+    work-docs · 1,532 files    │
  DAEMON                        │
  ● connected       since 08:14 │
    chatwithwork.com · #42      │

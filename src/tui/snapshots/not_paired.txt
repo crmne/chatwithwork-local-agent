@@ -1,11 +1,11 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                    ○ NOT PAIRED
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
- In the browser for now        │  ╭──────────────────────────────────────────────────────────────╮
+ Pair this computer to chat    │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● This computer isn't paired                                 │
- ━━ ROOTS                    1 │  │ Chat with Work can't search your folders until you pair it.  │
- ▌● Work docs                  │  │ Press c to pair it here, or run cww login in a terminal.     │
-    work-docs · 1,532 files    │  │ c pair this computer                                         │
+                               │  │ Chat with Work can't search your folders until you pair it.  │
+                               │  │ Press c to pair it here, or run cww login in a terminal.     │
+                               │  │ c pair this computer                                         │
                                │  ╰──────────────────────────────────────────────────────────────╯
                                │
                                │
@@ -13,18 +13,18 @@
                                │
                                │
                                │
-                               │              Chat isn't available in the terminal yet
-                               │
-                               │    Chat with Work has no chat API for it. Chat in the browser at
-                               │                   https://chatwithwork.com/chats
                                │
                                │
                                │
                                │
                                │
-                               │────────────────────────────────────────────────────────────────────
+                               │
+                               │
+ ━━ ROOTS                    1 │
+ ▌● Work docs                  │
+    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
  ○ not paired      since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   $ cww login                 │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
+   $ cww login                 │ │ ❯ Pair this computer to chat here: press c                     │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
  c pair   ↑↓ select   a add folder   d remove   l audit log   p pause   ? help   q quit

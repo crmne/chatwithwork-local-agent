@@ -1,14 +1,14 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
- Loading…                      │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
+ Need your OK · o asks         │  ╭──────────────────────────────────────────────────────────────╮
+                               │  │ ● Chats need your OK                                         │
+                               │  │ This computer shares folders with Chat with Work. To read    │
+                               │  │ and send your chats here too, allow it in Chat with Work.    │
+                               │  │ It's a separate permission, and you can turn it off without  │
+                               │  │ unsharing anything.                                          │
+                               │  │ o ask, and open the page to allow it                         │
+                               │  ╰──────────────────────────────────────────────────────────────╯
                                │
                                │
                                │
@@ -25,6 +25,6 @@
     work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
  ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Loading your chats…                                          │
+   chatwithwork.com · #42      │ │ ❯ Chats need your OK first: press o                            │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- ↑↓ select   a add folder   d remove   l audit log   p pause   ? help   q quit
+ ↑↓ select   a add folder   d remove   l audit log   p pause   o allow chats   ? help   q quit

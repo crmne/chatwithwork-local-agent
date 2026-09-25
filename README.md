@@ -125,7 +125,7 @@ The CLI, the terminal UI and the settings app talk to the daemon over a local so
 cww        # or cww tui
 ```
 
-Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the left: your shared folders with their index state, and the daemon's connection. On the right: the latest request from Chat with Work as it happens, and the full audit log, colour-coded by decision.
+Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the left: your chats by day, your shared folders with their index state, and the daemon's connection. On the right: the open chat with a composer under it, the latest request from Chat with Work as it happens, and the full audit log, colour-coded by decision.
 
 | Key | Does |
 |---|---|
@@ -135,6 +135,13 @@ Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the 
 | `d`, `x`, `Delete` | Stop sharing the selected folder, after asking |
 | `↑` `↓`, `j` `k` | Select a folder, or scroll the audit log |
 | `p` | Pause or resume answering Chat with Work |
+| `Tab` | Move between the chats, the composer and the folders |
+| `↑` `↓`, `j` `k`, `Enter` | Select and open a chat |
+| `n` | New chat |
+| `/` | Search chats |
+| `Enter`, `Esc` | In the composer: send; stop an answer being written, or go back to the chats |
+| `e` | Show every tool step under its activity line |
+| `o` | Open the chat in the browser, or ask to use your chats here |
 | `l` | Switch between the chat view and the audit log (`PgUp`, `PgDn`, `End` to follow) |
 | `r` | Look for the daemon again |
 | `?` | All the keys |
@@ -142,7 +149,7 @@ Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the 
 
 A first run is three keys: `c` to pair, `s` to start the daemon if the installer didn't, and `y` to share your Documents folder, which it offers when nothing is shared and never shares on its own. Until the daemon runs, the UI works from `config.toml` and the audit file, and changes are saved there, like the `cww roots` commands. `CWW_SERVER=https://chat.example.com cww` pairs with a self-hosted server.
 
-Chat doesn't work in the terminal yet: Chat with Work has no chat API for it, so the chat pane says so and links to the browser. [CHAT_API.md](CHAT_API.md) proposes the API it needs.
+Chats in the terminal are a separate permission from sharing folders. `cww login` asks for both, and the approval page lets you decline chats (`cww login --no-chats` doesn't ask). A computer paired without them asks when you press `o`, and you allow it in Chat with Work under Settings, Computers; you can turn it off there at any time. The TUI never holds a token: the daemon asks Chat with Work for it, and answers stream over the daemon's connection. [CHAT_API.md](CHAT_API.md) explains the design.
 
 The UI uses no CPU while nothing happens, follows `NO_COLOR`, and falls back to 256 colours on terminals without true colour.
 

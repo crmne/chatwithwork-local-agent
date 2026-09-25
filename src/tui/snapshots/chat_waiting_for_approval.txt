@@ -1,15 +1,15 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
- Loading…                      │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
+ Waiting for your OK           │  ╭──────────────────────────────────────────────────────────────╮
+                               │  │ ● Waiting for your OK                                        │
+                               │  │ Allow chats for this computer in Chat with Work, under       │
+                               │  │ Settings, Computers:                                         │
+                               │  │   https://chatwithwork.com/482139075/settings?tab=connectors │
+                               │  │   #computers                                                 │
+                               │  │ This updates by itself once you do.                          │
+                               │  │ o open the page   r check now                                │
+                               │  ╰──────────────────────────────────────────────────────────────╯
                                │
                                │
                                │
@@ -25,6 +25,6 @@
     work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
  ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Loading your chats…                                          │
+   chatwithwork.com · #42      │ │ ❯ Waiting for your OK in Chat with Work                        │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- ↑↓ select   a add folder   d remove   l audit log   p pause   ? help   q quit
+ ↑↓ select   a add folder   d remove   l audit log   p pause   o allow chats   ? help   q quit

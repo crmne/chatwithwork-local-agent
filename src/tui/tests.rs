@@ -11,7 +11,10 @@ use time::macros::datetime;
 use time::{OffsetDateTime, UtcOffset};
 
 use super::app::*;
-use super::chat::{Availability, ChatEvent, NO_CHAT_API, Role, ToolState, ToolStep};
+use super::chat::{
+    AccessRequest, ChatList, ChatSummary, Entry, Failure, Live, Named, Project, Source, Step,
+    Transcript,
+};
 use super::theme::{Depth, Signal, Theme};
 use super::ui::render;
 use crate::audit::{AuditEntry, Decision};
@@ -66,12 +69,7 @@ fn assert_snapshot(name: &str, app: &App) {
 // --------------------------------------------------------------- fixtures
 
 fn app() -> App {
-    App::new(
-        Availability::Unavailable {
-            reason: NO_CHAT_API.into(),
-        },
-        UtcOffset::UTC,
-    )
+    App::new(UtcOffset::UTC)
 }
 
 fn root(id: &str, label: &str, index: &str, files: u64) -> RootState {
@@ -738,55 +736,6 @@ fn redraws_only_when_something_changes() {
     assert_eq!(app.next_wakeup(NOW), None, "the log shows clock times");
 }
 
-/// The pane works against a backend that has an API. Only the reducer is
-/// exercised here; no conversation is ever shown in the shipped app.
-#[test]
-fn a_streamed_reply_builds_up_the_answer() {
-    let mut app = App::new(Availability::Available, UtcOffset::UTC);
-    assert_eq!(
-        app.start(),
-        vec![Effect::Chat(super::app::ChatCommand::List)]
-    );
-    app.update(key(KeyCode::Tab));
-    assert_eq!(app.focus, Focus::Composer);
-    for c in "q3 budget?".chars() {
-        app.update(char(c));
-    }
-    assert_eq!(
-        app.update(key(KeyCode::Enter)),
-        vec![Effect::Chat(super::app::ChatCommand::Send {
-            chat: None,
-            text: "q3 budget?".into()
-        })]
-    );
-    assert!(app.chat.streaming);
-    let step = |state| ToolStep {
-        id: "t1".into(),
-        service: "This computer".into(),
-        summary: "search \"q3 budget\"".into(),
-        state,
-    };
-    for event in [
-        ChatEvent::Started {
-            chat_id: "9".into(),
-            message_id: "m2".into(),
-        },
-        ChatEvent::Tool(step(ToolState::Running)),
-        ChatEvent::Tool(step(ToolState::Done)),
-        ChatEvent::TextDelta("It's ".into()),
-        ChatEvent::TextDelta("€40k.".into()),
-        ChatEvent::Done,
-    ] {
-        app.update(Msg::Chat(ChatMsg::Event(event)));
-    }
-    assert!(!app.chat.streaming);
-    assert_eq!(app.chat.open.as_deref(), Some("9"));
-    let answer = app.chat.messages.last().unwrap();
-    assert_eq!(answer.role, Role::Assistant);
-    assert_eq!(answer.text, "It's €40k.");
-    assert_eq!(answer.tools, vec![step(ToolState::Done)]);
-}
-
 #[test]
 fn pairing_starts_only_when_needed_and_can_be_cancelled() {
     let mut app = app();
@@ -854,4 +803,515 @@ fn the_stopped_notice_goes_when_the_daemon_is_back() {
     assert!(app.notice.is_some());
     running(&mut app, status("connected", vec![]));
     assert_eq!(app.notice, None);
+}
+
+// ------------------------------------------------------------------ chats
+
+fn summary(number: u64, title: &str, updated_at: &str) -> ChatSummary {
+    ChatSummary {
+        number,
+        title: title.into(),
+        state: "idle".into(),
+        project: None,
+        mine: true,
+        updated_at: updated_at.into(),
+        url: format!("https://chatwithwork.com/482139075/chats/{number}"),
+    }
+}
+
+fn chat_list() -> ChatList {
+    let mut launch = summary(40, "Launch plan for Falcon", "2026-09-25T07:02:00Z");
+    launch.project = Some(Project {
+        id: 3,
+        name: "Falcon".into(),
+    });
+    launch.mine = false;
+    ChatList {
+        chats: vec![
+            summary(42, "Q3 budget", "2026-09-25T08:14:03Z"),
+            launch,
+            summary(38, "Onboarding checklist", "2026-09-24T16:30:00Z"),
+            summary(31, "Vendor contracts", "2026-09-19T10:00:00Z"),
+            summary(27, "Hiring plan", "2026-09-02T10:00:00Z"),
+        ],
+        projects: vec![Project {
+            id: 3,
+            name: "Falcon".into(),
+        }],
+        account: Named {
+            name: "Plenty".into(),
+        },
+        user: Named {
+            name: "Carmine".into(),
+        },
+        locked_reason: None,
+    }
+}
+
+fn budget_transcript(state: &str) -> Transcript {
+    let mut chat = summary(42, "Q3 budget", "2026-09-25T08:14:03Z");
+    chat.state = state.into();
+    Transcript {
+        chat,
+        locked_reason: None,
+        entries: vec![
+            Entry::User {
+                id: 1,
+                content: "What did we budget for Q3, and who signed it off?".into(),
+                author: None,
+            },
+            Entry::Activity {
+                id: 2,
+                title: "Searched Drive and Carmine's MacBook".into(),
+                details: Some("2 searches, read 1 file".into()),
+                progress: None,
+                services: vec!["Drive".into(), "Carmine's MacBook".into()],
+                pending: false,
+                steps: vec![
+                    Step {
+                        summary: "Searched Drive for “q3 budget”".into(),
+                        pending: false,
+                        files: vec!["Q3 plan.pdf".into(), "Budget 2026.xlsx".into()],
+                    },
+                    Step {
+                        summary: "Read plans/q3.md".into(),
+                        pending: false,
+                        files: vec![],
+                    },
+                ],
+            },
+            Entry::Assistant {
+                id: 3,
+                content: "The Q3 budget is **€40k**, signed off by *Ada* on 12 September.\n\n\
+                          - Marketing: €18k\n- Engineering: `€22k`\n\n\
+                          Details are in [the plan](https://drive.google.com/file/d/q3)."
+                    .into(),
+                sources: vec![Source {
+                    title: "Q3 plan.pdf".into(),
+                    url: Some("https://drive.google.com/file/d/q3".into()),
+                }],
+            },
+        ],
+    }
+}
+
+fn chats_ready(app: &mut App) {
+    running(
+        app,
+        status(
+            "connected",
+            vec![root("work-docs", "Work docs", "ready", 1532)],
+        ),
+    );
+    app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list()))));
+}
+
+fn open_budget(app: &mut App) -> Vec<Effect> {
+    chats_ready(app);
+    app.update(key(KeyCode::Down));
+    app.update(key(KeyCode::Enter))
+}
+
+#[test]
+fn snapshot_chat_conversation() {
+    let mut app = app();
+    assert_eq!(
+        open_budget(&mut app),
+        vec![
+            Effect::Chat(ChatCommand::Open(42)),
+            Effect::Chat(ChatCommand::Follow(Some(42)))
+        ]
+    );
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("idle")),
+    }));
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.focus, Focus::Chats);
+    assert_snapshot("chat_conversation", &app);
+}
+
+#[test]
+fn snapshot_chat_streaming() {
+    let mut app = app();
+    open_budget(&mut app);
+    let mut transcript = budget_transcript("processing");
+    transcript.entries.push(Entry::User {
+        id: 4,
+        content: "And Q4?".into(),
+        author: None,
+    });
+    transcript.entries.push(Entry::Activity {
+        id: 5,
+        title: "Searching Carmine's MacBook".into(),
+        details: Some("1 search".into()),
+        progress: None,
+        services: vec!["Carmine's MacBook".into()],
+        pending: true,
+        steps: vec![Step {
+            summary: "Searching for “q4 budget”…".into(),
+            pending: true,
+            files: vec![],
+        }],
+    });
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(transcript),
+    }));
+    app.update(Msg::Chat(ChatMsg::Live {
+        chat: 42,
+        live: Live::Progress("Reading plans/q4.md · 3 of 5".into()),
+    }));
+    assert_snapshot("chat_streaming", &app);
+}
+
+#[test]
+fn snapshot_chat_needs_approval() {
+    let mut app = app();
+    running(
+        &mut app,
+        status(
+            "connected",
+            vec![root("work-docs", "Work docs", "ready", 1532)],
+        ),
+    );
+    app.update(Msg::Chat(ChatMsg::Listed(Err(Failure {
+        code: "chat_access_required".into(),
+        message: "Allow this computer to use your chats in Settings".into(),
+        approve_url: Some(
+            "https://chatwithwork.com/482139075/settings?tab=connectors#computers".into(),
+        ),
+        requested: false,
+    }))));
+    assert_snapshot("chat_needs_approval", &app);
+
+    assert_eq!(
+        app.update(char('o')),
+        vec![Effect::Chat(ChatCommand::RequestAccess)]
+    );
+    let url = "https://chatwithwork.com/482139075/settings?tab=connectors#computers";
+    assert_eq!(
+        app.update(Msg::Chat(ChatMsg::Access(Ok(AccessRequest {
+            granted: false,
+            requested: true,
+            approve_url: Some(url.into()),
+        })))),
+        vec![Effect::Chat(ChatCommand::OpenUrl(url.into()))]
+    );
+    app.notice = None;
+    assert_snapshot("chat_waiting_for_approval", &app);
+
+    // Once allowed, the poll's list arrives and the chats show.
+    app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list()))));
+    assert!(app.chat.ready());
+    assert_eq!(app.focus, Focus::Chats);
+}
+
+#[test]
+fn snapshot_chat_search() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(char('/'));
+    for c in "pla".chars() {
+        app.update(char(c));
+    }
+    assert_eq!(app.chat.visible().len(), 2, "Launch plan and Hiring plan");
+    assert_snapshot("chat_search", &app);
+    app.update(key(KeyCode::Down));
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![
+            Effect::Chat(ChatCommand::Open(27)),
+            Effect::Chat(ChatCommand::Follow(Some(27)))
+        ]
+    );
+    assert_eq!(app.chat.search, None);
+    assert_eq!(app.chat.selected_chat().map(|c| c.number), Some(27));
+}
+
+#[test]
+fn snapshot_chat_new() {
+    let mut app = app();
+    chats_ready(&mut app);
+    assert!(app.update(char('n')).is_empty(), "nothing followed yet");
+    assert_eq!(app.focus, Focus::Composer);
+    for c in "What changed in Falcon this week?".chars() {
+        app.update(char(c));
+    }
+    assert_snapshot("chat_new", &app);
+}
+
+#[test]
+fn chats_load_once_a_running_daemon_is_paired() {
+    let mut app = app();
+    let effects = app.update(Msg::Daemon(DaemonMsg::Status(Box::new(status(
+        "not_paired",
+        vec![],
+    )))));
+    assert!(effects.is_empty());
+    assert_eq!(app.chat.access, Access::Unknown);
+
+    let effects = app.update(Msg::Daemon(DaemonMsg::Status(Box::new(status(
+        "connected",
+        vec![],
+    )))));
+    assert_eq!(effects, vec![Effect::Chat(ChatCommand::List)]);
+    assert_eq!(app.chat.access, Access::Loading);
+    // More status events don't ask again.
+    assert!(
+        app.update(Msg::Daemon(DaemonMsg::Status(Box::new(status(
+            "connected",
+            vec![]
+        )))))
+        .is_empty()
+    );
+    app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list()))));
+    assert!(app.chat.ready());
+    assert_eq!(app.focus, Focus::Chats);
+    assert_eq!(
+        app.focus_order(),
+        vec![Focus::Chats, Focus::Composer, Focus::Roots]
+    );
+
+    // The daemon going away forgets that chats worked.
+    app.update(Msg::Daemon(DaemonMsg::Lost));
+    assert_eq!(app.chat.access, Access::Unknown);
+}
+
+#[test]
+fn a_streamed_answer_builds_up_then_the_chat_is_read_back() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(char('n'));
+    for c in "q3 budget?".chars() {
+        app.update(char(c));
+    }
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Chat(ChatCommand::Send {
+            chat: None,
+            text: "q3 budget?".into()
+        })]
+    );
+    assert!(app.chat.working());
+    assert_eq!(app.chat.pending_question.as_deref(), Some("q3 budget?"));
+
+    let mut started = summary(43, "Chat #43", "2026-09-25T08:20:00Z");
+    started.state = "processing".into();
+    let effects = app.update(Msg::Chat(ChatMsg::Sent {
+        chat: None,
+        result: Ok(started),
+    }));
+    assert_eq!(
+        effects,
+        vec![
+            Effect::Chat(ChatCommand::List),
+            Effect::Chat(ChatCommand::Follow(Some(43))),
+            Effect::Chat(ChatCommand::Open(43)),
+        ]
+    );
+    assert_eq!(app.chat.open, Some(43));
+
+    // Changes while a read is under way ask for one more read, not many.
+    for _ in 0..3 {
+        assert!(
+            app.update(Msg::Chat(ChatMsg::Live {
+                chat: 43,
+                live: Live::Changed
+            }))
+            .is_empty()
+        );
+    }
+    for text in ["It's ", "€40k."] {
+        app.update(Msg::Chat(ChatMsg::Live {
+            chat: 43,
+            live: Live::Chunk {
+                message_id: 9,
+                text: text.into(),
+            },
+        }));
+    }
+    assert_eq!(
+        app.chat.streamed.get(&9).map(String::as_str),
+        Some("It's €40k.")
+    );
+
+    let mut transcript = budget_transcript("processing");
+    transcript.chat.number = 43;
+    transcript.entries = vec![
+        Entry::User {
+            id: 8,
+            content: "q3 budget?".into(),
+            author: None,
+        },
+        Entry::Assistant {
+            id: 9,
+            content: String::new(),
+            sources: vec![],
+        },
+    ];
+    let effects = app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 43,
+        result: Ok(transcript.clone()),
+    }));
+    assert_eq!(
+        effects,
+        vec![Effect::Chat(ChatCommand::Open(43))],
+        "the stale read"
+    );
+    assert_eq!(
+        app.chat.pending_question, None,
+        "the chat shows the question"
+    );
+    assert!(
+        app.chat.streamed.contains_key(&9),
+        "an empty answer keeps what streamed"
+    );
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("It's €40k."), "{screen}");
+
+    transcript.chat.state = "idle".into();
+    transcript.entries[1] = Entry::Assistant {
+        id: 9,
+        content: "It's €40k.".into(),
+        sources: vec![],
+    };
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 43,
+        result: Ok(transcript),
+    }));
+    assert!(app.chat.streamed.is_empty());
+    assert!(!app.chat.working());
+    assert_eq!(app.next_wakeup(NOW), None, "nothing moves once it's done");
+}
+
+#[test]
+fn esc_stops_an_answer_then_goes_back_to_the_list() {
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("processing")),
+    }));
+    assert_eq!(app.focus, Focus::Composer);
+    assert_eq!(
+        app.update(key(KeyCode::Esc)),
+        vec![Effect::Chat(ChatCommand::Cancel(42))]
+    );
+    assert!(app.chat.stopping);
+    assert!(app.update(key(KeyCode::Esc)).is_empty());
+    assert_eq!(app.focus, Focus::Chats);
+}
+
+#[test]
+fn a_failed_question_comes_back_to_the_composer() {
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("idle")),
+    }));
+    for c in "And Q4?".chars() {
+        app.update(char(c));
+    }
+    app.update(key(KeyCode::Enter));
+    assert!(app.chat.input.is_empty());
+    app.update(Msg::Chat(ChatMsg::Sent {
+        chat: Some(42),
+        result: Err(Failure::new(
+            "locked",
+            "You're out of credits. Add credits in Settings to keep going.",
+        )),
+    }));
+    assert_eq!(app.chat.input, "And Q4?");
+    assert!(!app.chat.working());
+    assert_eq!(app.notice.as_ref().unwrap().signal, Signal::Negative);
+}
+
+#[test]
+fn a_locked_composer_says_why_and_sends_nothing() {
+    let mut app = app();
+    running(&mut app, status("connected", vec![]));
+    let mut list = chat_list();
+    list.locked_reason =
+        Some("You're out of credits. Add credits in Settings to keep going.".into());
+    app.update(Msg::Chat(ChatMsg::Listed(Ok(list))));
+    app.update(char('n'));
+    for c in "hi".chars() {
+        app.update(char(c));
+    }
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("You're out of credits"), "{screen}");
+}
+
+#[test]
+fn only_pages_on_the_paired_server_open_in_the_browser() {
+    let mut app = app();
+    running(&mut app, status("connected", vec![]));
+    let mut list = chat_list();
+    list.chats[0].url = "https://evil.example/chats/42".into();
+    app.update(Msg::Chat(ChatMsg::Listed(Ok(list))));
+    app.update(key(KeyCode::Down));
+    assert!(app.update(char('o')).is_empty(), "not the paired server");
+    app.update(key(KeyCode::Down));
+    assert_eq!(
+        app.update(char('o')),
+        vec![Effect::Chat(ChatCommand::OpenUrl(
+            "https://chatwithwork.com/482139075/chats/40".into()
+        ))]
+    );
+}
+
+#[test]
+fn live_updates_for_another_chat_are_ignored_and_offline_shows() {
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("processing")),
+    }));
+    assert!(
+        app.update(Msg::Chat(ChatMsg::Live {
+            chat: 7,
+            live: Live::Chunk {
+                message_id: 1,
+                text: "x".into()
+            }
+        }))
+        .is_empty()
+    );
+    assert!(app.chat.streamed.is_empty());
+    app.update(Msg::Chat(ChatMsg::Live {
+        chat: 42,
+        live: Live::Offline,
+    }));
+    assert_eq!(app.chat.following, Following::Offline);
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("reconnecting"), "{screen}");
+    assert_eq!(
+        app.update(Msg::Chat(ChatMsg::Live {
+            chat: 42,
+            live: Live::Watching
+        })),
+        vec![Effect::Chat(ChatCommand::Open(42))],
+        "catch up on what happened while offline"
+    );
+}
+
+#[test]
+fn chat_cards_say_what_to_do() {
+    for (code, title) in [
+        ("unsupported", "This server doesn't offer chats here"),
+        ("revoked", "Chat with Work revoked this computer"),
+        ("unreachable", "Can't reach Chat with Work"),
+    ] {
+        let mut app = app();
+        running(&mut app, status("connected", vec![]));
+        app.update(Msg::Chat(ChatMsg::Listed(Err(Failure::new(
+            code, "Because.",
+        )))));
+        let screen = render_to_string(&app, 100, 30);
+        assert!(screen.contains(title), "{code}: {screen}");
+    }
 }

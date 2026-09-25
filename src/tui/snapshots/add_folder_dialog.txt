@@ -1,17 +1,17 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
- In the browser for now        │
+ Loading…                      │
                                │
- ━━ ROOTS                    1 │
- ▌● Work docs                  │
-    work-docs · 1,532 files    │
+                               │
+                               │
+                               │
                                │
                                │
                 ╭ SHARE A FOLDER ──────────────────────────────────────────────────╮
-                │ The folder to share with Chat with Work:                         │et
+                │ The folder to share with Chat with Work:                         │
                 │                                                                  │
-                │ ❯ /home/carmine/Documents                                        │s are shared;
+                │ ❯ /home/carmine/Documents                                        │
                 │                                                                  │
                 │ Only this folder becomes searchable. Keys, .env files and        │
                 │ password databases inside it stay private.                       │
@@ -20,11 +20,11 @@
                 ╰──────────────────────────────────────────────────────────────────╯
                                │
                                │
-                               │
-                               │
-                               │────────────────────────────────────────────────────────────────────
+ ━━ ROOTS                    1 │
+ ▌● Work docs                  │
+    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
  ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
+   chatwithwork.com · #42      │ │ ❯ Loading your chats…                                          │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
  enter share   esc cancel

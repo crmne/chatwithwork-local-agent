@@ -1,11 +1,11 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                    ○ NOT PAIRED
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
- In the browser for now        │  ╭──────────────────────────────────────────────────────────────╮
+ Pair this computer to chat    │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● Approve "carmine-mbp" on Chat with Work                    │
- ━━ ROOTS                      │  │ The page is open in your browser. If it isn't, open:         │
- Nothing shared yet            │  │   https://chatwithwork.com/device?user_code=WDJB-MJHT        │
- a shares a folder             │  │ Check that it shows the same code:                           │
+                               │  │ The page is open in your browser. If it isn't, open:         │
+                               │  │   https://chatwithwork.com/device?user_code=WDJB-MJHT        │
+                               │  │ Check that it shows the same code:                           │
                                │  │   WDJB-MJHT                                                  │
                                │  │ Key fingerprint 3sQ2x9…                                      │
                                │  │ esc cancel                                                   │
@@ -17,14 +17,14 @@
                                │  │ a share a folder                                             │
                                │  ╰──────────────────────────────────────────────────────────────╯
                                │
-                               │              Chat isn't available in the terminal yet
                                │
-                               │    Chat with Work has no chat API for it. Chat in the browser at
-                               │                   https://chatwithwork.com/chats
                                │
-                               │────────────────────────────────────────────────────────────────────
+                               │
+ ━━ ROOTS                      │
+ Nothing shared yet            │
+ a shares a folder             │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
  ○ not paired      since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   $ cww login                 │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
+   $ cww login                 │ │ ❯ Pair this computer to chat here: press c                     │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
  esc cancel pairing   a add folder   l audit log   p pause   ? help   q quit

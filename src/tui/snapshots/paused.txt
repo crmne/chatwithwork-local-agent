@@ -1,11 +1,11 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                        ‖ PAUSED
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
- In the browser for now        │  ╭──────────────────────────────────────────────────────────────╮
+ Loading…                      │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● Paused                                                     │
- ━━ ROOTS                    1 │  │ Chat with Work's requests for your files are refused until   │
- ▌● Work docs                  │  │ you resume.                                                  │
-    work-docs · 1,532 files    │  │ p resume                                                     │
+                               │  │ Chat with Work's requests for your files are refused until   │
+                               │  │ you resume.                                                  │
+                               │  │ p resume                                                     │
                                │  ╰──────────────────────────────────────────────────────────────╯
                                │
                                │
@@ -13,18 +13,18 @@
                                │
                                │
                                │
-                               │              Chat isn't available in the terminal yet
-                               │
-                               │    Chat with Work has no chat API for it. Chat in the browser at
-                               │                   https://chatwithwork.com/chats
                                │
                                │
                                │
                                │
                                │
-                               │────────────────────────────────────────────────────────────────────
+                               │
+                               │
+ ━━ ROOTS                    1 │
+ ▌● Work docs                  │
+    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  ● paused · 10m ago
  ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
+   chatwithwork.com · #42      │ │ ❯ Loading your chats…                                          │
    paused · cww 0.1.0          │ ╰────────────────────────────────────────────────────────────────╯
  ↑↓ select   a add folder   d remove   l audit log   p resume   ? help   q quit
