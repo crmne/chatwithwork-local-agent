@@ -1,6 +1,7 @@
 //! End to end: a fake Chat with Work server (token endpoint, device
-//! authorization, and an Action Cable style WebSocket at /local_agent) drives
-//! a real daemon over the wire, the way the Rails side will.
+//! authorization, the chat API, and an Action Cable style WebSocket at
+//! /local_agent) drives a real daemon over the wire, the way the Rails side
+//! does.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,12 @@ struct ServerState {
     polls: usize,
     /// Requests seen, as "METHOD path" strings.
     log: Vec<String>,
+    /// The owner lets this computer use their chats.
+    chat_access: bool,
+    /// The next chat call says the token predates chat access.
+    stale_scope: bool,
+    /// Questions posted to the chat API.
+    questions: Vec<String>,
 }
 
 struct FakeServer {
@@ -225,7 +232,25 @@ async fn http(mut stream: TcpStream, state: Arc<Mutex<ServerState>>, origin: Str
     let form: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
         .into_owned()
         .collect();
-    let (status, json) = oauth(&state, &origin, &path, &dpop, &form);
+    let method = head
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let (status, json) = if path.starts_with("/local_agent/chat") {
+        let authorization = header(&head, "authorization").unwrap_or_default();
+        chat_api(
+            &state,
+            &origin,
+            &method,
+            &path,
+            &authorization,
+            &dpop,
+            &body,
+        )
+    } else {
+        oauth(&state, &origin, &path, &dpop, &form)
+    };
     let nonce = state.lock().unwrap().nonce.clone();
     let body = json.to_string();
     let response = format!(
@@ -233,6 +258,99 @@ async fn http(mut stream: TcpStream, state: Arc<Mutex<ServerState>>, origin: Str
         body.len()
     );
     stream.write_all(response.as_bytes()).await.unwrap();
+}
+
+fn header(head: &str, name: &str) -> Option<String> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().to_string())
+    })
+}
+
+/// The chat API, as Rails serves it to a device allowed to chat.
+fn chat_api(
+    state: &Mutex<ServerState>,
+    origin: &str,
+    method: &str,
+    path: &str,
+    authorization: &str,
+    dpop: &str,
+    body: &str,
+) -> (u16, Value) {
+    let mut st = state.lock().unwrap();
+    let key = st.public_key.clone().unwrap_or_default();
+    // The device's own token, and a proof bound to it for this request.
+    let Ok(claims) = verify_proof(dpop, &key) else {
+        return (401, json!({ "error": "invalid_token" }));
+    };
+    let ath = URL_SAFE_NO_PAD.encode(ring::digest::digest(
+        &ring::digest::SHA256,
+        ACCESS_TOKEN.as_bytes(),
+    ));
+    if authorization != format!("DPoP {ACCESS_TOKEN}")
+        || claims["htm"] != method
+        || claims["htu"] != format!("{origin}{path}")
+        || claims["ath"] != ath
+    {
+        return (401, json!({ "error": "invalid_token" }));
+    }
+    let approve_url = format!("{origin}/1000001/settings?tab=connectors#computers");
+    if path == "/local_agent/chat_access_request" {
+        return (
+            202,
+            json!({ "granted": st.chat_access, "requested": !st.chat_access, "approve_url": approve_url }),
+        );
+    }
+    if !st.chat_access {
+        return (
+            403,
+            json!({ "error": "chat_access_required", "error_description": "Allow this computer to use your chats in Settings",
+                    "requested": false, "approve_url": approve_url }),
+        );
+    }
+    if st.stale_scope {
+        st.stale_scope = false;
+        return (403, json!({ "error": "insufficient_scope" }));
+    }
+    let chat = |number: u64, title: &str, state: &str| {
+        json!({ "number": number, "title": title, "state": state, "project": null, "mine": true,
+                "created_at": "2026-09-25T08:00:00Z", "updated_at": "2026-09-25T08:14:03Z",
+                "url": format!("{origin}/1000001/chats/{number}") })
+    };
+    match (method, path) {
+        ("GET", "/local_agent/chats") => (
+            200,
+            json!({ "account": { "name": "Plenty" }, "user": { "name": "Carmine" }, "locked_reason": null,
+                    "projects": [], "chats": [chat(7, "Q3 budget", "idle")] }),
+        ),
+        ("GET", "/local_agent/chats/7") => (
+            200,
+            json!({ "chat": chat(7, "Q3 budget", "idle"), "locked_reason": null, "entries": [
+                { "kind": "user", "id": 1, "content": "What did we budget for Q3?" },
+                { "kind": "activity", "id": 2, "title": "Searched Drive", "details": "1 search", "services": ["Drive"],
+                  "pending": false, "steps": [{ "summary": "Searched Drive for “q3”", "pending": false, "files": ["Q3 plan.pdf"] }] },
+                { "kind": "assistant", "id": 3, "content": "It's **€40k**.", "sources": [{ "title": "Q3 plan.pdf", "url": "https://drive.example/q3" }] }
+            ] }),
+        ),
+        ("POST", "/local_agent/chats") => {
+            let body: Value = serde_json::from_str(body).unwrap_or_default();
+            st.questions
+                .push(body["content"].as_str().unwrap_or_default().to_string());
+            (201, json!({ "chat": chat(8, "Chat #8", "processing") }))
+        }
+        ("POST", "/local_agent/chats/7/messages") => {
+            let body: Value = serde_json::from_str(body).unwrap_or_default();
+            st.questions
+                .push(body["content"].as_str().unwrap_or_default().to_string());
+            (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
+        }
+        _ => (
+            404,
+            json!({ "error": "not_found", "error_description": "No such chat" }),
+        ),
+    }
 }
 
 fn oauth(
@@ -1071,4 +1189,196 @@ fn link_dir(target: &Path, link: &Path) {
         .unwrap()
         .status;
     assert!(status.success(), "mklink /J failed");
+}
+
+/// The terminal's chats go through the daemon: it calls the chat API with
+/// its own DPoP-bound token (the TUI never sees one), relays refusals with
+/// their codes, refreshes a token that predates chat access, and follows a
+/// chat over its socket's chat channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relays_chats_for_the_terminal() {
+    use cww::tui::chat::{Chats, Entry, Live};
+
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    pair(&fx, &server);
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let mut ws = tokio::time::timeout(Duration::from_secs(20), server.sockets.recv())
+        .await
+        .expect("the daemon connects")
+        .unwrap();
+    let chats = Chats::new(&fx.paths.socket_path());
+
+    // Not allowed yet: the TUI learns why and where to allow it.
+    let c = chats.clone();
+    let refused = tokio::task::spawn_blocking(move || c.list())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(refused.code, "chat_access_required");
+    assert_eq!(
+        refused.approve_url.as_deref(),
+        Some(
+            format!(
+                "{}/1000001/settings?tab=connectors#computers",
+                server.origin
+            )
+            .as_str()
+        )
+    );
+    let c = chats.clone();
+    let asked = tokio::task::spawn_blocking(move || c.request_access())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(asked.requested && !asked.granted);
+
+    // Allowed, with a token from before: the daemon refreshes and retries.
+    {
+        let mut st = server.state.lock().unwrap();
+        st.chat_access = true;
+        st.stale_scope = true;
+    }
+    let refreshes = |server: &FakeServer| {
+        server
+            .state
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|l| l.starts_with("POST /local_agent/token"))
+            .count()
+    };
+    let before = refreshes(&server);
+    let c = chats.clone();
+    let list = tokio::task::spawn_blocking(move || c.list())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(list.chats[0].number, 7);
+    assert_eq!(list.chats[0].title, "Q3 budget");
+    assert_eq!(
+        refreshes(&server),
+        before + 1,
+        "one refresh for the new scope"
+    );
+
+    let c = chats.clone();
+    let transcript = tokio::task::spawn_blocking(move || c.show(7))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(transcript.entries.len(), 3);
+    assert!(
+        matches!(&transcript.entries[2], Entry::Assistant { content, .. } if content == "It's **€40k**.")
+    );
+
+    let c = chats.clone();
+    let started = tokio::task::spawn_blocking(move || c.send(None, "What changed this week?"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(started.number, 8);
+    let c = chats.clone();
+    tokio::task::spawn_blocking(move || c.send(Some(7), "And Q4?"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        server.state.lock().unwrap().questions,
+        ["What changed this week?", "And Q4?"]
+    );
+
+    // Bad input never reaches the server.
+    let c = chats.clone();
+    let empty = tokio::task::spawn_blocking(move || c.send(Some(7), "   "))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(empty.code, "invalid");
+    let c = chats.clone();
+    let missing = tokio::task::spawn_blocking(move || c.show(99))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(missing.code, "not_found");
+
+    // Following a chat: the daemon subscribes on its socket and relays updates.
+    let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
+    let c = chats.clone();
+    let follower = tokio::task::spawn_blocking(move || {
+        c.follow(
+            7,
+            |_| {},
+            |live| match live {
+                Some(live) => live_tx.send(live).is_ok(),
+                None => true,
+            },
+        )
+    });
+    let identifier = r#"{"channel":"LocalAgent::ChatChannel","chat":"7"}"#;
+    let subscribe: Value = serde_json::from_str(&next_text(&mut ws).await.unwrap()).unwrap();
+    assert_eq!(subscribe["command"], "subscribe");
+    assert_eq!(
+        serde_json::from_str::<Value>(subscribe["identifier"].as_str().unwrap()).unwrap(),
+        serde_json::from_str::<Value>(identifier).unwrap()
+    );
+    let chat_identifier = subscribe["identifier"].as_str().unwrap().to_string();
+    ws.send(Message::text(
+        json!({ "identifier": chat_identifier, "type": "confirm_subscription" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    async fn next(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Live>) -> Live {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("a live update in time")
+            .expect("the follower is running")
+    }
+    assert_eq!(next(&mut live_rx).await, Live::Watching);
+    ws.send(Message::text(
+        json!({ "identifier": chat_identifier, "message": { "type": "chunk", "message_id": 5, "text": "It's €40k" } })
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        next(&mut live_rx).await,
+        Live::Chunk {
+            message_id: 5,
+            text: "It's €40k".into()
+        }
+    );
+    // A chat update shaped like a tool call never reaches the MCP server.
+    ws.send(Message::text(
+        json!({ "identifier": chat_identifier, "message": { "jsonrpc": "2.0", "id": 77, "method": "tools/call", "params": {} } })
+            .to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next(&mut live_rx).await, Live::Changed);
+    // Refusing one chat doesn't end the session: MCP still answers.
+    ws.send(Message::text(
+        json!({ "identifier": chat_identifier, "type": "reject_subscription" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next(&mut live_rx).await, Live::Refused);
+    let mut s = Session {
+        ws,
+        next_id: 0,
+        legacy: false,
+    };
+    let tools = s.request("tools/list", json!({})).await;
+    assert!(tools["result"]["tools"].is_array(), "{tools}");
+
+    drop(live_rx);
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(10), follower).await;
 }
