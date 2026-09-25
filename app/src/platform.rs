@@ -1,6 +1,6 @@
 //! The few things each desktop answers differently: the accent color, dark
-//! mode where the windowing library can't tell, the UI font, and bringing
-//! the app to the front.
+//! mode where the windowing library can't tell, the UI font and how text is
+//! rendered, and bringing the app to the front.
 
 use std::path::PathBuf;
 
@@ -58,6 +58,14 @@ pub fn accent_color() -> Option<[u8; 3]> {
             _ => return None,
         })
     }
+}
+
+/// How the desktop renders text, read once per process: the portal or
+/// fontconfig on Linux (a D-Bus call, then `fc-match`), fixed elsewhere.
+pub fn text_rendering() -> fastframe_text::TextRendering {
+    static RENDERING: std::sync::OnceLock<fastframe_text::TextRendering> =
+        std::sync::OnceLock::new();
+    *RENDERING.get_or_init(fastframe_text::detect)
 }
 
 /// Dark mode on Linux desktops, which winit can't always read on Wayland:

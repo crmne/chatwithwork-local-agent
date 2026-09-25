@@ -348,9 +348,9 @@ impl SettingsApp {
             // Fonts take effect from the next pass, so draw nothing now.
             self.attached = true;
             if self.system_fonts {
-                theme::install_fonts(ui.ctx());
+                theme::install_fonts(ui.ctx(), &self.theme.text);
             } else {
-                theme::install_default_fonts(ui.ctx());
+                theme::install_default_fonts(ui.ctx(), &self.theme.text);
             }
             self.theme.apply(ui.ctx());
             self.shared.set_ctx(Some(ui.ctx().clone()));
@@ -507,7 +507,10 @@ impl SettingsApp {
         if let Some(system) = ctx.system_theme() {
             let dark = system == egui::Theme::Dark;
             if dark != self.theme.dark {
-                self.theme = Theme::new(self.theme.platform, dark, crate::platform::accent_color());
+                self.theme = Theme {
+                    text: self.theme.text,
+                    ..Theme::new(self.theme.platform, dark, crate::platform::accent_color())
+                };
                 self.theme.apply(ctx);
             }
         }

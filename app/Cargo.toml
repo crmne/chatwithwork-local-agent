@@ -2,8 +2,9 @@
 name = "cww-app"
 version = "0.1.0"
 edition = "2024"
-# eframe 0.36 needs 1.95; the daemon itself builds with 1.90.
-rust-version = "1.95"
+# fastframe needs 1.98 (eframe 0.36 alone needs 1.95); the daemon itself
+# builds with 1.90.
+rust-version = "1.98"
 description = "Chat with Work Local Agent: the menu bar app and settings window for the cww daemon"
 license = "MIT OR Apache-2.0"
 authors = ["Carmine Paolino <carmine@paolino.me>"]
@@ -47,6 +48,9 @@ directories = "6"
 open = "5"
 # Local times in the activity log.
 jiff = "0.2"
+# Follows the desktop's font rendering (hinting, sub-pixel positions, and
+# linear coverage on Linux), shared with the other fastframe apps.
+fastframe-text = { git = "https://github.com/crmne/fastframe", rev = "43e6cadf634ce928342691422b836d57286f74bf" }
 # Maps the system UI font instead of reading it: San Francisco is 8 MB.
 memmap2 = "0.9"
 # Waits for the daemon's socket to appear instead of polling for it.

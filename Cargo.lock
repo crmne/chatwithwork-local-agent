@@ -1317,6 +1317,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "env_logger",
+ "fastframe-text",
  "image",
  "jiff",
  "ksni",
@@ -1910,6 +1911,15 @@ name = "fastdivide"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9afc2bd4d5a73106dd53d10d73d3401c2f32730ba2c0b93ddb888a8983680471"
+
+[[package]]
+name = "fastframe-text"
+version = "0.1.0"
+source = "git+https://github.com/crmne/fastframe?rev=43e6cadf634ce928342691422b836d57286f74bf#43e6cadf634ce928342691422b836d57286f74bf"
+dependencies = [
+ "egui",
+ "zbus",
+]
 
 [[package]]
 name = "fastrand"
