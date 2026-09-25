@@ -163,6 +163,9 @@ impl Theme {
             Color32::from_gray(232)
         };
         visuals.override_text_color = Some(p.text);
+        // Linear coverage, as GTK and cairo draw text. egui's dark-mode curve
+        // thickens glyphs against the native apps beside this window.
+        visuals.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Off;
         visuals.weak_text_color = Some(p.weak);
         visuals.hyperlink_color = p.accent;
         visuals.selection.bg_fill = p.accent.gamma_multiply(if self.dark { 0.55 } else { 0.35 });
@@ -438,6 +441,20 @@ pub fn install_default_fonts(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_coverage_is_linear_in_both_themes() {
+        for dark in [false, true] {
+            let style = Theme::new(Platform::Linux, dark, None).style();
+            assert!(
+                matches!(
+                    style.visuals.text_options.color_transfer_function,
+                    egui::epaint::FontColorTransferFunction::Off
+                ),
+                "dark={dark}"
+            );
+        }
+    }
 
     #[test]
     fn every_platform_has_readable_palettes() {
