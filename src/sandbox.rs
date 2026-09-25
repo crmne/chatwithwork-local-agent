@@ -160,8 +160,12 @@ mod sys {
 
     fn apply(plan: &Plan) -> Result<RulesetStatus, String> {
         let abi = ABI::V5;
+        // System paths may be executed (the dynamic loader, NSS modules);
+        // shared folders and cww's own directories never are.
         let read = AccessFs::from_read(abi);
         let all = AccessFs::from_all(abi);
+        let read_data = AccessFs::ReadFile | AccessFs::ReadDir;
+        let own = all & !AccessFs::Execute;
         let system = existing(&[
             "/etc",
             "/usr",
@@ -180,8 +184,8 @@ mod sys {
             .handle_access(all)
             .and_then(|r| r.create())
             .and_then(|r| r.add_rules(path_beneath_rules(&system, read)))
-            .and_then(|r| r.add_rules(path_beneath_rules(existing_paths(&plan.roots), read)))
-            .and_then(|r| r.add_rules(path_beneath_rules(existing_paths(&plan.own), all)))
+            .and_then(|r| r.add_rules(path_beneath_rules(existing_paths(&plan.roots), read_data)))
+            .and_then(|r| r.add_rules(path_beneath_rules(existing_paths(&plan.own), own)))
             .and_then(|r| r.restrict_self())
             .map_err(|e| format!("{e}"))?;
         Ok(status.ruleset)
