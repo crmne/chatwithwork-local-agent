@@ -9,6 +9,10 @@
 
 use std::path::PathBuf;
 
+// mimalloc returns freed memory to the system; see Cargo.toml.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let mut log_file: Option<PathBuf> = None;

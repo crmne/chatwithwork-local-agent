@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 
+// mimalloc returns freed memory to the system; see Cargo.toml.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::Value;

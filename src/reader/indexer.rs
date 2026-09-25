@@ -443,6 +443,7 @@ impl Worker {
             }
             Err(e) => self.set_status(&root.id, IndexState::Error, None, Some(e.to_string())),
         }
+        release_memory();
     }
 }
 
@@ -475,4 +476,14 @@ fn scope_for(root: &RootHandle, paths: HashSet<PathBuf>) -> Option<Scope> {
 fn parent(rel: &RelPath) -> RelPath {
     let parts = rel.components();
     RelPath::parse(&parts[..parts.len().saturating_sub(1)].join("/")).unwrap_or_default()
+}
+
+/// Extracting large documents peaks at a few hundred megabytes. Once a pass
+/// is done, have mimalloc (the binaries' allocator) return what it freed, so
+/// an idle daemon doesn't sit on it.
+fn release_memory() {
+    // SAFETY: mi_collect only returns free memory to the system.
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
 }
