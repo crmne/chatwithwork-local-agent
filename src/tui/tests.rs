@@ -1008,6 +1008,55 @@ fn snapshot_chat_needs_approval() {
 }
 
 #[test]
+fn a_request_made_elsewhere_is_waited_for_too() {
+    let mut app = app();
+    running(&mut app, status("connected", vec![]));
+    let effects = app.update(Msg::Chat(ChatMsg::Listed(Err(Failure {
+        code: "chat_access_required".into(),
+        message: "Allow it".into(),
+        approve_url: None,
+        requested: true,
+    }))));
+    assert_eq!(effects, vec![Effect::Chat(ChatCommand::WaitForAccess)]);
+}
+
+#[test]
+fn chats_taken_back_show_at_once_and_come_back_live() {
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("idle")),
+    }));
+    // The server refuses to follow the chat after a reconnect: ask why.
+    assert_eq!(
+        app.update(Msg::Chat(ChatMsg::Live {
+            chat: 42,
+            live: Live::Refused
+        })),
+        vec![Effect::Chat(ChatCommand::List)]
+    );
+    app.update(Msg::Chat(ChatMsg::Listed(Err(Failure {
+        code: "chat_access_required".into(),
+        message: "Allow it".into(),
+        approve_url: None,
+        requested: false,
+    }))));
+    assert!(matches!(app.chat.access, Access::NeedsApproval { .. }));
+    assert_eq!(app.focus, Focus::Roots, "nothing to type into");
+
+    // Allowed again: the open chat is read and followed again.
+    assert_eq!(
+        app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list())))),
+        vec![
+            Effect::Chat(ChatCommand::Follow(Some(42))),
+            Effect::Chat(ChatCommand::Open(42)),
+        ]
+    );
+    assert_eq!(app.chat.following, Following::Starting);
+}
+
+#[test]
 fn snapshot_chat_search() {
     let mut app = app();
     chats_ready(&mut app);

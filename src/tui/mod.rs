@@ -206,6 +206,15 @@ impl ChatRunner {
                     }
                 });
             }
+            ChatCommand::WaitForAccess => {
+                let generation = self.access_wait.fetch_add(1, Ordering::SeqCst) + 1;
+                let current = Arc::clone(&self.access_wait);
+                thread::spawn(move || {
+                    wait_for_access(&chats, &send, || {
+                        current.load(Ordering::SeqCst) == generation
+                    });
+                });
+            }
             ChatCommand::Follow(chat) => self.follow(chat),
             ChatCommand::OpenUrl(url) => {
                 crate::browser::open(&url);

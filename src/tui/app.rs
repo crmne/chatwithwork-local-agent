@@ -257,6 +257,8 @@ pub enum ChatCommand {
     Cancel(u64),
     /// Ask the owner to allow chats, then check back until they answer.
     RequestAccess,
+    /// Check back until the owner answers a request made earlier.
+    WaitForAccess,
     /// Open a page of the paired server in the browser.
     OpenUrl(String),
 }
@@ -1241,15 +1243,38 @@ impl App {
         use super::theme::Signal;
         match msg {
             ChatMsg::Listed(Ok(list)) => {
-                if !self.chat.ready() && self.focus == Focus::Roots && self.modal.is_none() {
+                let was_ready = self.chat.ready();
+                if !was_ready && self.focus == Focus::Roots && self.modal.is_none() {
                     self.focus = Focus::Chats;
                 }
                 self.chat.access = Access::Ready;
                 self.chat.list = list;
                 let len = self.chat.visible().len();
                 self.chat.selected = self.chat.selected.min(len);
+                // Chats are back (allowed again, say): follow the open one again.
+                if let Some(open) = self.chat.open
+                    && (!was_ready || self.chat.following == Following::Refused)
+                {
+                    self.chat.following = Following::Starting;
+                    let mut effects = vec![Effect::Chat(ChatCommand::Follow(Some(open)))];
+                    effects.extend(self.refresh_chat(open));
+                    return effects;
+                }
             }
-            ChatMsg::Listed(Err(failure)) => self.chat_failure(failure),
+            ChatMsg::Listed(Err(failure)) => {
+                self.chat_failure(failure);
+                // Asked already, maybe from another terminal: check back
+                // until the owner answers, as if asked from here.
+                if matches!(
+                    self.chat.access,
+                    Access::NeedsApproval {
+                        requested: true,
+                        ..
+                    }
+                ) {
+                    return vec![Effect::Chat(ChatCommand::WaitForAccess)];
+                }
+            }
             ChatMsg::Shown { chat, result } => {
                 if self.chat.open != Some(chat) {
                     return Vec::new();
@@ -1349,7 +1374,14 @@ impl App {
                         return self.refresh_chat(chat);
                     }
                     Live::Offline => self.chat.following = Following::Offline,
-                    Live::Refused => self.chat.following = Following::Refused,
+                    // Maybe chats were taken back: the list says.
+                    Live::Refused => {
+                        self.chat.following = Following::Refused;
+                        if self.chat.ready() {
+                            self.chat.access = Access::Loading;
+                            return vec![Effect::Chat(ChatCommand::List)];
+                        }
+                    }
                 }
             }
             ChatMsg::FollowFailed { chat, failure } => {
@@ -1407,6 +1439,10 @@ impl App {
             "daemon_stopped" | "not_paired" => Access::Unknown,
             _ => Access::Unavailable(failure),
         };
+        self.chat.search = None;
+        if self.focus != Focus::Roots {
+            self.focus = Focus::Roots;
+        }
     }
 }
 
