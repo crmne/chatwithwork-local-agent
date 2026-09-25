@@ -78,17 +78,30 @@ impl Account for Cli {
             if let Some(server) = &server {
                 command.args(["--server", server]);
             }
+            // Checked and spawned under the lock the cancel takes, so a
+            // cancel either comes first and nothing runs, or finds the
+            // process and kills it.
+            let mut slot = running.lock().expect("pairing lock");
+            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            // Errors come as JSON on stdout; nobody reads stderr, so it
+            // mustn't fill up a pipe and stall cww.
             let spawned = quiet(&mut command)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stderr(Stdio::null())
                 .spawn();
             let mut process = match spawned {
                 Ok(p) => p,
-                Err(e) => return report(PairEvent::Failed(format!("Couldn't run cww: {e}"))),
+                Err(e) => {
+                    drop(slot);
+                    return report(PairEvent::Failed(format!("Couldn't run cww: {e}")));
+                }
             };
             let stdout = process.stdout.take().expect("piped stdout");
-            *running.lock().expect("pairing lock") = Some(process);
+            *slot = Some(process);
+            drop(slot);
             let mut outcome = None;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
