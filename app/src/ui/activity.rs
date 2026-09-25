@@ -82,8 +82,9 @@ impl SettingsApp {
     }
 }
 
+/// Refused means denied by policy; failed calls show only under All.
 fn refused(entry: &AuditEntry) -> bool {
-    entry.event == "tool" && entry.decision.as_deref() != Some("allowed")
+    entry.event == "tool" && entry.decision.as_deref() == Some("denied")
 }
 
 fn entry_row(ui: &mut Ui, theme: &Theme, entry: &AuditEntry) {
@@ -223,5 +224,13 @@ mod tests {
         };
         assert_eq!(describe(&paused).0, "Sharing paused");
         assert!(!refused(&paused));
+
+        let failed = AuditEntry {
+            event: "tool".into(),
+            tool: Some("read".into()),
+            decision: Some("error".into()),
+            ..AuditEntry::default()
+        };
+        assert!(!refused(&failed), "a failure isn't a refusal");
     }
 }
