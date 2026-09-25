@@ -33,7 +33,11 @@ const QUIET: Duration = Duration::from_millis(750);
 const MAX_WAIT: Duration = Duration::from_secs(10);
 /// More changed paths than this in one burst rescan the whole root.
 const MAX_PENDING_PATHS: usize = 4096;
-const COMMIT_EVERY: usize = 500;
+/// Report progress every so many files during a first pass...
+const PROGRESS_EVERY: u64 = 500;
+/// ...but commit at most this often. Each commit syncs new segment files,
+/// which is slow on Windows, where Defender scans every one of them.
+const COMMIT_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -389,10 +393,14 @@ impl Worker {
             allow_hardlinks: self.settings.allow_hardlinks,
         };
         let mut seen = 0u64;
-        let mut pending = 0usize;
+        let mut last_commit = Instant::now();
         walk_scoped(root, &self.settings.deny, scope.map(Arc::new), |file| {
             let rel = file.rel.as_string();
             seen += 1;
+            if first && seen.is_multiple_of(PROGRESS_EVERY) {
+                // Progress for the status line during the first pass.
+                self.set_status(&root.id, IndexState::Indexing, Some(seen), None);
+            }
             let unchanged = known
                 .remove(&rel)
                 .is_some_and(|(mtime, size)| mtime == file.modified && size == file.size);
@@ -422,14 +430,11 @@ impl Worker {
             {
                 tracing::warn!(root = %root.id, "indexing failed: {e}");
             }
-            pending += 1;
-            if pending >= COMMIT_EVERY {
+            // Commit now and then, so searches see a long first pass as it
+            // goes.
+            if last_commit.elapsed() >= COMMIT_INTERVAL {
                 let _ = self.index.commit();
-                pending = 0;
-                if first {
-                    // Progress for the status line during the first pass.
-                    self.set_status(&root.id, IndexState::Indexing, Some(seen), None);
-                }
+                last_commit = Instant::now();
             }
             ControlFlow::Continue(())
         });
