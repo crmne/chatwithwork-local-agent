@@ -103,6 +103,7 @@ impl LocalFiles {
             .and_then(Value::as_str)
             .map(|s| s.chars().take(256).collect());
 
+        let started = std::time::Instant::now();
         let outcome = self.run(name, args, chat_id.as_deref().unwrap_or("")).await;
         let result = match outcome {
             Ok(output) => {
@@ -123,6 +124,7 @@ impl LocalFiles {
                 error_result(&err)
             }
         };
+        entry.duration_ms = Some((started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0);
         self.inner.audit.append(&entry);
         Some(result)
     }

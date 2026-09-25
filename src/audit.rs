@@ -59,6 +59,9 @@ pub struct AuditEntry {
     pub results: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// How long the daemon took to answer a tool call, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
 }
 
 impl AuditEntry {
@@ -213,6 +216,9 @@ pub fn format_line(line: &str) -> String {
         }
         if let Some(b) = e.bytes {
             out.push_str(&format!(" bytes={b}"));
+        }
+        if let Some(ms) = e.duration_ms {
+            out.push_str(&format!(" {ms}ms"));
         }
         if let Some(code) = &e.code {
             out.push_str(&format!(" code={code}"));

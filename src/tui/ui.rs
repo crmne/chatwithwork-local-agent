@@ -964,7 +964,21 @@ fn summary(entry: &AuditEntry, theme: &Theme) -> Vec<Span<'static>> {
     let (outcome, signal) = outcome(entry);
     spans.push(Span::styled(" → ", theme.faint()));
     spans.push(Span::styled(outcome, theme.signal_ink(signal)));
+    if let Some(ms) = entry.duration_ms {
+        spans.push(Span::styled(format!(" · {}", duration(ms)), theme.faint()));
+    }
     spans
+}
+
+/// `0.4 ms`, `12 ms`, `1.2 s`.
+fn duration(ms: f64) -> String {
+    if ms < 10.0 {
+        format!("{ms:.1} ms")
+    } else if ms < 1000.0 {
+        format!("{ms:.0} ms")
+    } else {
+        format!("{:.1} s", ms / 1000.0)
+    }
 }
 
 fn target(entry: &AuditEntry) -> String {

@@ -23,7 +23,7 @@
                                │
                                │
                                │────────────────────────────────────────────────────────────────────
- DAEMON                        │  LIVE      ● search "budget" → 3 hits · 2s ago
+ DAEMON                        │  LIVE      ● search "budget" → 3 hits · 1.3 ms · 2s ago
  ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
    chatwithwork.com · #42      │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯

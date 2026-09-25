@@ -242,6 +242,7 @@ The daemon never polls to produce events, and a client that waits on a subscript
 | `path`, `query` | when given | The tool path (`root:relative`) or search query, truncated. |
 | `code`, `reason` | refusals and errors | A PROTOCOL.md error code and its message. |
 | `results`, `bytes` | answered calls | Hits or entries returned, and bytes sent to the server. |
+| `duration_ms` | tool calls | How long the daemon took to answer, in milliseconds (one decimal). |
 | `chat_id`, `request_id` | tool calls | The Chat with Work chat and JSON-RPC request. |
 | `detail` | daemon events | A short description, such as the server URL on `connected`. |
 

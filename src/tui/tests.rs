@@ -141,6 +141,7 @@ fn history() -> Vec<AuditEntry> {
     search.query = Some("budget".into());
     search.results = Some(3);
     search.bytes = Some(1840);
+    search.duration_ms = Some(1.3);
     let mut read = tool("2026-09-25T08:16:10Z", "read", Decision::Allowed);
     read.path = Some("work-docs:plans/q3.md".into());
     read.bytes = Some(5210);
