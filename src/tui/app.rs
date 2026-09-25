@@ -18,6 +18,9 @@ use crate::control::PROTOCOL_VERSION;
 /// Audit entries kept in memory.
 const AUDIT_KEEP: usize = 1000;
 
+/// Shown when the daemon goes away; cleared when it comes back.
+const DAEMON_STOPPED: &str = "The daemon stopped.";
+
 const LOOKING: &str = "Looking for the daemon…";
 
 /// One animation frame, while something animates.
@@ -198,6 +201,41 @@ pub enum DaemonCommand {
     },
     /// Look for the daemon again now.
     Retry,
+    /// Pair this computer (the device flow), from inside the TUI.
+    Pair,
+    /// Stop waiting for the pairing to be approved.
+    CancelPairing,
+    /// `cww daemon install`: register and start the background service.
+    InstallService,
+}
+
+/// A pairing started from the TUI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pairing {
+    /// Asking the server for a code.
+    Starting,
+    /// The user has to approve this code on the server.
+    Waiting {
+        code: String,
+        url: String,
+        name: String,
+        fingerprint: String,
+        /// The page was opened in the browser.
+        opened: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairingMsg {
+    Code {
+        code: String,
+        url: String,
+        name: String,
+        fingerprint: String,
+        opened: bool,
+    },
+    /// Paired with this server, or why not.
+    Finished(Result<String, String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +266,7 @@ pub enum DaemonMsg {
     Suggestions(Vec<Suggestion>),
     /// The subscription ended: the daemon stopped.
     Lost,
+    Pairing(PairingMsg),
     /// A command finished, with a sentence for the person or an error.
     Done {
         command: DaemonCommand,
@@ -285,6 +324,7 @@ pub struct App {
     pub log_scroll: usize,
     pub modal: Option<Modal>,
     pub notice: Option<Notice>,
+    pub pairing: Option<Pairing>,
     /// The first-run offer was answered.
     pub offer_dismissed: bool,
     pub chat: ChatPane,
@@ -305,6 +345,7 @@ impl App {
             log_scroll: 0,
             modal: None,
             notice: None,
+            pairing: None,
             offer_dismissed: false,
             chat: ChatPane {
                 availability,
@@ -338,10 +379,7 @@ impl App {
                 Vec::new()
             }
             Msg::Resize => Vec::new(),
-            Msg::Daemon(msg) => {
-                self.daemon_msg(msg);
-                Vec::new()
-            }
+            Msg::Daemon(msg) => self.daemon_msg(msg),
             Msg::Chat(msg) => {
                 self.chat_msg(msg);
                 Vec::new()
@@ -439,7 +477,19 @@ impl App {
                 };
                 self.log_scroll = 0;
             }
+            KeyCode::Esc if self.pairing.is_some() => {
+                self.pairing = None;
+                return vec![Effect::Daemon(DaemonCommand::CancelPairing)];
+            }
             KeyCode::Esc if self.view == View::Log => self.view = View::Chat,
+            KeyCode::Char('c') if self.can_pair() && self.pairing.is_none() => {
+                self.pairing = Some(Pairing::Starting);
+                return vec![Effect::Daemon(DaemonCommand::Pair)];
+            }
+            KeyCode::Char('s') if matches!(self.daemon, Daemon::NotRunning(_)) => {
+                self.notice(super::theme::Signal::Idle, "Starting the daemon…");
+                return vec![Effect::Daemon(DaemonCommand::InstallService)];
+            }
             KeyCode::Char('p') => return self.toggle_pause(),
             KeyCode::Char('a') => {
                 self.modal = Some(Modal::AddRoot {
@@ -651,6 +701,20 @@ impl App {
         })]
     }
 
+    /// Whether this computer needs pairing: not paired yet, or revoked.
+    pub fn can_pair(&self) -> bool {
+        match &self.daemon {
+            Daemon::Running(status) => {
+                matches!(
+                    status.connection.connection.as_str(),
+                    "not_paired" | "revoked"
+                )
+            }
+            Daemon::NotRunning(offline) => !offline.paired,
+            Daemon::Unknown => false,
+        }
+    }
+
     fn notice(&mut self, signal: super::theme::Signal, text: &str) {
         self.notice = Some(Notice {
             signal,
@@ -658,7 +722,8 @@ impl App {
         });
     }
 
-    fn daemon_msg(&mut self, msg: DaemonMsg) {
+    fn daemon_msg(&mut self, msg: DaemonMsg) -> Vec<Effect> {
+        let mut effects = Vec::new();
         use super::theme::Signal;
         if matches!(msg, DaemonMsg::Status(_) | DaemonMsg::NotRunning { .. })
             && self.notice.as_ref().is_some_and(|n| n.text == LOOKING)
@@ -667,6 +732,15 @@ impl App {
         }
         match msg {
             DaemonMsg::Status(status) => {
+                // Back after a restart (a new sandbox, an upgrade): the
+                // "stopped" notice no longer holds.
+                if self
+                    .notice
+                    .as_ref()
+                    .is_some_and(|n| n.text == DAEMON_STOPPED)
+                {
+                    self.notice = None;
+                }
                 if status.protocol > PROTOCOL_VERSION {
                     self.notice(
                         Signal::Attention,
@@ -708,7 +782,46 @@ impl App {
             DaemonMsg::Suggestions(suggestions) => self.suggestions = suggestions,
             DaemonMsg::Lost => {
                 self.daemon = Daemon::Unknown;
-                self.notice(Signal::Attention, "The daemon stopped.");
+                self.notice(Signal::Attention, DAEMON_STOPPED);
+            }
+            DaemonMsg::Pairing(PairingMsg::Code {
+                code,
+                url,
+                name,
+                fingerprint,
+                opened,
+            }) => {
+                if self.pairing.is_some() {
+                    self.pairing = Some(Pairing::Waiting {
+                        code,
+                        url,
+                        name,
+                        fingerprint,
+                        opened,
+                    });
+                }
+            }
+            DaemonMsg::Pairing(PairingMsg::Finished(result)) => {
+                let cancelled = self.pairing.is_none();
+                self.pairing = None;
+                match result {
+                    Ok(server) => {
+                        self.notice(Signal::Positive, &format!("Paired with {server}."));
+                        effects.push(Effect::Daemon(DaemonCommand::Retry));
+                    }
+                    Err(_) if cancelled => {}
+                    Err(e) => self.notice(Signal::Negative, &capitalize(&e)),
+                }
+            }
+            DaemonMsg::Done {
+                command: DaemonCommand::InstallService,
+                result,
+            } => {
+                match result {
+                    Ok(text) => self.notice(Signal::Positive, &text),
+                    Err(e) => self.notice(Signal::Negative, &e),
+                }
+                effects.push(Effect::Daemon(DaemonCommand::Retry));
             }
             DaemonMsg::Done { command, result } => match (command, result) {
                 (_, Ok(text)) if !text.is_empty() => self.notice(Signal::Positive, &text),
@@ -742,6 +855,7 @@ impl App {
         }
         let roots = self.daemon.roots().len();
         self.selected_root = self.selected_root.min(roots.saturating_sub(1));
+        effects
     }
 
     fn chat_msg(&mut self, msg: ChatMsg) {

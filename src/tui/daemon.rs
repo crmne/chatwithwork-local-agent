@@ -16,8 +16,14 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
-use super::app::{DaemonCommand, DaemonMsg, DaemonStatus, Msg, Offline, RootState, Suggestion};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::app::{
+    DaemonCommand, DaemonMsg, DaemonStatus, Msg, Offline, PairingMsg, RootState, Suggestion,
+};
 use crate::audit::{self, AuditEntry};
+use crate::auth::{LoginOptions, start_login};
 use crate::config::Config;
 use crate::control::{self, Client, ControlRequest, Topic};
 use crate::paths::Paths;
@@ -215,7 +221,29 @@ fn offline(paths: &Paths, error: Option<String>) -> DaemonMsg {
 }
 
 fn work(paths: &Paths, tx: &Sender<Msg>, commands: &Receiver<DaemonCommand>, wake: &Sender<()>) {
+    // The pairing in progress, if any: set to cancel it.
+    let mut pairing: Option<Arc<AtomicBool>> = None;
     for command in commands {
+        match command {
+            DaemonCommand::Pair => {
+                if let Some(cancel) = pairing.take() {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+                let cancel = Arc::new(AtomicBool::new(false));
+                pairing = Some(Arc::clone(&cancel));
+                let (paths, tx, wake) = (paths.clone(), tx.clone(), wake.clone());
+                // Waiting for approval takes minutes; don't hold up the rest.
+                thread::spawn(move || pair(&paths, &tx, &cancel, &wake));
+                continue;
+            }
+            DaemonCommand::CancelPairing => {
+                if let Some(cancel) = pairing.take() {
+                    cancel.store(true, Ordering::SeqCst);
+                }
+                continue;
+            }
+            _ => {}
+        }
         let result = run(paths, &command);
         let offline = matches!(result, Ok((_, true)));
         let result = result.map(|(text, _)| text).map_err(|e| format!("{e:#}"));
@@ -315,8 +343,97 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
             config.save(paths)?;
             Ok((format!("Stopped sharing {}.", root.path.display()), true))
         }
-        DaemonCommand::Retry => Ok((String::new(), false)),
+        DaemonCommand::InstallService => {
+            let exe = std::env::current_exe().context("finding the cww binary")?;
+            let output = std::process::Command::new(exe)
+                .args(["daemon", "install"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .context("running cww daemon install")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr.trim().lines().last().unwrap_or("it failed");
+                anyhow::bail!(
+                    "Couldn't start the daemon: {}",
+                    reason.trim_start_matches("error: ")
+                );
+            }
+            Ok((
+                "Started the daemon. It starts again whenever you log in.".into(),
+                true,
+            ))
+        }
+        DaemonCommand::Retry | DaemonCommand::Pair | DaemonCommand::CancelPairing => {
+            Ok((String::new(), false))
+        }
     }
+}
+
+/// Pair this computer: get a code, open the approval page, wait.
+fn pair(paths: &Paths, tx: &Sender<Msg>, cancel: &AtomicBool, wake: &Sender<()>) {
+    let finish = |result: Result<String, String>| {
+        send(tx, DaemonMsg::Pairing(PairingMsg::Finished(result)));
+        let _ = wake.send(());
+    };
+    // Pair again with the server this computer was paired with, if any.
+    let server = Config::load(paths)
+        .ok()
+        .and_then(|c| c.server.map(|s| s.url))
+        .or_else(|| std::env::var("CWW_SERVER").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| crate::config::DEFAULT_SERVER.to_string());
+    let pending = match start_login(paths, &server, LoginOptions::default()) {
+        Ok(pending) => pending,
+        Err(e) => return finish(Err(format!("{e:#}"))),
+    };
+    let shown = pending
+        .verification_uri_complete()
+        .unwrap_or(pending.verification_uri())
+        .to_string();
+    let opened = pending.browser_url().is_some_and(open_in_browser);
+    let code = PairingMsg::Code {
+        code: pending.user_code().to_string(),
+        url: shown,
+        name: pending.device_name().to_string(),
+        fingerprint: pending.fingerprint(),
+        opened,
+    };
+    if !send(tx, DaemonMsg::Pairing(code)) {
+        return;
+    }
+    let result = pending.wait(cancel).map(|server| server.url);
+    if result.is_ok() {
+        // A running daemon picks up the pairing and connects.
+        let _ = control::request(&paths.socket_path(), ControlRequest::Reload);
+    }
+    finish(result.map_err(|e| format!("{e:#}")));
+}
+
+/// Open `url` in the default browser. Only plain http(s) URLs with
+/// unremarkable characters are handed to the system.
+fn open_in_browser(url: &str) -> bool {
+    let plain = (url.starts_with("https://") || url.starts_with("http://"))
+        && url
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":/?=._~%-".contains(c));
+    if !plain {
+        return false;
+    }
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    command
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }
 
 /// The daemon wants an absolute path; people type `~/Work` or `Work`.

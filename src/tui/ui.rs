@@ -8,7 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use time::OffsetDateTime;
 
-use super::app::{App, Daemon, DaemonStatus, Focus, Modal, Offline, RootState, View, parse_ts};
+use super::app::{
+    App, Daemon, DaemonStatus, Focus, Modal, Offline, Pairing, RootState, View, parse_ts,
+};
 use super::chat::{Availability, ChatMessage, Role, ToolState};
 use super::theme::{Signal, Theme};
 use crate::audit::{AuditEntry, Decision};
@@ -395,6 +397,8 @@ enum CardLine {
     Text(String),
     Command(String),
     Path(String),
+    /// Something to read off the screen: a code, a link.
+    Value(String),
     Keys(Vec<(&'static str, &'static str)>),
 }
 
@@ -402,6 +406,36 @@ enum CardLine {
 /// first-run offer.
 fn cards(app: &App) -> Vec<Card> {
     let mut cards = Vec::new();
+    match &app.pairing {
+        Some(Pairing::Starting) => cards.push(Card {
+            signal: Signal::Attention,
+            title: "Pairing this computer".into(),
+            lines: vec![CardLine::Text("Asking Chat with Work for a code…".into())],
+        }),
+        Some(Pairing::Waiting {
+            code,
+            url,
+            name,
+            fingerprint,
+            opened,
+        }) => cards.push(Card {
+            signal: Signal::Attention,
+            title: format!("Approve \"{name}\" on Chat with Work"),
+            lines: vec![
+                CardLine::Text(if *opened {
+                    "The page is open in your browser. If it isn't, open:".into()
+                } else {
+                    "Open this page, sign in, and approve:".into()
+                }),
+                CardLine::Value(url.clone()),
+                CardLine::Text("Check that it shows the same code:".into()),
+                CardLine::Value(code.clone()),
+                CardLine::Text(format!("Key fingerprint {fingerprint}")),
+                CardLine::Keys(vec![("esc", "cancel")]),
+            ],
+        }),
+        None => {}
+    }
     match &app.daemon {
         Daemon::Unknown => {}
         Daemon::NotRunning(offline) => {
@@ -417,16 +451,20 @@ fn cards(app: &App) -> Vec<Card> {
                 )],
             };
             lines.push(CardLine::Command("cww daemon install".into()));
-            if !offline.paired {
+            if !offline.paired && app.pairing.is_none() {
                 lines.push(CardLine::Text(
-                    "This computer isn't paired yet either:".into(),
+                    "This computer isn't paired yet either.".into(),
                 ));
-                lines.push(CardLine::Command("cww login".into()));
             }
             lines.push(CardLine::Text(
                 "Until then, this shows config.toml, and changes here are saved there.".into(),
             ));
-            lines.push(CardLine::Keys(vec![("r", "look again")]));
+            let mut keys = vec![("s", "start it")];
+            if !offline.paired && app.pairing.is_none() {
+                keys.push(("c", "pair"));
+            }
+            keys.push(("r", "look again"));
+            lines.push(CardLine::Keys(keys));
             let title = if offline.error.is_some() {
                 "Can't reach the daemon"
             } else {
@@ -440,24 +478,24 @@ fn cards(app: &App) -> Vec<Card> {
         }
         Daemon::Running(status) => {
             match status.connection.connection.as_str() {
-                "not_paired" => cards.push(Card {
+                "not_paired" if app.pairing.is_none() => cards.push(Card {
                     signal: Signal::Attention,
                     title: "This computer isn't paired".into(),
                     lines: vec![
                         CardLine::Text(
-                            "Chat with Work can't search your folders until you pair it. In \
-                             another terminal, run:"
+                            "Chat with Work can't search your folders until you pair it. Press \
+                             c to pair it here, or run cww login in a terminal."
                                 .into(),
                         ),
-                        CardLine::Command("cww login".into()),
+                        CardLine::Keys(vec![("c", "pair this computer")]),
                     ],
                 }),
-                "revoked" => cards.push(Card {
+                "revoked" if app.pairing.is_none() => cards.push(Card {
                     signal: Signal::Negative,
                     title: "Chat with Work revoked this computer".into(),
                     lines: vec![
-                        CardLine::Text("It won't reconnect until you pair it again:".into()),
-                        CardLine::Command("cww login".into()),
+                        CardLine::Text("It won't reconnect until you pair it again.".into()),
+                        CardLine::Keys(vec![("c", "pair again")]),
                     ],
                 }),
                 "offline" => cards.push(Card {
@@ -546,6 +584,10 @@ fn card_lines(card: &Card, width: usize, theme: &Theme) -> Vec<Line<'static>> {
             CardLine::Path(path) => lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(ellipsize_start(path, width.saturating_sub(2)), theme.ink()),
+            ])),
+            CardLine::Value(value) => lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(value.clone(), theme.strong()),
             ])),
             CardLine::Keys(keys) => lines.push(key_hints(keys, theme)),
         }
@@ -1066,6 +1108,14 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ];
     }
     let mut keys = Vec::new();
+    if app.pairing.is_some() {
+        keys.push(("esc", "cancel pairing"));
+    } else if app.can_pair() {
+        keys.push(("c", "pair"));
+    }
+    if matches!(app.daemon, Daemon::NotRunning(_)) {
+        keys.push(("s", "start daemon"));
+    }
     if app.focus_order().len() > 1 {
         keys.push(("tab", "focus"));
     }

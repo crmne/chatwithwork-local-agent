@@ -6,12 +6,12 @@
  ━━ ROOTS                    1 │  │ Chat with Work can't search your folders until it runs.      │
  ▌○ Work docs                  │  │ Start it in the background with:                             │
     work-docs · not running    │  │   $ cww daemon install                                       │
-                               │  │ This computer isn't paired yet either:                       │
-                               │  │   $ cww login                                                │
+                               │  │ This computer isn't paired yet either.                       │
                                │  │ Until then, this shows config.toml, and changes here are     │
                                │  │ saved there.                                                 │
-                               │  │ r look again                                                 │
+                               │  │ s start it   c pair   r look again                           │
                                │  ╰──────────────────────────────────────────────────────────────╯
+                               │
                                │
                                │
                                │
@@ -27,4 +27,4 @@
  ○ not running                 │ ╭────────────────────────────────────────────────────────────────╮
    $ cww daemon install        │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
    not paired                  │ ╰────────────────────────────────────────────────────────────────╯
- ↑↓ select   a add folder   d remove   l audit log   p pause   r retry   ? help   q quit
+ c pair   s start daemon   ↑↓ select   a add folder   d remove   l audit log   p pause   r retry

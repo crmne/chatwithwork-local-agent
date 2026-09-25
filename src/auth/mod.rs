@@ -8,13 +8,14 @@ pub mod client;
 pub mod key;
 pub mod secrets;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use crate::config::{Config, ServerConfig};
 use crate::paths::Paths;
-use client::{AuthClient, DeviceInfo, PollOutcome, ServerUrl};
+use client::{AuthClient, DeviceAuthorization, DeviceInfo, PollOutcome, ServerUrl};
 use key::DeviceKey;
 use secrets::{DEVICE_KEY, REFRESH_TOKEN, SecretStore};
 
@@ -50,14 +51,120 @@ pub struct LoginOptions {
     pub store: Option<SecretStore>,
 }
 
-/// Pair this computer with a server. Blocks until the user approves,
-/// denies, or the code expires. `say` receives the lines to show the user.
-pub fn login(
-    paths: &Paths,
-    server: &str,
-    options: LoginOptions,
-    mut say: impl FnMut(&str),
-) -> Result<ServerConfig> {
+/// A pairing started with [`start_login`], waiting for the user to approve
+/// the code on the server.
+pub struct PendingLogin {
+    paths: Paths,
+    server: ServerUrl,
+    client: AuthClient,
+    key: DeviceKey,
+    info: DeviceInfo,
+    auth: DeviceAuthorization,
+    store: Option<SecretStore>,
+    deadline: Instant,
+}
+
+impl PendingLogin {
+    /// The code the user enters on the server, such as `WDJB-MJHT`.
+    pub fn user_code(&self) -> &str {
+        &self.auth.user_code
+    }
+
+    /// Where to enter the code.
+    pub fn verification_uri(&self) -> &str {
+        &self.auth.verification_uri
+    }
+
+    /// The same page with the code filled in, when the server offers it.
+    pub fn verification_uri_complete(&self) -> Option<&str> {
+        self.auth.verification_uri_complete.as_deref()
+    }
+
+    /// The page to open in a browser, if it is safe to: an http(s) page on
+    /// the server being paired with, so a server can't make a client open
+    /// some other program or site.
+    pub fn browser_url(&self) -> Option<&str> {
+        let origin = format!("{}/", self.server.origin());
+        [
+            self.verification_uri_complete(),
+            Some(self.verification_uri()),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|url| url.starts_with(&origin))
+    }
+
+    /// The name the server shows for this computer.
+    pub fn device_name(&self) -> &str {
+        &self.info.name
+    }
+
+    /// The device key's thumbprint, which the approval page can show.
+    pub fn fingerprint(&self) -> String {
+        self.key.thumbprint()
+    }
+
+    /// Poll until the user approves or denies, the code expires, or `cancel`
+    /// is set. Saves the key, the refresh token and the server on approval.
+    pub fn wait(self, cancel: &AtomicBool) -> Result<ServerConfig> {
+        let mut interval = self.auth.interval.max(1);
+        let token = loop {
+            // Sleep in short steps so a cancel takes effect quickly.
+            let wake = Instant::now() + Duration::from_secs(interval);
+            while Instant::now() < wake {
+                if cancel.load(Ordering::SeqCst) {
+                    bail!("pairing was cancelled");
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            if Instant::now() > self.deadline {
+                bail!("the pairing code expired; start again for a new one");
+            }
+            match self
+                .client
+                .poll_pairing(&self.key, &self.auth.device_code)?
+            {
+                PollOutcome::Pending => {}
+                PollOutcome::SlowDown => interval += 5,
+                PollOutcome::Denied => bail!("pairing was denied on the server"),
+                PollOutcome::Expired => {
+                    bail!("the pairing code expired; start again for a new one")
+                }
+                PollOutcome::Approved(token) => break token,
+            }
+        };
+        let device_id = token.device_id.clone().expect("checked in poll_pairing");
+        let refresh = token
+            .refresh_token
+            .clone()
+            .expect("checked in poll_pairing");
+
+        let paths = &self.paths;
+        let mut config = Config::load(paths)?;
+        // Forget an earlier pairing, wherever its secrets were.
+        if config.server.is_some() {
+            let old_store = SecretStore::for_config(&config, paths);
+            let _ = old_store.delete(DEVICE_KEY);
+            let _ = old_store.delete(REFRESH_TOKEN);
+        }
+
+        let store = self.store.unwrap_or_else(|| SecretStore::choose(paths));
+        store.set(DEVICE_KEY, &self.key.to_stored())?;
+        store.set(REFRESH_TOKEN, &refresh)?;
+        let server_config = ServerConfig {
+            url: self.server.origin(),
+            device_id,
+        };
+        config.server = Some(server_config.clone());
+        config.secret_store = Some(store.name().to_string());
+        config.save(paths)?;
+        Ok(server_config)
+    }
+}
+
+/// Start pairing this computer with a server: create a key and ask the
+/// server for a code. [`PendingLogin::wait`] finishes it.
+pub fn start_login(paths: &Paths, server: &str, options: LoginOptions) -> Result<PendingLogin> {
     let LoginOptions { name, store } = options;
     let server = ServerUrl::parse(server)?;
     let client = AuthClient::new(server.clone());
@@ -66,62 +173,45 @@ pub fn login(
     let auth = client
         .start_pairing(&key, &info)
         .context("starting pairing")?;
+    let deadline = Instant::now() + Duration::from_secs(auth.expires_in.max(1));
+    Ok(PendingLogin {
+        paths: paths.clone(),
+        server,
+        client,
+        key,
+        info,
+        auth,
+        store,
+        deadline,
+    })
+}
 
-    say(&format!("To connect \"{}\" to Chat with Work:", info.name));
+/// Pair this computer with a server. Blocks until the user approves,
+/// denies, or the code expires. `say` receives the lines to show the user.
+pub fn login(
+    paths: &Paths,
+    server: &str,
+    options: LoginOptions,
+    mut say: impl FnMut(&str),
+) -> Result<ServerConfig> {
+    let pending = start_login(paths, server, options)?;
+    say(&format!(
+        "To connect \"{}\" to Chat with Work:",
+        pending.device_name()
+    ));
     say("");
-    say(&format!("  1. Open {}", auth.verification_uri));
-    say(&format!("  2. Enter the code {}", auth.user_code));
-    if let Some(complete) = &auth.verification_uri_complete {
+    say(&format!("  1. Open {}", pending.verification_uri()));
+    say(&format!("  2. Enter the code {}", pending.user_code()));
+    if let Some(complete) = pending.verification_uri_complete() {
         say("");
         say(&format!("Or open {complete}"));
     }
     say("");
-    say(&format!("Key fingerprint: {}", key.thumbprint()));
+    say(&format!("Key fingerprint: {}", pending.fingerprint()));
     say("Waiting for approval...");
-
-    let deadline = Instant::now() + Duration::from_secs(auth.expires_in.max(1));
-    let mut interval = auth.interval.max(1);
-    let token = loop {
-        std::thread::sleep(Duration::from_secs(interval));
-        if Instant::now() > deadline {
-            bail!("the pairing code expired; run `cww login` again");
-        }
-        match client.poll_pairing(&key, &auth.device_code)? {
-            PollOutcome::Pending => {}
-            PollOutcome::SlowDown => interval += 5,
-            PollOutcome::Denied => bail!("pairing was denied on the server"),
-            PollOutcome::Expired => bail!("the pairing code expired; run `cww login` again"),
-            PollOutcome::Approved(token) => break token,
-        }
-    };
-    let device_id = token.device_id.clone().expect("checked in poll_pairing");
-    let refresh = token
-        .refresh_token
-        .clone()
-        .expect("checked in poll_pairing");
-
-    let mut config = Config::load(paths)?;
-    // Forget an earlier pairing, wherever its secrets were.
-    if config.server.is_some() {
-        let old_store = SecretStore::for_config(&config, paths);
-        let _ = old_store.delete(DEVICE_KEY);
-        let _ = old_store.delete(REFRESH_TOKEN);
-    }
-
-    let store = store.unwrap_or_else(|| SecretStore::choose(paths));
-    store.set(DEVICE_KEY, &key.to_stored())?;
-    store.set(REFRESH_TOKEN, &refresh)?;
-    let server_config = ServerConfig {
-        url: server.origin(),
-        device_id,
-    };
-    config.server = Some(server_config.clone());
-    config.secret_store = Some(store.name().to_string());
-    config.save(paths)?;
-    Ok(server_config)
+    pending.wait(&AtomicBool::new(false))
 }
 
-/// Forget the pairing locally. The server side is revoked from Settings.
 pub fn logout(paths: &Paths) -> Result<bool> {
     let mut config = Config::load(paths)?;
     let store = SecretStore::for_config(&config, paths);

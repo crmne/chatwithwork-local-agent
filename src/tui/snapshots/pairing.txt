@@ -2,29 +2,29 @@
                                │────────────────────────────────────────────────────────────────────
  CHATS                         │
  In the browser for now        │  ╭──────────────────────────────────────────────────────────────╮
-                               │  │ ● This computer isn't paired                                 │
- ━━ ROOTS                    1 │  │ Chat with Work can't search your folders until you pair it.  │
- ▌● Work docs                  │  │ Press c to pair it here, or run cww login in a terminal.     │
-    work-docs · 1,532 files    │  │ c pair this computer                                         │
+                               │  │ ● Approve "carmine-mbp" on Chat with Work                    │
+ ━━ ROOTS                      │  │ The page is open in your browser. If it isn't, open:         │
+ Nothing shared yet            │  │   https://chatwithwork.com/device?user_code=WDJB-MJHT        │
+ a shares a folder             │  │ Check that it shows the same code:                           │
+                               │  │   WDJB-MJHT                                                  │
+                               │  │ Key fingerprint 3sQ2x9…                                      │
+                               │  │ esc cancel                                                   │
                                │  ╰──────────────────────────────────────────────────────────────╯
                                │
-                               │
-                               │
-                               │
-                               │
+                               │  ╭──────────────────────────────────────────────────────────────╮
+                               │  │ ○ Nothing is shared yet                                      │
+                               │  │ Chat with Work can only search folders you share.            │
+                               │  │ a share a folder                                             │
+                               │  ╰──────────────────────────────────────────────────────────────╯
                                │
                                │              Chat isn't available in the terminal yet
                                │
                                │    Chat with Work has no chat API for it. Chat in the browser at
                                │                   https://chatwithwork.com/chats
                                │
-                               │
-                               │
-                               │
-                               │
                                │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
  ○ not paired      since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
    $ cww login                 │ │ ❯ Chat in the browser: https://chatwithwork.com/chats          │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- c pair   ↑↓ select   a add folder   d remove   l audit log   p pause   ? help   q quit
+ esc cancel pairing   a add folder   l audit log   p pause   ? help   q quit

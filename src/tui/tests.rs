@@ -220,6 +220,24 @@ fn snapshot_not_paired() {
 }
 
 #[test]
+fn snapshot_pairing() {
+    let mut app = app();
+    running(&mut app, status("not_paired", vec![]));
+    assert_eq!(
+        app.update(char('c')),
+        vec![Effect::Daemon(DaemonCommand::Pair)]
+    );
+    app.update(Msg::Daemon(DaemonMsg::Pairing(PairingMsg::Code {
+        code: "WDJB-MJHT".into(),
+        url: "https://chatwithwork.com/device?user_code=WDJB-MJHT".into(),
+        name: "carmine-mbp".into(),
+        fingerprint: "3sQ2x9…".into(),
+        opened: true,
+    })));
+    assert_snapshot("pairing", &app);
+}
+
+#[test]
 fn snapshot_connected_with_roots() {
     let mut app = app();
     running(
@@ -749,4 +767,73 @@ fn a_streamed_reply_builds_up_the_answer() {
     assert_eq!(answer.role, Role::Assistant);
     assert_eq!(answer.text, "It's €40k.");
     assert_eq!(answer.tools, vec![step(ToolState::Done)]);
+}
+
+#[test]
+fn pairing_starts_only_when_needed_and_can_be_cancelled() {
+    let mut app = app();
+    running(
+        &mut app,
+        status(
+            "connected",
+            vec![root("work-docs", "Work docs", "ready", 3)],
+        ),
+    );
+    assert!(app.update(char('c')).is_empty(), "already paired");
+    assert_eq!(app.pairing, None);
+
+    running(&mut app, status("revoked", vec![]));
+    assert_eq!(
+        app.update(char('c')),
+        vec![Effect::Daemon(DaemonCommand::Pair)]
+    );
+    assert_eq!(app.pairing, Some(Pairing::Starting));
+    assert!(app.update(char('c')).is_empty(), "one pairing at a time");
+    assert_eq!(
+        app.update(key(KeyCode::Esc)),
+        vec![Effect::Daemon(DaemonCommand::CancelPairing)]
+    );
+    assert_eq!(app.pairing, None);
+    // The cancelled pairing's thread reports back quietly.
+    app.update(Msg::Daemon(DaemonMsg::Pairing(PairingMsg::Finished(Err(
+        "pairing was cancelled".into(),
+    )))));
+    assert_eq!(app.notice, None);
+}
+
+#[test]
+fn a_finished_pairing_says_so_and_looks_again() {
+    let mut app = app();
+    running(&mut app, status("not_paired", vec![]));
+    app.update(char('c'));
+    let effects = app.update(Msg::Daemon(DaemonMsg::Pairing(PairingMsg::Finished(Ok(
+        "https://chatwithwork.com".into(),
+    )))));
+    assert_eq!(effects, vec![Effect::Daemon(DaemonCommand::Retry)]);
+    assert_eq!(app.pairing, None);
+    assert!(app.notice.as_ref().unwrap().text.contains("Paired with"));
+}
+
+#[test]
+fn s_starts_a_daemon_that_isnt_running() {
+    let mut app = app();
+    app.update(Msg::Daemon(DaemonMsg::NotRunning {
+        offline: Box::new(Offline::default()),
+        audit: vec![],
+        suggestion: None,
+    }));
+    assert_eq!(
+        app.update(char('s')),
+        vec![Effect::Daemon(DaemonCommand::InstallService)]
+    );
+}
+
+#[test]
+fn the_stopped_notice_goes_when_the_daemon_is_back() {
+    let mut app = app();
+    running(&mut app, status("connected", vec![]));
+    app.update(Msg::Daemon(DaemonMsg::Lost));
+    assert!(app.notice.is_some());
+    running(&mut app, status("connected", vec![]));
+    assert_eq!(app.notice, None);
 }

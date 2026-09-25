@@ -127,6 +127,8 @@ Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the 
 
 | Key | Does |
 |---|---|
+| `c` | Pair this computer: shows the code, opens the approval page in your browser, and waits |
+| `s` | Start the daemon in the background (`cww daemon install`) when it isn't running |
 | `a` | Share a folder (prefilled with your Documents folder if it isn't shared) |
 | `d`, `x`, `Delete` | Stop sharing the selected folder, after asking |
 | `↑` `↓`, `j` `k` | Select a folder, or scroll the audit log |
@@ -136,7 +138,7 @@ Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the 
 | `?` | All the keys |
 | `q`, `Ctrl-C` | Quit |
 
-If nothing is shared yet, it offers your Documents folder and shares it only when you press `y`. If the daemon isn't running, it says so, shows `cww daemon install`, and works from `config.toml` and the audit file until the daemon starts; changes are saved there, like the `cww roots` commands. If the computer isn't paired, it shows `cww login`.
+A first run is three keys: `c` to pair, `s` to start the daemon if the installer didn't, and `y` to share your Documents folder, which it offers when nothing is shared and never shares on its own. Until the daemon runs, the UI works from `config.toml` and the audit file, and changes are saved there, like the `cww roots` commands. `CWW_SERVER=https://chat.example.com cww` pairs with a self-hosted server.
 
 Chat doesn't work in the terminal yet: Chat with Work has no chat API for it, so the chat pane says so and links to the browser. [CHAT_API.md](CHAT_API.md) proposes the API it needs.
 
