@@ -239,7 +239,7 @@ jobs:
             target/aarch64-apple-darwin/release/cww \
             target/x86_64-apple-darwin/release/cww \
             -output universal/cww
-          lipo -verify_arch x86_64 arm64 universal/cww
+          lipo universal/cww -verify_arch x86_64 arm64
 
       - uses: ruby/setup-ruby@v1
         with:

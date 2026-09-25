@@ -27,6 +27,10 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/payload/usr/local/bin" "$work/resources"
 cp "$binary" "$work/payload/usr/local/bin/cww"
 chmod 755 "$work/payload/usr/local/bin/cww"
+# Drop quarantine and other removable attributes; the code signature lives
+# inside the binary. (com.apple.provenance can't be removed and shows up as
+# ._ entries in the payload; Installer restores it as an attribute.)
+xattr -cr "$work/payload"
 cp "$here"/resources/*.html "$root/LICENSE-MIT" "$work/resources/"
 
 pkgbuild \
