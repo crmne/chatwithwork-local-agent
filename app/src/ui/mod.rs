@@ -666,15 +666,11 @@ impl SettingsApp {
         });
     }
 
-    fn pair(&mut self, ctx: &egui::Context) {
+    /// Pair with `server`, or Chat with Work's own when `None`.
+    fn pair(&mut self, ctx: &egui::Context, server: Option<String>) {
         self.account.requesting = true;
         self.account.error = None;
         self.account.pairing = Some(None);
-        let server = self
-            .account
-            .custom_server
-            .then(|| self.account.server.trim().to_string())
-            .filter(|s| !s.is_empty());
         let (tx, ctx) = (self.jobs.tx.clone(), ctx.clone());
         let report: crate::pairing::Report = Box::new(move |event| {
             let _ = tx.send(Done::Pairing(event));

@@ -412,14 +412,14 @@ struct Account(Arc<Demo>);
 impl crate::pairing::Account for Account {
     fn pair(
         &self,
-        _server: Option<String>,
+        server: Option<String>,
         report: crate::pairing::Report,
     ) -> crate::pairing::Cancel {
         use crate::pairing::{Code, PairEvent};
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let demo = Arc::clone(&self.0);
-        demo.change(|s| s.requests.push(json!({ "cmd": "pair" })));
+        demo.change(|s| s.requests.push(json!({ "cmd": "pair", "server": server })));
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&cancelled);
         std::thread::spawn(move || {

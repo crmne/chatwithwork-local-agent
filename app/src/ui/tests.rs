@@ -156,6 +156,32 @@ fn pairing_shows_the_code_and_can_reopen_the_page() {
 }
 
 #[test]
+fn a_self_hosted_server_is_never_left_blank() {
+    let mut fx = fixture(Scenario::Fresh, Some(Page::Account));
+    fx.wait_for_label("This computer isn't paired");
+    fx.harness.get_by_label("Use a self-hosted server").click();
+    fx.harness.run_steps(2);
+    fx.harness
+        .get_by_label_contains("Enter your server's address");
+    // Blank: the button does nothing, rather than pair with chatwithwork.com.
+    fx.harness.get_by_label("Pair with Chat with Work…").click();
+    fx.harness.run_steps(10);
+    assert!(
+        !fx.changes().iter().any(|r| r["cmd"] == "pair"),
+        "{:?}",
+        fx.changes()
+    );
+
+    let field = fx.harness.get_by_role(egui::accesskit::Role::TextInput);
+    field.focus();
+    field.type_text("  https://chat.example.com ");
+    fx.harness.run_steps(2);
+    fx.harness.get_by_label("Pair with Chat with Work…").click();
+    let pair = fx.wait_for_request("pair");
+    assert_eq!(pair["server"], "https://chat.example.com");
+}
+
+#[test]
 fn folders_are_renamed_and_removed_with_confirmation() {
     let mut fx = fixture(Scenario::Sample, Some(Page::Folders));
     fx.wait_for_label("Indexed · 1,532 files");

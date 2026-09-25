@@ -51,7 +51,10 @@ impl SettingsApp {
                     .wrap(),
                 );
                 ui.add_space(4.0);
-                self.pair_button(ui, "Pair with Chat with Work…");
+                // Checked with a blank address, there's nothing to pair
+                // with: never fall back to Chat with Work's own server.
+                let server = self.chosen_server();
+                self.pair_button(ui, "Pair with Chat with Work…", server.clone());
                 ui.add_space(2.0);
                 ui.checkbox(&mut self.account.custom_server, "Use a self-hosted server");
                 if self.account.custom_server {
@@ -60,6 +63,9 @@ impl SettingsApp {
                             .hint_text("https://chat.example.com")
                             .desired_width(320.0),
                     );
+                    if server.is_none() {
+                        ui.label(theme.weak("Enter your server's address to pair with it."));
+                    }
                 }
             });
         }
@@ -69,10 +75,22 @@ impl SettingsApp {
         }
     }
 
-    fn pair_button(&mut self, ui: &mut Ui, label: &str) {
+    /// The server the unpaired card would pair with: `Some(None)` for Chat
+    /// with Work's own, `None` while a self-hosted one is chosen but blank.
+    fn chosen_server(&self) -> Option<Option<String>> {
+        if !self.account.custom_server {
+            return Some(None);
+        }
+        let server = self.account.server.trim();
+        (!server.is_empty()).then(|| Some(server.to_string()))
+    }
+
+    /// `server` is where to pair (see [`Self::chosen_server`]); the button
+    /// is disabled while there's none.
+    fn pair_button(&mut self, ui: &mut Ui, label: &str, server: Option<Option<String>>) {
         let theme = self.theme;
         let busy = self.account.requesting;
-        let response = ui.add_enabled_ui(!busy, |ui| {
+        let response = ui.add_enabled_ui(!busy && server.is_some(), |ui| {
             widgets::primary_button(
                 ui,
                 &theme,
@@ -83,8 +101,10 @@ impl SettingsApp {
                 },
             )
         });
-        if response.inner.clicked() {
-            self.pair(ui.ctx());
+        if response.inner.clicked()
+            && let Some(server) = server
+        {
+            self.pair(ui.ctx(), server);
         }
     }
 
@@ -183,7 +203,8 @@ impl SettingsApp {
                 theme.palette.warning,
             );
             ui.add_space(6.0);
-            self.pair_button(ui, "Pair Again…");
+            // Where it was paired: a self-hosted server stays the one.
+            self.pair_button(ui, "Pair Again…", Some(status.server.clone()));
             ui.add_space(6.0);
         }
         if self.account.confirm_logout {
