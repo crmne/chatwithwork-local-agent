@@ -1319,6 +1319,7 @@ dependencies = [
  "egui_kittest",
  "env_logger",
  "fastframe-text",
+ "fastframe-theme",
  "image",
  "jiff",
  "ksni",
@@ -1915,11 +1916,24 @@ checksum = "9afc2bd4d5a73106dd53d10d73d3401c2f32730ba2c0b93ddb888a8983680471"
 
 [[package]]
 name = "fastframe-text"
-version = "0.1.1"
-source = "git+https://github.com/crmne/fastframe?tag=v0.1.1#4008310f1064fcb27f3c312d9832c13c8ec15c25"
+version = "0.1.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.2#4fcff2d2fd414f9491ba46517327c4630e30e8f0"
 dependencies = [
  "egui",
  "zbus",
+]
+
+[[package]]
+name = "fastframe-theme"
+version = "0.1.2"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.2#4fcff2d2fd414f9491ba46517327c4630e30e8f0"
+dependencies = [
+ "directories",
+ "egui",
+ "log",
+ "notify",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

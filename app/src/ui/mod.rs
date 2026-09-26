@@ -290,6 +290,11 @@ pub struct SettingsApp {
     attached: bool,
     /// Use the platform's UI font; tests use egui's own, which never changes.
     system_fonts: bool,
+    /// Reveals a switch between light and dark from the middle outwards.
+    transition: fastframe_theme::Transition,
+    /// Tests switch the reveal off: a bare context sends no screenshot and
+    /// its clock doesn't move, so the old theme would be held.
+    reveal: bool,
 }
 
 impl SettingsApp {
@@ -304,6 +309,8 @@ impl SettingsApp {
             documents: crate::paths::documents_dir(),
             attached: false,
             system_fonts: !cfg!(test),
+            transition: fastframe_theme::Transition::default(),
+            reveal: !cfg!(test),
             theme,
             page,
             jobs: Jobs::new(),
@@ -398,6 +405,7 @@ impl SettingsApp {
                             });
                     });
             });
+        self.transition.paint(ui.ctx());
     }
 
     fn page_contents(&mut self, ui: &mut Ui, status: Option<&Status>) {
@@ -507,6 +515,14 @@ impl SettingsApp {
         if let Some(system) = ctx.system_theme() {
             let dark = system == egui::Theme::Dark;
             if dark != self.theme.dark {
+                if self.reveal {
+                    self.transition.begin(ctx);
+                    // Keep the old theme until the window's picture of it
+                    // arrives.
+                    if self.transition.holding(ctx) {
+                        return;
+                    }
+                }
                 self.theme = Theme {
                     text: self.theme.text,
                     ..Theme::new(self.theme.platform, dark, crate::platform::accent_color())
