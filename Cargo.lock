@@ -1916,8 +1916,8 @@ checksum = "9afc2bd4d5a73106dd53d10d73d3401c2f32730ba2c0b93ddb888a8983680471"
 
 [[package]]
 name = "fastframe-text"
-version = "0.1.4"
-source = "git+https://github.com/crmne/fastframe?tag=v0.1.4#79d755f2693cb1ddf8300b80fb20a7b92b45faf7"
+version = "0.1.5"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.5#027ce535fa4cdcaf36fb715cdb06796cdcda8aee"
 dependencies = [
  "egui",
  "zbus",
@@ -1925,8 +1925,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-theme"
-version = "0.1.4"
-source = "git+https://github.com/crmne/fastframe?tag=v0.1.4#79d755f2693cb1ddf8300b80fb20a7b92b45faf7"
+version = "0.1.5"
+source = "git+https://github.com/crmne/fastframe?tag=v0.1.5#027ce535fa4cdcaf36fb715cdb06796cdcda8aee"
 dependencies = [
  "directories",
  "egui",
