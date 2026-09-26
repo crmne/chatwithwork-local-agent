@@ -50,10 +50,10 @@ open = "5"
 jiff = "0.2"
 # Follows the desktop's font rendering (hinting, sub-pixel positions, and
 # linear coverage on Linux), shared with the other fastframe apps.
-fastframe-text = { version = "0.1.2", git = "https://github.com/crmne/fastframe", tag = "v0.1.2" }
+fastframe-text = { version = "0.1.3", git = "https://github.com/crmne/fastframe", tag = "v0.1.3" }
 # Reveals a switch between light and dark from the middle of the window
 # outwards, as Omarchy does.
-fastframe-theme = { version = "0.1.2", git = "https://github.com/crmne/fastframe", tag = "v0.1.2" }
+fastframe-theme = { version = "0.1.3", git = "https://github.com/crmne/fastframe", tag = "v0.1.3" }
 # Maps the system UI font instead of reading it: San Francisco is 8 MB.
 memmap2 = "0.9"
 # Waits for the daemon's socket to appear instead of polling for it.
