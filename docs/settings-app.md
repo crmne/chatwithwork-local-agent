@@ -37,7 +37,7 @@ To make up most of the difference in looks, the parts people touch most are nati
 
 - The tray menu is the platform's own (`tray-icon`/`muda` on macOS and Windows, `ksni` on Linux), not drawn by egui.
 - The folder picker is the platform's own (`rfd`: `NSOpenPanel`, `IFileDialog`, the XDG portal).
-- The window uses the system UI font (San Francisco, Segoe UI, or the fontconfig `sans-serif`), the user's accent color (macOS and Windows accent settings, GNOME 47's accent), light or dark to match the system, and each platform's control heights, corner radii, grouped-row style, switches, and dialog button order (Cancel last on Windows, first on macOS and GNOME).
+- The window uses the system UI font (San Francisco, Segoe UI, or the fontconfig `sans-serif`) with the system's color emoji (in folder names, for instance), the user's accent color (macOS and Windows accent settings, GNOME 47's accent), light or dark to match the system, and each platform's control heights, corner radii, grouped-row style, switches, and dialog button order (Cancel last on Windows, first on macOS and GNOME).
 - On macOS the app is an accessory app: a menu bar item with no Dock icon. The menu bar icon is a template image, so macOS tints it.
 
 The window is not pixel-identical to a native one: text rendering and focus rings are egui's. If that matters later, the control socket is documented, so a native SwiftUI or WinUI front end can replace the window without touching the daemon.

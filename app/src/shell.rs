@@ -65,6 +65,12 @@ struct Shell<'a> {
 }
 
 pub fn run(paths: Paths, options: Options) -> anyhow::Result<()> {
+    // Finds the color emoji font off the main thread; text shows monochrome
+    // emoji until it is ready.
+    fastframe_emoji::EmojiSetup::default()
+        .system(true)
+        .install();
+    std::thread::spawn(fastframe_emoji::warm_up);
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     #[cfg(target_os = "macos")]
     {
@@ -171,6 +177,8 @@ fn create_window<'a>(
         "Chat with Work Local Agent",
         options,
         Box::new(move |cc| {
+            cc.egui_ctx
+                .add_plugin(fastframe_emoji::EmojiPlugin::default());
             let theme = theme::Theme::detect(&cc.egui_ctx);
             let mut app = SettingsApp::new(shared, theme);
             if let Some(page) = page {

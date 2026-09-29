@@ -1318,6 +1318,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "env_logger",
+ "fastframe-emoji",
  "fastframe-text",
  "fastframe-theme",
  "image",
@@ -1915,9 +1916,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9afc2bd4d5a73106dd53d10d73d3401c2f32730ba2c0b93ddb888a8983680471"
 
 [[package]]
+name = "fastframe-emoji"
+version = "0.2.1"
+source = "git+https://github.com/crmne/fastframe?tag=v0.2.1#f8116604a5135f4950f94c782fb70349403c5368"
+dependencies = [
+ "egui",
+ "fastframe-fonts",
+ "harfrust",
+ "log",
+ "memmap2",
+ "png",
+ "skrifa",
+ "unicode-segmentation",
+ "windows",
+ "windows-core",
+ "windows-numerics",
+]
+
+[[package]]
+name = "fastframe-fonts"
+version = "0.2.1"
+source = "git+https://github.com/crmne/fastframe?tag=v0.2.1#f8116604a5135f4950f94c782fb70349403c5368"
+dependencies = [
+ "directories",
+ "egui",
+ "log",
+ "memmap2",
+ "skrifa",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "fastframe-text"
-version = "0.2.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.2.0#574b7387edf283a6f45ddd470102f6252e60de93"
+version = "0.2.1"
+source = "git+https://github.com/crmne/fastframe?tag=v0.2.1#f8116604a5135f4950f94c782fb70349403c5368"
 dependencies = [
  "egui",
  "zbus",
@@ -1925,8 +1957,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-theme"
-version = "0.2.0"
-source = "git+https://github.com/crmne/fastframe?tag=v0.2.0#574b7387edf283a6f45ddd470102f6252e60de93"
+version = "0.2.1"
+source = "git+https://github.com/crmne/fastframe?tag=v0.2.1#f8116604a5135f4950f94c782fb70349403c5368"
 dependencies = [
  "directories",
  "egui",
