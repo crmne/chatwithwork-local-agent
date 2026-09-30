@@ -60,6 +60,11 @@ allow = ["BSL-1.0"]
 crate = "epaint_default_fonts"
 allow = ["OFL-1.1", "Ubuntu-font-1.0"]
 
+# fastframe-fonts bundles Inter and the Noto fallbacks under their own license.
+[[licenses.exceptions]]
+crate = "fastframe-fonts"
+allow = ["OFL-1.1"]
+
 [[licenses.clarify]]
 # ring's license file combines ISC, MIT and OpenSSL-derived terms.
 crate = "ring"
