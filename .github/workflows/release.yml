@@ -177,7 +177,7 @@ jobs:
 
       - name: Attest release packages
         if: startsWith(github.ref, 'refs/tags/')
-        uses: crmne/native-packages/.github/actions/attest@dc0cb1586894ca0239c53fd02d4da8064712671c # v0.7.0
+        uses: crmne/native-packages/.github/actions/attest@999768410cf53cdc68c8679c09cb14de1a6bca7b # v0.8.1
         with:
           subject-path: |
             dist/*.tar.gz
@@ -240,7 +240,7 @@ jobs:
         with:
           ruby-version: '4.0'
       - name: Install native packaging
-        run: gem install native-packages --version 0.7.0 --no-document
+        run: gem install native-packages --version 0.8.1 --no-document
 
       - name: Sign and notarize the universal binary
         run: |
@@ -269,7 +269,7 @@ jobs:
 
       - name: Attest macOS packages
         if: startsWith(github.ref, 'refs/tags/')
-        uses: crmne/native-packages/.github/actions/attest@dc0cb1586894ca0239c53fd02d4da8064712671c # v0.7.0
+        uses: crmne/native-packages/.github/actions/attest@999768410cf53cdc68c8679c09cb14de1a6bca7b # v0.8.1
         with:
           subject-path: |
             dist/*.tar.gz
@@ -320,7 +320,7 @@ jobs:
         env:
           CWW_UPDATE_SIGNING_KEY: ${{ secrets.CWW_UPDATE_SIGNING_KEY }}
         run: |
-          gem install native-packages --version 0.7.0 --no-document
+          gem install native-packages --version 0.8.1 --no-document
           native-packages sign-checksums dist/checksums.txt \
             --public-key app/assets/update-public-key.hex \
             --key-env CWW_UPDATE_SIGNING_KEY

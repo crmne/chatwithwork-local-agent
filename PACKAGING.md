@@ -37,13 +37,13 @@ Linux binaries are static (musl), so one build per architecture runs on every di
 
 `release.yml` checks the tag matches `Cargo.toml` and is on `main`, builds every target, signs what it has credentials for, attests the archives (`gh attestation verify <file> --repo crmne/chatwithwork-local-agent`), and publishes the release with `checksums.txt` and the installers. Tags with a `-` (`v1.2.0-beta.1`) become draft prereleases and skip the package managers.
 
-For a stable tag, `packaging.yml` then runs the shared [native-packages](https://github.com/crmne/native-packages/tree/v0.7.0) workflow: it downloads the Linux archives, verifies them against `checksums.txt`, builds and attaches the `.deb` and `.rpm` files, renders every recipe with the published checksums, and pushes the AUR and Homebrew ones when enabled. The rendered recipes are attached as `chatwithwork-local-agent-X.Y.Z-packaging.tar.xz`.
+For a stable tag, `packaging.yml` then runs the shared [native-packages](https://github.com/crmne/native-packages/tree/v0.8.1) workflow: it downloads the Linux archives, verifies them against `checksums.txt`, builds and attaches the `.deb` and `.rpm` files, renders every recipe with the published checksums, and pushes the AUR and Homebrew ones when enabled. The rendered recipes are attached as `chatwithwork-local-agent-X.Y.Z-packaging.tar.xz`.
 
 ### Trying changes before a tag
 
 - `gh workflow run release.yml` builds and signs everything, uploading the files as workflow artifacts without publishing.
 - Any push or PR that touches packaging runs `packaging.yml` against the commit: static builds, `.deb`/`.rpm`, all recipes (with stand-ins for the macOS and Windows assets), and install tests on Ubuntu 24.04, Debian 12 and 13, Fedora 41 and latest, and Rocky 9, on amd64 and arm64.
-- Locally, with `gem install native-packages --version 0.7.0`, nFPM 2.47.0 and `bsdtar`:
+- Locally, with `gem install native-packages --version 0.8.1`, nFPM 2.47.0 and `bsdtar`:
 
   ```sh
   native-packages validate

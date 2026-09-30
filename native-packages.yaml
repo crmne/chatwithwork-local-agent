@@ -1,9 +1,9 @@
-# Shared CLI: gem install native-packages --version 0.7.0
+# Shared CLI: gem install native-packages --version 0.8.1
 # See PACKAGING.md.
 ---
 schema: 1
 tool:
-  version: 0.7.0
+  version: 0.8.1
   nfpm: 2.47.0
 nfpm:
   name: chatwithwork-local-agent
