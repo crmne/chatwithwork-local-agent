@@ -225,13 +225,29 @@ fn chats_section(
     frame.render_widget(Paragraph::new(search), row(area, 1));
     hits.add(row(area, 1), Hit::Search);
 
-    let body = below(area, 3);
+    let mut body = below(area, 3);
+    // The projects, under the chats, as the web pins them under Recent.
+    let projects = &pane.list.projects;
+    if pane.search.is_none() && !projects.is_empty() && body.height >= 8 {
+        let height = (projects.len() as u16).min(body.height / 3).max(1) + 2;
+        let at = Rect {
+            y: body.bottom() - height,
+            height,
+            ..body
+        };
+        body.height -= height;
+        projects_section(frame, at, app, focused, theme, hits);
+    }
     // Rows, what clicking each does, and which of them is the selection.
     let mut rows: Vec<Line<'static>> = Vec::new();
     let mut targets: Vec<Option<Hit>> = Vec::new();
     let mut selected_row = 0;
-    if pane.list.chats.is_empty() {
-        rows.push(Line::styled(" No chats yet", theme.faint()));
+    if pane.search.is_none() && pane.visible().is_empty() {
+        let text = match pane.filter_project() {
+            Some(project) => format!(" No chats in {} yet", project.name),
+            None => " No chats yet".into(),
+        };
+        rows.push(Line::styled(ellipsize(&text, width), theme.faint()));
         targets.push(None);
     }
     let mut group = "";
@@ -272,6 +288,66 @@ fn chats_section(
     }
     let shown: Vec<Line> = rows.into_iter().skip(start).take(height).collect();
     frame.render_widget(Paragraph::new(shown), body);
+}
+
+/// The projects: picking one shows its chats and starts a new chat in it;
+/// picking it again shows every chat.
+fn projects_section(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    focused: bool,
+    theme: &Theme,
+    hits: &mut Hits,
+) {
+    let pane = &app.chat;
+    frame.render_widget(
+        Paragraph::new(Line::styled(" PROJECTS", theme.micro())),
+        row(area, 1),
+    );
+    let rows = below(area, 2);
+    let first = pane.side_items().len() - pane.list.projects.len();
+    let height = rows.height as usize;
+    let selected = pane.selected.checked_sub(first);
+    let start = selected.map_or(0, |s| (s + 1).saturating_sub(height));
+    let width = area.width as usize;
+    for (slot, (i, project)) in pane
+        .list
+        .projects
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .enumerate()
+    {
+        let here = selected == Some(i) && focused;
+        let active = pane.filter == Some(project.id);
+        let marker = if here {
+            Span::styled("▌", theme.ink())
+        } else {
+            Span::raw(" ")
+        };
+        let style = if active {
+            theme.strong()
+        } else {
+            theme.muted()
+        };
+        let mut spans = vec![
+            marker,
+            Span::raw(" "),
+            Span::styled(ellipsize(&project.name, width.saturating_sub(5)), style),
+        ];
+        if active {
+            spans = spread(spans, vec![Span::styled("× ", theme.faint())], area.width).spans;
+        }
+        let mut line = Line::from(spans);
+        if here {
+            line = line.patch_style(theme.selected());
+        }
+        let at = row(rows, slot as u16);
+        frame.render_widget(Paragraph::new(line), at);
+        hits.add(at, Hit::Project(project.id));
+    }
 }
 
 /// A chat in the list. One that's being answered gets the live dot, and

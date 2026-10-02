@@ -2585,3 +2585,69 @@ fn thinking_shimmers_in_grey_rather_than_the_rainbow() {
     let screen = render_to_string(&app, 100, 30);
     assert!(screen.contains("Writing"), "{screen}");
 }
+
+#[test]
+fn snapshot_a_project_from_the_sidebar() {
+    let mut app = app();
+    chats_ready(&mut app);
+    for _ in 0..6 {
+        app.update(key(KeyCode::Down));
+    }
+    assert_eq!(
+        app.chat.side_items()[app.chat.selected],
+        SideItem::Project(3)
+    );
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.chat.filter, Some(3));
+    assert_eq!(app.chat.project.as_ref().map(|p| p.id), Some(3));
+    assert_eq!(app.chat.visible().len(), 1, "the project's chats");
+    assert_eq!(app.focus, Focus::Composer, "a new chat in it");
+    assert_snapshot("chat_project", &app);
+    type_text(&mut app, "Plan?");
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Send {
+        chat: None,
+        text: "Plan?".into(),
+        model: None,
+        project: Some(3),
+        attachments: vec![],
+    })));
+
+    // Picked again, every chat shows again.
+    let mut app = self::app();
+    chats_ready(&mut app);
+    let (x, y) = find(&app, "   Falcon");
+    click(&mut app, x + 3, y);
+    assert_eq!(app.chat.filter, Some(3));
+    let (x, y) = find(&app, "   Falcon");
+    click(&mut app, x + 3, y);
+    assert_eq!(app.chat.filter, None);
+    assert_eq!(app.chat.project, None);
+    assert_eq!(app.chat.visible().len(), 5);
+}
+
+#[test]
+fn the_list_keeps_its_selection_as_chats_come_and_go() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(key(KeyCode::Down));
+    app.update(key(KeyCode::Down));
+    assert_eq!(app.chat.selected_chat().map(|c| c.number), Some(40));
+    // A newer chat goes on top; the selection stays on the same chat.
+    app.chat
+        .upsert_chat(summary(50, "Fresh", "2026-09-25T08:19:00Z"));
+    assert_eq!(app.chat.list.chats[0].number, 50);
+    assert_eq!(app.chat.selected_chat().map(|c| c.number), Some(40));
+    // A renamed chat is replaced where its time puts it.
+    app.chat.upsert_chat(summary(
+        31,
+        "Vendor contracts, signed",
+        "2026-09-25T08:19:30Z",
+    ));
+    assert_eq!(app.chat.list.chats[0].title, "Vendor contracts, signed");
+    assert_eq!(app.chat.list.chats.len(), 6);
+    assert_eq!(app.chat.selected_chat().map(|c| c.number), Some(40));
+    app.chat.remove_chat(40);
+    assert!(app.chat.selected_chat().is_some(), "still on a row");
+    assert!(app.chat.list.chats.iter().all(|c| c.number != 40));
+}

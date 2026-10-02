@@ -24,7 +24,7 @@
                                │
                                │ ╭────────────────────────────────────────────────────────────────╮
                                │ │ ❯ /re                                                          │
-                               │ │ ▌/resume [search]      Pick a recent chat                      │
-                               │ │  /retry                Answer the last question again          │
+  PROJECTS                     │ │ ▌/resume [search]      Pick a recent chat                      │
+   Falcon                      │ │  /retry                Answer the last question again          │
                                │ │  /rename [title]       Rename this chat                        │
   C  Carmine                   │ ╰───────────────────────────────────────────── Gemini 3.8 Flash ─╯

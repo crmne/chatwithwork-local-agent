@@ -534,10 +534,13 @@ pub enum Following {
 pub struct ChatPane {
     pub access: Access,
     pub list: ChatList,
-    /// 0 is "New chat", then the chats the search leaves, in order.
+    /// The selected row of the sidebar, in [`ChatPane::side_items`]: 0 is
+    /// "New chat", then the chats the search leaves, then the projects.
     pub selected: usize,
     /// What's typed after `/`, while searching.
     pub search: Option<String>,
+    /// The project whose chats the sidebar shows, picked in its list.
+    pub filter: Option<u64>,
     /// The open chat; `None` is a new one.
     pub open: Option<u64>,
     pub transcript: Option<Transcript>,
@@ -593,6 +596,7 @@ impl Default for ChatPane {
             list: ChatList::default(),
             selected: 0,
             search: None,
+            filter: None,
             open: None,
             transcript: None,
             loading: false,
@@ -621,6 +625,22 @@ impl Default for ChatPane {
             scroll: 0,
             show_steps: false,
         }
+    }
+}
+
+/// A row of the sidebar that can be selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideItem {
+    NewChat,
+    Chat(u64),
+    Project(u64),
+}
+
+/// Whether `a` was updated after `b`, both RFC 3339.
+fn newer(a: &str, b: &str) -> bool {
+    match (parse_ts(a), parse_ts(b)) {
+        (Some(a), Some(b)) => a > b,
+        _ => a > b,
     }
 }
 
@@ -773,6 +793,8 @@ pub enum Hit {
     /// The chat list, for the wheel.
     Chats,
     Root(usize),
+    /// A project in the sidebar: its chats, and a new chat in it.
+    Project(u64),
     Composer,
     /// A row of the slash command list.
     Menu(usize),
@@ -812,35 +834,115 @@ impl ChatPane {
         self.access == Access::Ready
     }
 
-    /// The chats the search leaves, newest first.
+    /// The chats the search and the project picked leave, newest first.
     pub fn visible(&self) -> Vec<&ChatSummary> {
         let query = self
             .search
             .as_deref()
             .map(|q| q.trim().trim_start_matches('#').to_lowercase())
             .filter(|q| !q.is_empty());
-        match query {
-            None => self.list.chats.iter().collect(),
-            Some(query) => self
-                .list
-                .chats
-                .iter()
-                .filter(|chat| {
-                    chat.title.to_lowercase().contains(&query)
-                        || chat.number.to_string() == query
+        self.list
+            .chats
+            .iter()
+            .filter(|chat| {
+                self.filter
+                    .is_none_or(|id| chat.project.as_ref().is_some_and(|p| p.id == id))
+            })
+            .filter(|chat| match &query {
+                None => true,
+                Some(query) => {
+                    chat.title.to_lowercase().contains(query)
+                        || chat.number.to_string() == *query
                         || chat
                             .project
                             .as_ref()
-                            .is_some_and(|p| p.name.to_lowercase().contains(&query))
-                })
-                .collect(),
+                            .is_some_and(|p| p.name.to_lowercase().contains(query))
+                }
+            })
+            .collect()
+    }
+
+    /// The sidebar's rows that can be selected, in order: "New chat", the
+    /// chats it shows, then the projects (not while searching).
+    pub fn side_items(&self) -> Vec<SideItem> {
+        let mut items = vec![SideItem::NewChat];
+        items.extend(self.visible().iter().map(|c| SideItem::Chat(c.number)));
+        if self.search.is_none() {
+            items.extend(self.list.projects.iter().map(|p| SideItem::Project(p.id)));
+        }
+        items
+    }
+
+    /// The selected chat, unless something else is selected.
+    pub fn selected_chat(&self) -> Option<&ChatSummary> {
+        match self.side_items().get(self.selected)? {
+            SideItem::Chat(number) => self.list.chats.iter().find(|c| c.number == *number),
+            _ => None,
         }
     }
 
-    /// The selected chat, unless "New chat" is selected.
-    pub fn selected_chat(&self) -> Option<&ChatSummary> {
-        let index = self.selected.checked_sub(1)?;
-        self.visible().get(index).copied()
+    /// The project the sidebar shows the chats of.
+    pub fn filter_project(&self) -> Option<&Project> {
+        let id = self.filter?;
+        self.list.projects.iter().find(|p| p.id == id)
+    }
+
+    /// Change the list, keeping the same row selected where it's still
+    /// there. Live updates and reads of the list go through here.
+    fn keep_selection(&mut self, change: impl FnOnce(&mut Self)) {
+        let before = self.side_items().get(self.selected).copied();
+        change(self);
+        let items = self.side_items();
+        self.selected = before
+            .and_then(|item| items.iter().position(|i| *i == item))
+            .unwrap_or(self.selected)
+            .min(items.len() - 1);
+    }
+
+    /// The whole list, as read.
+    pub fn set_list(&mut self, list: ChatList) {
+        self.keep_selection(|pane| {
+            pane.list = list;
+            if pane.filter_project().is_none() {
+                pane.filter = None;
+            }
+        });
+    }
+
+    /// A chat as the server last sent it: new ones go in, others are
+    /// replaced, and the list stays newest first.
+    pub fn upsert_chat(&mut self, chat: ChatSummary) {
+        self.keep_selection(|pane| {
+            let chats = &mut pane.list.chats;
+            chats.retain(|c| c.number != chat.number);
+            let at = chats
+                .iter()
+                .position(|c| newer(&chat.updated_at, &c.updated_at))
+                .unwrap_or(chats.len());
+            chats.insert(at, chat.clone());
+            if let Some(transcript) = pane
+                .transcript
+                .as_mut()
+                .filter(|t| t.chat.number == chat.number)
+            {
+                transcript.chat = chat;
+            }
+        });
+    }
+
+    /// A chat that's gone from the list.
+    pub fn remove_chat(&mut self, number: u64) {
+        self.keep_selection(|pane| pane.list.chats.retain(|c| c.number != number));
+    }
+
+    /// The projects, as the server last listed them.
+    pub fn set_projects(&mut self, projects: Vec<Project>) {
+        self.keep_selection(|pane| {
+            pane.list.projects = projects;
+            if pane.filter_project().is_none() {
+                pane.filter = None;
+            }
+        });
     }
 
     /// The open chat, as last read or listed.
@@ -1757,6 +1859,7 @@ impl App {
         match cmd {
             Cmd::New => {
                 self.chat.project = None;
+                self.chat.filter = None;
                 return self.new_chat();
             }
             Cmd::Resume => self.open_picker(PickerKind::Chats, args),
@@ -2516,9 +2619,8 @@ impl App {
                 self.scroll_transcript(-delta * 3);
             }
             Some(Hit::Log) => self.scroll_log(-delta * 3),
-            Some(Hit::Chats | Hit::Chat(_) | Hit::NewChat) => {
-                let len = self.chat.visible().len() + 1;
-                self.chat.selected = self.chat.selected.saturating_add_signed(delta).min(len - 1);
+            Some(Hit::Chats | Hit::Chat(_) | Hit::NewChat | Hit::Project(_)) => {
+                self.move_selection(delta);
             }
             Some(Hit::Root(_)) => self.move_root(delta),
             Some(Hit::Menu(_)) => {
@@ -2567,6 +2669,10 @@ impl App {
                 self.chat.search = None;
                 self.select_chat(number);
                 return self.open_chat(number);
+            }
+            Hit::Project(id) => {
+                self.chat.search = None;
+                return self.pick_filter(id);
             }
             Hit::Root(i) => self.selected_root = i,
             Hit::Composer if self.chat.ready() => self.focus = Focus::Composer,
@@ -2622,8 +2728,7 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        // "New chat" comes first.
-        let len = self.chat.visible().len() + 1;
+        let len = self.chat.side_items().len();
         self.chat.selected = self.chat.selected.saturating_add_signed(delta).min(len - 1);
     }
 
@@ -2632,10 +2737,35 @@ impl App {
     }
 
     fn open_selected(&mut self) -> Vec<Effect> {
-        match self.chat.selected_chat().map(|c| c.number) {
-            Some(number) => self.open_chat(number),
-            None => self.new_chat(),
+        match self.chat.side_items().get(self.chat.selected).copied() {
+            Some(SideItem::Chat(number)) => self.open_chat(number),
+            Some(SideItem::Project(id)) => self.pick_filter(id),
+            _ => self.new_chat(),
         }
+    }
+
+    /// A project in the sidebar: show its chats and start a new chat in
+    /// it, as the web's project page does; again, back to every chat.
+    fn pick_filter(&mut self, id: u64) -> Vec<Effect> {
+        if self.chat.filter == Some(id) {
+            self.chat.keep_selection(|pane| pane.filter = None);
+            if self.chat.open.is_none() {
+                self.chat.project = None;
+            }
+            return Vec::new();
+        }
+        self.chat.keep_selection(|pane| pane.filter = Some(id));
+        let effects = self.new_chat();
+        // Back on the project's row, to pick one of its chats next.
+        if let Some(at) = self
+            .chat
+            .side_items()
+            .iter()
+            .position(|i| *i == SideItem::Project(id))
+        {
+            self.chat.selected = at;
+        }
+        effects
     }
 
     /// Show a chat, read it, and follow it live.
@@ -2684,6 +2814,9 @@ impl App {
         chat.stopping = false;
         chat.following = Following::No;
         chat.selected = 0;
+        if let Some(project) = chat.filter_project().cloned() {
+            chat.project = Some(project);
+        }
         chat.picker = None;
         chat.reason = false;
         chat.deciding = false;
@@ -2700,8 +2833,13 @@ impl App {
 
     /// Point the sidebar at `number`, outside any search.
     fn select_chat(&mut self, number: u64) {
-        if let Some(i) = self.chat.visible().iter().position(|c| c.number == number) {
-            self.chat.selected = i + 1;
+        if let Some(i) = self
+            .chat
+            .side_items()
+            .iter()
+            .position(|item| *item == SideItem::Chat(number))
+        {
+            self.chat.selected = i;
         }
     }
 
@@ -3003,9 +3141,7 @@ impl App {
             ChatMsg::Listed(Ok(list)) => {
                 let was_ready = self.chat.ready();
                 self.chat.access = Access::Ready;
-                self.chat.list = list;
-                let len = self.chat.visible().len();
-                self.chat.selected = self.chat.selected.min(len);
+                self.chat.set_list(list);
                 // Chats are back (allowed again, say): follow the open one
                 // again, unless that's already underway. A list that works
                 // after a refusal leaves it be: the refusal was about the
@@ -3058,8 +3194,7 @@ impl App {
                 match result {
                     Ok(summary) => {
                         let number = summary.number;
-                        self.chat.list.chats.retain(|c| c.number != number);
-                        self.chat.list.chats.insert(0, summary);
+                        self.chat.upsert_chat(summary);
                         let mut effects = vec![Effect::Chat(ChatCommand::List)];
                         if chat.is_none() && self.chat.open.is_none() {
                             // The first question made the chat: follow it,
@@ -3073,7 +3208,7 @@ impl App {
                             self.chat.open = Some(number);
                             self.chat.following = Following::Starting;
                             self.chat.loading = true;
-                            self.chat.selected = 1;
+                            self.select_chat(number);
                             effects.push(Effect::Chat(ChatCommand::Follow(Some(number))));
                             effects.push(Effect::Chat(ChatCommand::Open(number)));
                         } else {
@@ -3259,8 +3394,7 @@ impl App {
         match (action, acted) {
             (ChatAction::Branch, Acted::Chat(branch)) => {
                 let number = branch.number;
-                self.chat.list.chats.retain(|c| c.number != number);
-                self.chat.list.chats.insert(0, branch);
+                self.chat.upsert_chat(branch);
                 self.notice(Signal::Positive, "Branched into a new chat.");
                 self.select_chat(number);
                 let mut effects = self.open_chat(number);
@@ -3276,9 +3410,7 @@ impl App {
                     .find(|c| c.number == chat)
                     .map(|c| c.title.clone())
                     .unwrap_or_else(|| format!("#{chat}"));
-                self.chat.list.chats.retain(|c| c.number != chat);
-                let len = self.chat.visible().len();
-                self.chat.selected = self.chat.selected.min(len);
+                self.chat.remove_chat(chat);
                 self.notice(Signal::Positive, &format!("Deleted {title}."));
                 if self.chat.open == Some(chat) {
                     return self.new_chat();
