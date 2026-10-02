@@ -32,6 +32,8 @@ struct State {
     /// Chats asked to stop.
     cancelled: HashSet<u64>,
     next_id: u64,
+    /// Files uploaded for questions, by `signed_id`.
+    uploads: Vec<Value>,
 }
 
 struct Demo {
@@ -115,6 +117,7 @@ fn fresh() -> State {
         streaming: HashSet::new(),
         cancelled: HashSet::new(),
         next_id: 1000,
+        uploads: Vec::new(),
     }
 }
 
@@ -217,6 +220,7 @@ fn sample() -> State {
         streaming: HashSet::new(),
         cancelled: HashSet::new(),
         next_id: 1000,
+        uploads: Vec::new(),
     }
 }
 
@@ -320,9 +324,10 @@ impl Demo {
                 });
                 json!({ "ok": true })
             }
-            "chats" | "chat" | "chat_send" | "chat_cancel" | "chat_access" => {
-                self.chat_request(cmd, request)
-            }
+            "chats" | "chat" | "chat_send" | "chat_cancel" | "chat_access" | "models"
+            | "chat_upload" | "chat_approve" | "chat_deny" | "chat_answer" | "chat_decline"
+            | "chat_retry" | "chat_branch" | "chat_rename" | "chat_delete" | "chat_share"
+            | "chat_unshare" => self.chat_request(cmd, request),
             "deny" => deny(),
             "audit_tail" => {
                 let n = request["lines"].as_u64().unwrap_or(50) as usize;
@@ -443,12 +448,65 @@ impl Demo {
                         "chat": chat.summary,
                         "locked_reason": null,
                         "entries": chat.entries,
+                        "approvals": chat.approvals,
+                        "questions": chat.questions,
                     }),
                     None => json!({ "ok": false, "code": "not_found", "error": "No such chat" }),
                 }
             }
+            "models" => {
+                let mut models = chats::models();
+                models["ok"] = json!(true);
+                models
+            }
+            "chat_upload" => self.upload(request),
+            "chat_approve" | "chat_deny" | "chat_answer" | "chat_decline" => {
+                let Some(number) = number else {
+                    return json!({ "ok": false, "code": "bad_request", "error": "No chat" });
+                };
+                self.decide(cmd, number, request)
+            }
+            "chat_retry" | "chat_branch" | "chat_rename" | "chat_delete" | "chat_share"
+            | "chat_unshare" => {
+                let Some(number) = number else {
+                    return json!({ "ok": false, "code": "bad_request", "error": "No chat" });
+                };
+                self.act(cmd, number, request)
+            }
             "chat_send" => {
                 let text = request["text"].as_str().unwrap_or_default().to_string();
+                if let Some(model) = request["model"].as_str() {
+                    let models = chats::models();
+                    let found = models["models"]
+                        .as_array()
+                        .and_then(|m| m.iter().find(|m| model_id(m) == model).cloned());
+                    match found {
+                        Some(m) if m["selectable"] == json!(false) => {
+                            return json!({ "ok": false, "code": "model_unavailable", "error": m["reason"] });
+                        }
+                        None => {
+                            return json!({ "ok": false, "code": "model_unavailable",
+                                           "error": "That model isn't available. Pick another one." });
+                        }
+                        Some(_) => {}
+                    }
+                }
+                let model = request["model"].as_str().and_then(|id| {
+                    chats::models()["models"]
+                        .as_array()
+                        .and_then(|m| m.iter().find(|m| model_id(m) == id).cloned())
+                        .map(|m| json!({ "id": m["id"], "name": m["name"] }))
+                });
+                let attachments: Vec<Value> = {
+                    let state = self.state.lock().expect("demo lock");
+                    request["attachments"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|id| state.uploads.iter().find(|u| u["signed_id"] == *id))
+                        .map(|u| json!({ "filename": u["filename"], "byte_size": u["byte_size"], "content_type": u["content_type"] }))
+                        .collect()
+                };
                 let (number, summary) = {
                     let mut state = self.state.lock().expect("demo lock");
                     let id = state.next_id;
@@ -465,14 +523,10 @@ impl Demo {
                                 + 1;
                             state.chats.insert(
                                 0,
-                                chats::Chat {
-                                    summary: json!({
-                                        "number": n, "title": chats::title_for(&text), "state": "idle",
-                                        "project": null, "mine": true, "updated_at": ago(0),
-                                        "url": format!("https://chatwithwork.com/northwind/chats/{n}"),
-                                    }),
-                                    entries: Vec::new(),
-                                },
+                                chats::Chat::new(
+                                    chats::summary(n, &chats::title_for(&text), "idle", ago(0)),
+                                    Vec::new(),
+                                ),
                             );
                             n
                         }
@@ -487,8 +541,16 @@ impl Demo {
                     if chat.summary["state"] == "processing" {
                         return json!({ "ok": false, "code": "chat_busy", "error": "An answer is being written in this chat." });
                     }
-                    chat.entries
-                        .push(json!({ "kind": "user", "id": id, "content": text }));
+                    let mut entry = json!({ "kind": "user", "id": id, "content": text });
+                    if !attachments.is_empty() {
+                        entry["attachments"] = json!(attachments);
+                    }
+                    chat.entries.push(entry);
+                    if let Some(model) = model {
+                        chat.summary["model"] = model;
+                    }
+                    chat.approvals.clear();
+                    chat.questions.clear();
                     chat.summary["state"] = json!("processing");
                     chat.summary["updated_at"] = json!(ago(0));
                     (number, chat.summary.clone())
@@ -516,6 +578,241 @@ impl Demo {
                 json!({ "ok": true })
             }
             _ => json!({ "ok": true, "granted": true, "requested": false }),
+        }
+    }
+
+    /// `chat_upload`: what the server takes, refused with its sentences.
+    fn upload(&self, request: &Value) -> Value {
+        let name = request["filename"].as_str().unwrap_or_default().to_string();
+        if name.is_empty() {
+            return json!({ "ok": false, "code": "attachment_refused", "error": "Choose a file to attach" });
+        }
+        let lower = name.to_lowercase();
+        if [".svg", ".svgz", ".swf"].iter().any(|e| lower.ends_with(e)) {
+            return json!({ "ok": false, "code": "attachment_refused", "error": format!("{name} has a blocked file type") });
+        }
+        if lower.ends_with(".exe") {
+            return json!({ "ok": false, "code": "attachment_refused", "error": format!("{name} is not a supported file type") });
+        }
+        let size = request["data"].as_str().map_or(0, |d| d.len() * 3 / 4);
+        let mut state = self.state.lock().expect("demo lock");
+        let n = state.uploads.len() + 1;
+        let uploaded = json!({
+            "signed_id": format!("demo-upload-{n}"),
+            "filename": name,
+            "byte_size": size,
+            "content_type": request["content_type"].as_str().unwrap_or("application/octet-stream"),
+        });
+        state.uploads.push(uploaded.clone());
+        let mut answer = uploaded;
+        answer["ok"] = json!(true);
+        answer
+    }
+
+    /// Approve, deny, answer or decline what chat `number` waits for: the
+    /// step settles and the answer carries on.
+    fn decide(self: &Arc<Self>, cmd: &str, number: u64, request: &Value) -> Value {
+        let tool_call = request["tool_call"]
+            .as_str()
+            .and_then(|t| t.parse::<u64>().ok());
+        let reply = {
+            let mut state = self.state.lock().expect("demo lock");
+            let Some(chat) = state
+                .chats
+                .iter_mut()
+                .find(|c| c.summary["number"] == json!(number))
+            else {
+                return json!({ "ok": false, "code": "not_found", "error": "No such chat" });
+            };
+            let approval = matches!(cmd, "chat_approve" | "chat_deny");
+            let list = if approval {
+                &mut chat.approvals
+            } else {
+                &mut chat.questions
+            };
+            let Some(at) = list.iter().position(|a| a["id"].as_u64() == tool_call) else {
+                return json!({ "ok": false, "code": "not_found", "error": "Nothing waits for that here." });
+            };
+            if cmd == "chat_answer" {
+                let question = &list[at];
+                let input = &request["input"];
+                for field in question["fields"].as_array().into_iter().flatten() {
+                    let value = &input[field["name"].as_str().unwrap_or_default()];
+                    let missing = value.is_null() || value == &json!("");
+                    if field["required"] == json!(true) && missing {
+                        let title = field["title"].as_str().unwrap_or_default();
+                        return json!({ "ok": false, "code": "invalid", "error": format!("{title} is needed.") });
+                    }
+                }
+            }
+            list.remove(at);
+            for entry in &mut chat.entries {
+                for step in entry["steps"].as_array_mut().into_iter().flatten() {
+                    if step["waiting"] == json!(true) {
+                        step["waiting"] = json!(false);
+                    }
+                }
+            }
+            chat.summary["state"] = json!("processing");
+            chat.summary["updated_at"] = json!(ago(0));
+            match cmd {
+                "chat_approve" => "Posted to #launch. The team can see it now.".to_string(),
+                "chat_deny" => match request["reason"].as_str() {
+                    Some(reason) => format!("I didn't post it. You said: {reason}"),
+                    None => "I didn't post it.".to_string(),
+                },
+                "chat_decline" => "Understood, I'll leave it there.".to_string(),
+                _ => "Thanks, carrying on with that.".to_string(),
+            }
+        };
+        let summary = self.summary_of(number);
+        self.changed(number);
+        let id = {
+            let mut state = self.state.lock().expect("demo lock");
+            state.next_id += 10;
+            state.next_id
+        };
+        if !self.state.lock().expect("demo lock").held {
+            self.stream(
+                number,
+                vec![(
+                    Duration::from_millis(600),
+                    chats::Step::Finish { id, content: reply },
+                )],
+            );
+        }
+        json!({ "ok": true, "chat": summary })
+    }
+
+    fn summary_of(&self, number: u64) -> Value {
+        let state = self.state.lock().expect("demo lock");
+        state
+            .chats
+            .iter()
+            .find(|c| c.summary["number"] == json!(number))
+            .map(|c| c.summary.clone())
+            .unwrap_or(Value::Null)
+    }
+
+    /// Retry, branch, rename, delete, share or stop sharing chat `number`.
+    fn act(self: &Arc<Self>, cmd: &str, number: u64, request: &Value) -> Value {
+        let message = request["message"]
+            .as_str()
+            .and_then(|m| m.parse::<u64>().ok());
+        let mut state = self.state.lock().expect("demo lock");
+        let Some(at) = state
+            .chats
+            .iter()
+            .position(|c| c.summary["number"] == json!(number))
+        else {
+            return json!({ "ok": false, "code": "not_found", "error": "No such chat" });
+        };
+        let can = |what: &str| state.chats[at].summary["can"][what] == json!(true);
+        let forbidden = |what: &str| {
+            json!({ "ok": false, "code": "forbidden",
+            "error": format!("Only the person who started a chat can {what} it.") })
+        };
+        match cmd {
+            "chat_retry" => {
+                if !can("retry") {
+                    return json!({ "ok": false, "code": "forbidden",
+                        "error": "Only the person who asked can retry this. Ask again to use your own sources." });
+                }
+                let chat = &mut state.chats[at];
+                if chat.summary["state"] == "processing" {
+                    return json!({ "ok": false, "code": "chat_busy", "error": "Hold on, I'm still working on the current reply." });
+                }
+                // Everything after the question goes.
+                let keep = match message
+                    .and_then(|m| chat.entries.iter().position(|e| e["id"] == json!(m)))
+                {
+                    Some(i) if chat.entries[i]["kind"] == "user" => i + 1,
+                    Some(i) => chat.entries[..i]
+                        .iter()
+                        .rposition(|e| e["kind"] == "user")
+                        .map_or(0, |u| u + 1),
+                    None => chat
+                        .entries
+                        .iter()
+                        .rposition(|e| e["kind"] == "user")
+                        .map_or(0, |u| u + 1),
+                };
+                chat.entries.truncate(keep);
+                chat.approvals.clear();
+                chat.questions.clear();
+                chat.summary["state"] = json!("processing");
+                let summary = chat.summary.clone();
+                let held = state.held;
+                state.next_id += 10;
+                let id = state.next_id;
+                drop(state);
+                self.changed(number);
+                if !held {
+                    self.stream(number, chats::canned_stream(id + 1, id + 2));
+                }
+                json!({ "ok": true, "chat": summary })
+            }
+            "chat_branch" => {
+                let chat = &state.chats[at];
+                let upto = message
+                    .and_then(|m| chat.entries.iter().position(|e| e["id"] == json!(m)))
+                    .map_or(chat.entries.len(), |i| i + 1);
+                let entries = chat.entries[..upto].to_vec();
+                let title = format!(
+                    "Branch of {}",
+                    chat.summary["title"].as_str().unwrap_or_default()
+                );
+                let n = state
+                    .chats
+                    .iter()
+                    .filter_map(|c| c.summary["number"].as_u64())
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let summary = chats::summary(n, &title, "idle", ago(0));
+                state
+                    .chats
+                    .insert(0, chats::Chat::new(summary.clone(), entries));
+                drop(state);
+                json!({ "ok": true, "chat": summary })
+            }
+            "chat_rename" => {
+                if !can("rename") {
+                    return forbidden("change");
+                }
+                let title = request["title"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if title.is_empty() {
+                    return json!({ "ok": false, "code": "invalid", "error": "Give the chat a title" });
+                }
+                state.chats[at].summary["title"] = json!(title);
+                let summary = state.chats[at].summary.clone();
+                drop(state);
+                self.changed(number);
+                json!({ "ok": true, "chat": summary })
+            }
+            "chat_delete" => {
+                if !can("delete") {
+                    return forbidden("change");
+                }
+                state.chats.remove(at);
+                json!({ "ok": true })
+            }
+            "chat_share" => {
+                if !can("share") {
+                    return forbidden("share");
+                }
+                let link = json!({ "url": chats::SHARE_URL, "expires_at": chats::expires() });
+                state.chats[at].summary["share"] = link.clone();
+                json!({ "ok": true, "url": link["url"], "expires_at": link["expires_at"], "chat": state.chats[at].summary })
+            }
+            _ => {
+                state.chats[at].summary["share"] = Value::Null;
+                json!({ "ok": true, "chat": state.chats[at].summary })
+            }
         }
     }
 
@@ -728,6 +1025,14 @@ impl Demo {
                 }
             }
         }
+    }
+}
+
+/// A model's ID as the control API passes it: a string.
+fn model_id(model: &Value) -> String {
+    match &model["id"] {
+        Value::String(id) => id.clone(),
+        other => other.to_string(),
     }
 }
 

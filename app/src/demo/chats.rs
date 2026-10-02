@@ -85,17 +85,70 @@ const CANNED: [&str; 4] = [
     "Want me to draft the next review's agenda?",
 ];
 
-fn summary(number: u64, title: &str, state: &str, updated_at: String) -> Value {
+/// The default model, as chats name it.
+pub fn default_model() -> Value {
+    json!({ "id": 12, "name": "Gemini 3.8 Flash" })
+}
+
+/// Everything the person who started a private chat may do with it.
+pub fn can_all() -> Value {
+    json!({ "retry": true, "branch": true, "rename": true, "delete": true, "share": true })
+}
+
+pub fn summary(number: u64, title: &str, state: &str, updated_at: String) -> Value {
     json!({
         "number": number,
         "title": title,
         "state": state,
         "project": null,
+        "model": default_model(),
         "mine": true,
         "updated_at": updated_at,
         "url": format!("{SERVER}/northwind/chats/{number}"),
+        "share": null,
+        "can": can_all(),
     })
 }
+
+/// A chat in one of Northwind's projects: no public link for it.
+fn in_project(mut chat: Value, project: (u64, &str), mine: bool) -> Value {
+    chat["project"] = json!({ "id": project.0, "name": project.1 });
+    chat["mine"] = json!(mine);
+    chat["can"] =
+        json!({ "retry": mine, "branch": true, "rename": mine, "delete": mine, "share": false });
+    chat
+}
+
+/// The models the composer offers: names made up for the demo, one out of
+/// reach for now.
+pub fn models() -> Value {
+    json!({
+        "default_model_id": 12,
+        "models": [
+            { "id": 12, "name": "Gemini 3.8 Flash", "provider": "vertexai",
+              "description": "Google's latest Flash for documents, tool use, and everyday work",
+              "rate": "About 3 credits per answer", "selectable": true, "reason": null },
+            { "id": 14, "name": "Gemini 3.8 Pro", "provider": "vertexai",
+              "description": "Google's strongest Gemini, for long documents and careful reasoning",
+              "rate": "About 9 credits per answer", "selectable": true, "reason": null },
+            { "id": 15, "name": "GPT-6 Sol", "provider": "azure",
+              "description": "OpenAI's GPT-6 for complex reasoning and multi-step tool use",
+              "rate": "About 12 credits per answer", "selectable": false,
+              "reason": "You're out of credits. Add credits in Settings to keep going." },
+            { "id": 21, "name": "Mistral Large 3", "provider": "hetzner",
+              "description": null, "rate": "Free, 40 answers a day", "selectable": true, "reason": null },
+        ]
+    })
+}
+
+pub const SHARE_URL: &str = "https://chatwithwork.com/shared/9aXk2pQ7mN4rT8vW1yZ3bC5d";
+
+/// A public link's expiry, 30 days on.
+pub fn expires() -> String {
+    (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(30 * 24)).to_string()
+}
+
+const NOTE: &str = "Only {} sees your answer. Never enter a password here; sign in on the service's own page instead.";
 
 fn user(id: u64, content: &str) -> Value {
     json!({ "kind": "user", "id": id, "content": content })
@@ -109,16 +162,31 @@ fn step(summary: &str, files: &[&str]) -> Value {
     json!({ "summary": summary, "pending": false, "files": files })
 }
 
-/// A chat: its summary and its transcript's entries.
+/// A chat: its summary, its transcript's entries, and what it waits for.
 pub struct Chat {
     pub summary: Value,
     pub entries: Vec<Value>,
+    pub approvals: Vec<Value>,
+    pub questions: Vec<Value>,
+}
+
+impl Chat {
+    pub fn new(summary: Value, entries: Vec<Value>) -> Self {
+        Self {
+            summary,
+            entries,
+            approvals: Vec::new(),
+            questions: Vec::new(),
+        }
+    }
 }
 
 pub fn sample() -> Vec<Chat> {
     vec![
         Chat {
             summary: summary(12, "Q3 budget review", "processing", ago(60)),
+            approvals: Vec::new(),
+            questions: Vec::new(),
             entries: vec![
                 user(121, "How did Q3 spending compare with the plan?"),
                 json!({
@@ -136,12 +204,23 @@ pub fn sample() -> Vec<Chat> {
             ],
         },
         Chat {
-            summary: summary(11, "Vendor contract renewal", "idle", ago(120)),
+            summary: {
+                let mut chat = summary(11, "Vendor contract renewal", "idle", ago(120));
+                chat["share"] = json!({ "url": SHARE_URL, "expires_at": expires() });
+                chat
+            },
+            approvals: Vec::new(),
+            questions: Vec::new(),
             entries: vec![
-                user(
-                    111,
-                    "When does the Acme contract renew, and what changed from last year?",
-                ),
+                json!({
+                    "kind": "user", "id": 111,
+                    "content": "When does the Acme contract renew, and what changed from last year?",
+                    "attachments": [
+                        { "filename": "Acme renewal 2026.pdf", "byte_size": 48213, "content_type": "application/pdf" },
+                        { "filename": "Vendor list.xlsx", "byte_size": 18432,
+                          "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                    ],
+                }),
                 json!({
                     "kind": "activity", "id": 112,
                     "title": "Searched Drive and Slack", "details": "3 searches, read 2 files",
@@ -167,7 +246,68 @@ pub fn sample() -> Vec<Chat> {
             ],
         },
         Chat {
-            summary: summary(10, "Falcon launch checklist", "idle", days_ago(1)),
+            summary: summary(5, "Announce the Falcon launch", "idle", ago(30 * 60)),
+            entries: vec![
+                user(51, "Post the launch note to #launch in Slack."),
+                json!({
+                    "kind": "activity", "id": 52,
+                    "title": "Read Drive, waiting to post to Slack", "details": "1 search",
+                    "services": ["Drive", "Slack"], "pending": false,
+                    "steps": [
+                        step("Searched Drive for “Falcon launch note”", &["Falcon launch note.docx"]),
+                        { "summary": "Post a message to #launch", "pending": false, "files": [], "waiting": true },
+                    ],
+                }),
+            ],
+            approvals: vec![json!({
+                "id": 531, "service": "Slack", "effect": "write", "decidable": true,
+                "summary": "Post a message to #launch",
+                "details": [
+                    { "label": "Channel", "value": "#launch" },
+                    { "label": "Message", "value": "Falcon is live! Thanks, everyone: the release notes are in Drive, and the status page is up." },
+                ],
+                "allow_for_rest_of_chat": true,
+            })],
+            questions: Vec::new(),
+        },
+        Chat {
+            summary: summary(4, "Weekly report for leadership", "idle", ago(90 * 60)),
+            entries: vec![
+                user(41, "Build this week's leadership report in Notion."),
+                json!({
+                    "kind": "activity", "id": 42,
+                    "title": "Asked Notion", "details": "1 question",
+                    "services": ["Notion"], "pending": false,
+                    "steps": [{ "summary": "Create a report in Notion", "pending": false, "files": [], "waiting": true }],
+                }),
+            ],
+            approvals: Vec::new(),
+            questions: vec![json!({
+                "id": 432, "service": "Notion", "decidable": true,
+                "message": "Which report should I build?", "kind": "form",
+                "fields": [
+                    { "name": "environment", "title": "Environment", "description": null, "type": "string",
+                      "required": true, "choices": ["staging", "production"], "default": null },
+                    { "name": "days", "title": "Days", "description": "How far back the report looks.",
+                      "type": "integer", "required": false, "choices": null, "default": 7 },
+                    { "name": "sections", "title": "Sections", "description": null, "type": "array",
+                      "required": false, "choices": ["Revenue", "Hiring", "Roadmap"], "default": ["Revenue"] },
+                    { "name": "include_drafts", "title": "Include drafts", "description": null, "type": "boolean",
+                      "required": false, "choices": null, "default": null },
+                    { "name": "recipient", "title": "Send a copy to", "description": null, "type": "string",
+                      "required": false, "choices": null, "default": null },
+                ],
+                "url": null, "host": null, "note": NOTE.replace("{}", "Notion"),
+            })],
+        },
+        Chat {
+            summary: in_project(
+                summary(10, "Falcon launch checklist", "idle", days_ago(1)),
+                (7, "Falcon"),
+                true,
+            ),
+            approvals: Vec::new(),
+            questions: Vec::new(),
             entries: vec![
                 user(101, "What's left on the Falcon launch board?"),
                 json!({
@@ -187,7 +327,28 @@ pub fn sample() -> Vec<Chat> {
             ],
         },
         Chat {
+            summary: summary(3, "Linear issues for Falcon", "idle", days_ago(1)),
+            entries: vec![
+                user(31, "Which Falcon issues are still open in Linear?"),
+                json!({
+                    "kind": "activity", "id": 32,
+                    "title": "Asked Linear", "details": "1 question",
+                    "services": ["Linear"], "pending": false,
+                    "steps": [{ "summary": "Search Linear for “Falcon”", "pending": false, "files": [], "waiting": true }],
+                }),
+            ],
+            approvals: Vec::new(),
+            questions: vec![json!({
+                "id": 332, "service": "Linear", "decidable": true,
+                "message": "Sign in to Linear so it can read your team's issues.", "kind": "url",
+                "fields": [], "url": "https://linear.app/oauth/authorize?client_id=northwind-demo",
+                "host": "linear.app", "note": NOTE.replace("{}", "Linear"),
+            })],
+        },
+        Chat {
             summary: summary(9, "Onboarding plan for new hires", "error", days_ago(1)),
+            approvals: Vec::new(),
+            questions: Vec::new(),
             entries: vec![
                 user(
                     91,
@@ -198,6 +359,8 @@ pub fn sample() -> Vec<Chat> {
         },
         Chat {
             summary: summary(8, "Competitor pricing notes", "idle", days_ago(3)),
+            approvals: Vec::new(),
+            questions: Vec::new(),
             entries: vec![
                 user(81, "Summarize our notes on competitor pricing."),
                 assistant(
@@ -209,6 +372,8 @@ pub fn sample() -> Vec<Chat> {
         },
         Chat {
             summary: summary(7, "Weekly sync summary", "idle", days_ago(6)),
+            approvals: Vec::new(),
+            questions: Vec::new(),
             entries: vec![
                 user(71, "What did we decide in this week's sync?"),
                 assistant(
@@ -219,7 +384,13 @@ pub fn sample() -> Vec<Chat> {
             ],
         },
         Chat {
-            summary: summary(6, "Hiring pipeline status", "idle", days_ago(12)),
+            summary: in_project(
+                summary(6, "Hiring pipeline status", "idle", days_ago(12)),
+                (8, "People"),
+                false,
+            ),
+            approvals: Vec::new(),
+            questions: Vec::new(),
             entries: vec![
                 user(61, "Where are we with the support hires?"),
                 assistant(
