@@ -277,6 +277,7 @@ Run `cww reload` after editing the file. The `cww roots` commands reload the dae
 |---|---|
 | `~/.config/cww/` | `config.toml`, and `secrets.json` if no keychain is available |
 | `~/.local/share/cww/index/` | The search index (`0700`) |
+| `~/.local/share/cww/chat-assets/` | The logos and file-type icons the desktop app's chats show, as the paired server sent them, kept so each is fetched once (`0700`, files `0600`) |
 | `~/.local/state/cww/audit.jsonl` | The audit log (`0600`, rotated at 10 MB, never uploaded) |
 | `~/.local/state/cww/history` | The questions and commands typed in `cww tui`, for `↑` (`0600`, never uploaded) |
 | `$XDG_RUNTIME_DIR/cww/cww.sock` | The control socket for the CLI (`0600`) |

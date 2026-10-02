@@ -205,6 +205,8 @@ pub struct Attached {
     pub content_type: String,
     /// Its `signed_id` once it's uploaded.
     pub signed_id: Option<String>,
+    /// Its file type's icon, as the server names it once it's uploaded.
+    pub icon: Option<cww::tui::chat::Asset>,
 }
 
 /// A dialog over the page, as the web opens one.
@@ -614,6 +616,7 @@ impl ChatState {
                 name,
                 size,
                 signed_id: None,
+                icon: None,
             });
             commands.push(Command::Upload { key, path });
         }
@@ -832,6 +835,7 @@ impl ChatState {
                         attached.size = uploaded.byte_size;
                         attached.content_type = uploaded.content_type;
                         attached.signed_id = Some(uploaded.signed_id);
+                        attached.icon = uploaded.icon;
                     }
                     (Some(at), Err(failure)) => {
                         self.attachments.remove(at);

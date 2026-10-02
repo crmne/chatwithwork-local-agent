@@ -114,13 +114,28 @@ pub fn focus_ring(ui: &Ui, rect: Rect, radius: f32, palette: &Palette) {
     );
 }
 
-/// A service's avatar: a round surface with a hairline and its initial,
-/// cut out from what's behind it (`.avatar-stack__item`).
+/// What an avatar shows: a logo (its name's initial until it's in, or
+/// without one), or one of the web's glyphs.
+#[derive(Debug, Clone, Copy)]
+pub enum Face<'a> {
+    Logo {
+        asset: Option<&'a cww::tui::chat::Asset>,
+        name: &'a str,
+    },
+    Glyph(Icon),
+}
+
+/// A service's avatar: a round surface with a hairline and its logo,
+/// cut out from what's behind it (`.avatar-stack__item`). The logo fills
+/// `fill` of it: 56%, or 62% in a small stack.
+#[allow(clippy::too_many_arguments)]
 pub fn avatar(
     painter: &egui::Painter,
+    images: &Images,
     center: Pos2,
     size: f32,
-    name: &str,
+    fill: f32,
+    face: Face,
     palette: &Palette,
     cutout: Color32,
 ) {
@@ -128,6 +143,28 @@ pub fn avatar(
     painter.circle_filled(center, r + 2.0, cutout);
     painter.circle_filled(center, r, palette.surface);
     painter.circle_stroke(center, r - 0.5, egui::Stroke::new(1.0, palette.line_strong));
+    let inner = size * fill;
+    match face {
+        Face::Glyph(icon) => images.icon_at(painter, center, inner, icon, palette.ink_muted),
+        Face::Logo { asset, name } => {
+            let rect = Rect::from_center_size(center, vec2(inner, inner));
+            if !images.logos.draw(painter, asset, rect, 0.0, palette, 1.0) {
+                initial(painter, center, size, name, palette, 1.0);
+            }
+        }
+    }
+}
+
+/// A name's first letter, in a chip `size` across, where the web shows a
+/// logo that isn't here (yet).
+pub fn initial(
+    painter: &egui::Painter,
+    center: Pos2,
+    size: f32,
+    name: &str,
+    palette: &Palette,
+    opacity: f32,
+) {
     let initial: String = name
         .chars()
         .find(|c| c.is_alphanumeric())
@@ -138,7 +175,11 @@ pub fn avatar(
         painter,
         paint::job(&initial, ty, palette.ink_muted, f32::INFINITY),
     );
-    painter.galley(center - galley.size() / 2.0, galley, palette.ink_muted);
+    painter.galley(
+        center - galley.size() / 2.0,
+        galley,
+        palette.ink_muted.gamma_multiply(opacity),
+    );
 }
 
 /// A screen reader's label for text drawn with the painter.

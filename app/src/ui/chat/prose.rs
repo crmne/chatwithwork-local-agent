@@ -416,18 +416,21 @@ impl Prose<'_> {
                             Stroke::new(1.0, ring),
                             egui::StrokeKind::Middle,
                         );
-                        let icon = self
-                            .sources
-                            .get(*source)
-                            .map_or(Icon::FileText, source_icon);
-                        let tint = tokens::lerp_rgb(p.ink_faint, p.ink_muted, hover);
-                        self.images.icon_at(
+                        let found = self.sources.get(*source);
+                        let icon_center = pos2(r.left() + 3.85 + 6.05, r.center().y);
+                        if !self.images.logos.draw(
                             ui.painter(),
-                            pos2(r.left() + 3.85 + 6.05, r.center().y),
-                            12.1,
-                            icon,
-                            tint,
-                        );
+                            found.and_then(|s| s.icon.as_ref()),
+                            Rect::from_center_size(icon_center, vec2(12.1, 12.1)),
+                            3.0,
+                            p,
+                            1.0,
+                        ) {
+                            let icon = found.map_or(Icon::FileText, source_icon);
+                            let tint = tokens::lerp_rgb(p.ink_faint, p.ink_muted, hover);
+                            self.images
+                                .icon_at(ui.painter(), icon_center, 12.1, icon, tint);
+                        }
                         if response.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }

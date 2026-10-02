@@ -13,6 +13,7 @@ pub mod conversation;
 pub mod dialogs;
 pub mod highlight;
 pub mod icons;
+pub mod logos;
 pub mod markdown;
 pub mod mcp_app;
 pub mod paint;
@@ -90,6 +91,10 @@ pub struct ChatPage {
     ctx: Option<egui::Context>,
     /// When the list was last read because a chat in it was running.
     relisted: f64,
+    /// The daemon's endpoint and cww's data folder, where the web's images
+    /// come from and are kept.
+    socket: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
 }
 
 /// How often to read the list again while a chat in it is being answered
@@ -100,7 +105,7 @@ const RELIST: f64 = 4.0;
 const STILL_TIME: f64 = 0.35;
 
 impl ChatPage {
-    pub fn new(socket: &std::path::Path) -> Self {
+    pub fn new(socket: &std::path::Path, data_dir: std::path::PathBuf) -> Self {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as usize);
@@ -121,6 +126,8 @@ impl ChatPage {
             picking: None,
             ctx: None,
             relisted: 0.0,
+            socket: socket.to_path_buf(),
+            data_dir,
         }
     }
 
@@ -136,8 +143,19 @@ impl ChatPage {
     }
 
     #[cfg(test)]
+    pub fn conversation_mut(&mut self) -> &mut ConversationView {
+        &mut self.conversation
+    }
+
+    #[cfg(test)]
     pub fn state_mut(&mut self) -> &mut ChatState {
         &mut self.state
+    }
+
+    /// The web's images still on their way.
+    #[cfg(test)]
+    pub fn logos_pending(&self) -> usize {
+        self.images.as_ref().map_or(0, |i| i.logos.pending())
     }
 
     /// Pick the greeting (tests want the same one each time).
@@ -223,6 +241,14 @@ impl ChatPage {
             self.new_chat_since = None;
         }
         let images = self.images.take().unwrap_or_else(|| Images::load(&ctx));
+        images.logos.set_source(
+            &self.socket,
+            env.status
+                .filter(|_| paired)
+                .and_then(|s| s.server.as_deref()),
+            Some(&self.data_dir),
+        );
+        images.logos.poll(&ctx);
         let action = self.page(ui, env, &images);
         self.images = Some(images);
         action
@@ -659,6 +685,11 @@ impl ChatPage {
                 _ => Vec::new(),
             },
             model: self.state.current_model(),
+            model_logo: self
+                .state
+                .open_summary()
+                .and_then(|c| c.model.as_ref())
+                .and_then(|m| m.logo.clone()),
         }
     }
 

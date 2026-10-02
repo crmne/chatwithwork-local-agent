@@ -9,7 +9,7 @@
 use egui::text::{CCursor, CCursorRange};
 use egui::{Color32, Id, Key, Rect, Sense, Ui, pos2, vec2};
 
-use cww::tui::chat::Model;
+use cww::tui::chat::{Asset, Model};
 
 use super::controls;
 use super::icons::{Icon, Images};
@@ -41,6 +41,9 @@ pub struct Composer<'a> {
     pub models: Vec<Model>,
     /// The model the next question goes to: its ID and name.
     pub model: Option<(String, String)>,
+    /// Its maker's logo, as the chat names the model, for one the picker
+    /// doesn't list.
+    pub model_logo: Option<Asset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -504,14 +507,20 @@ impl Composer<'_> {
                 egui::Stroke::new(1.0, p.line),
                 egui::StrokeKind::Middle,
             );
-            let (icon, tint) = file_icon(&attached.content_type, p);
-            images.icon_at(
+            // Lexxy's `.attachment__icon--app`: the file type's image, 36
+            // square, once the server named it.
+            let icon_center = pos2(rect.left() + 11.0 + 18.0, rect.center().y);
+            if !images.logos.draw(
                 &painter,
-                pos2(rect.left() + 11.0 + 18.0, rect.center().y),
-                34.0,
-                icon,
-                tint,
-            );
+                attached.icon.as_ref(),
+                Rect::from_center_size(icon_center, vec2(36.0, 36.0)),
+                0.0,
+                p,
+                1.0,
+            ) {
+                let (icon, tint) = file_icon(&attached.content_type, p);
+                images.icon_at(&painter, icon_center, 34.0, icon, tint);
+            }
             let uploading = attached.signed_id.is_none();
             let caption_left = rect.left() + 11.0 + 36.0 + 10.0;
             let caption_max = rect.right() - 11.0 - caption_left - 28.0;
@@ -659,11 +668,18 @@ impl Composer<'_> {
             painter.rect_filled(rect, 16.0, p.ink_wash(6.0 * t));
         }
         let color = tokens::lerp_rgb(p.ink_muted, p.ink, t).gamma_multiply(opacity);
+        let logo = self
+            .models
+            .iter()
+            .find(|m| m.id == model_id)
+            .and_then(|m| m.logo.as_ref())
+            .or(self.model_logo.as_ref());
         model_mark(
             &painter,
+            images,
             pos2(rect.left() + 8.0 + 8.0, rect.center().y),
             16.0,
-            &name,
+            (&name, logo),
             p,
             opacity,
         );
@@ -814,9 +830,10 @@ impl Composer<'_> {
                             let dim = 1.0;
                             model_mark(
                                 painter,
+                                images,
                                 pos2(row.left() + 12.0 + 10.0, row.top() + 11.0 + 10.0),
                                 20.0,
-                                &model.name,
+                                (&model.name, model.logo.as_ref()),
                                 p,
                                 dim,
                             );
@@ -966,17 +983,22 @@ type RowGalleys = (
     Option<std::sync::Arc<egui::Galley>>,
 );
 
-/// A model's mark: a round chip with its name's first letter, where the
-/// web shows its maker's logo.
+/// A model's mark: its maker's logo, round, as the web's picker shows it;
+/// a round chip with its name's first letter until it's in, or without one.
 fn model_mark(
     painter: &egui::Painter,
+    images: &Images,
     center: egui::Pos2,
     size: f32,
-    name: &str,
+    (name, logo): (&str, Option<&Asset>),
     p: &Palette,
     opacity: f32,
 ) {
     let r = size / 2.0;
+    let rect = Rect::from_center_size(center, vec2(size, size));
+    if images.logos.draw(painter, logo, rect, r, p, opacity) {
+        return;
+    }
     painter.circle_filled(center, r, p.surface.gamma_multiply(opacity));
     painter.circle_stroke(
         center,

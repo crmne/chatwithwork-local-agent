@@ -457,9 +457,10 @@ impl SettingsApp {
 
     fn chat_page(&mut self, ui: &mut Ui, status: Option<&Status>) {
         let socket = self.shared.paths.socket_path();
+        let data_dir = self.shared.paths.daemon.data_dir.clone();
         let page = self
             .chat
-            .get_or_insert_with(|| chat::ChatPage::new(&socket));
+            .get_or_insert_with(|| chat::ChatPage::new(&socket, data_dir));
         let env = chat::Env {
             status,
             known: self.shared.is_known(),
@@ -475,6 +476,12 @@ impl SettingsApp {
             Some(chat::Action::StartAgent) => self.start_agent(ui.ctx()),
             None => {}
         }
+    }
+
+    /// The Chat page, once it has been shown, to look at.
+    #[cfg(test)]
+    pub fn chat_ref(&self) -> Option<&chat::ChatPage> {
+        self.chat.as_ref()
     }
 
     /// What the Chat page knows, once it has been shown.

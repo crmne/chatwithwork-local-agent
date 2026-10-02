@@ -12,6 +12,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use super::assets::{file_icon, logo};
+
 /// When things happened, relative to now.
 fn ago(seconds: i64) -> String {
     (jiff::Timestamp::now() - jiff::SignedDuration::from_secs(seconds)).to_string()
@@ -87,7 +89,7 @@ const CANNED: [&str; 4] = [
 
 /// The default model, as chats name it.
 pub fn default_model() -> Value {
-    json!({ "id": 12, "name": "Gemini 3.8 Flash" })
+    json!({ "id": 12, "name": "Gemini 3.8 Flash", "logo": logo("vertexai") })
 }
 
 /// Everything the person who started a private chat may do with it.
@@ -137,17 +139,17 @@ pub fn models() -> Value {
     json!({
         "default_model_id": 12,
         "models": [
-            { "id": 12, "name": "Gemini 3.8 Flash", "provider": "vertexai",
+            { "id": 12, "name": "Gemini 3.8 Flash", "provider": "vertexai", "logo": logo("vertexai"),
               "description": "Google's latest Flash for documents, tool use, and everyday work",
               "rate": "About 3 credits per answer", "selectable": true, "reason": null },
-            { "id": 14, "name": "Gemini 3.8 Pro", "provider": "vertexai",
+            { "id": 14, "name": "Gemini 3.8 Pro", "provider": "vertexai", "logo": logo("vertexai"),
               "description": "Google's strongest Gemini, for long documents and careful reasoning",
               "rate": "About 9 credits per answer", "selectable": true, "reason": null },
-            { "id": 15, "name": "GPT-6 Sol", "provider": "azure",
+            { "id": 15, "name": "GPT-6 Sol", "provider": "azure", "logo": logo("azure"),
               "description": "OpenAI's GPT-6 for complex reasoning and multi-step tool use",
               "rate": "About 12 credits per answer", "selectable": false,
               "reason": "You're out of credits. Add credits in Settings to keep going." },
-            { "id": 21, "name": "Mistral Large 3", "provider": "hetzner",
+            { "id": 21, "name": "Mistral Large 3", "provider": "hetzner", "logo": logo("hetzner"),
               "description": null, "rate": "Free, 40 answers a day", "selectable": true, "reason": null },
         ]
     })
@@ -170,8 +172,38 @@ fn assistant(id: u64, content: &str, sources: Value) -> Value {
     json!({ "kind": "assistant", "id": id, "content": content, "sources": sources })
 }
 
+/// A settled step, with its service's logo: the one its summary names.
 fn step(summary: &str, files: &[&str]) -> Value {
-    json!({ "summary": summary, "pending": false, "files": files })
+    json!({ "summary": summary, "pending": false, "files": files, "logo": service_logo(summary) })
+}
+
+/// The logo of the service a step's summary names; none for a computer's.
+fn service_logo(summary: &str) -> Value {
+    [
+        ("Drive", "drive"),
+        ("Slack", "slack"),
+        ("Notion", "notion"),
+        ("Linear", "linear"),
+    ]
+    .iter()
+    .find(|(service, _)| summary.contains(service))
+    .map_or(Value::Null, |(_, name)| logo(name))
+}
+
+/// A source: a file in Drive, with its type's icon, or a page on the web.
+fn source(title: &str, url: &str) -> Value {
+    let icon = if title.ends_with(".pdf") {
+        file_icon("application/pdf")
+    } else {
+        Value::Null
+    };
+    json!({ "title": title, "url": url, "icon": icon })
+}
+
+/// A file sent with a question, with its type's icon.
+fn attachment(filename: &str, byte_size: u64, content_type: &str) -> Value {
+    json!({ "filename": filename, "byte_size": byte_size, "content_type": content_type,
+            "icon": file_icon(content_type) })
 }
 
 /// A chat: its summary, its transcript's entries, and what it waits for.
@@ -206,10 +238,11 @@ pub fn sample() -> Vec<Chat> {
                     "title": "Searching Drive and Slack", "details": "2 searches",
                     "progress": "Reading Q3 actuals.xlsx",
                     "services": ["Drive", "Slack"], "pending": true,
+                    "logos": [logo("drive"), logo("slack")],
                     "steps": [
                         step("Searched Drive for “Q3 budget”", &["Q3 actuals.xlsx", "Q3 plan.pdf", "Budget 2026.xlsx"]),
                         step("Searched Slack for “Q3 travel”", &[]),
-                        { "summary": "Reading Q3 actuals.xlsx…", "pending": true, "files": [] },
+                        { "summary": "Reading Q3 actuals.xlsx…", "pending": true, "files": [], "logo": logo("drive") },
                     ],
                 }),
                 assistant(123, "", json!([])),
@@ -228,29 +261,30 @@ pub fn sample() -> Vec<Chat> {
                     "kind": "user", "id": 111,
                     "content": "When does the Acme contract renew, and what changed from last year?",
                     "attachments": [
-                        { "filename": "Acme renewal 2026.pdf", "byte_size": 48213, "content_type": "application/pdf" },
-                        { "filename": "Vendor list.xlsx", "byte_size": 18432,
-                          "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+                        attachment("Acme renewal 2026.pdf", 48213, "application/pdf"),
+                        attachment("Vendor list.xlsx", 18432,
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
                     ],
                 }),
                 json!({
                     "kind": "activity", "id": 112,
                     "title": "Searched Drive and Slack", "details": "3 searches, read 2 files",
                     "services": ["Drive", "Slack"], "pending": false,
+                    "logos": [logo("drive"), logo("slack")],
                     "steps": [
                         step("Searched Drive for “Acme contract”", &["Acme renewal 2026.pdf", "Acme MSA 2024.pdf"]),
                         step("Searched Slack for “Acme renewal”", &[]),
                         step("Searched Drive for “Acme support terms”", &["Acme MSA 2024.pdf"]),
-                        step("Read Acme renewal 2026.pdf", &[]),
-                        step("Read Acme MSA 2024.pdf", &[]),
+                        { "summary": "Read Acme renewal 2026.pdf", "pending": false, "files": [], "logo": logo("drive") },
+                        { "summary": "Read Acme MSA 2024.pdf", "pending": false, "files": [], "logo": logo("drive") },
                     ],
                 }),
                 assistant(
                     113,
                     ANSWER_RENEWAL,
                     json!([
-                        { "title": "Acme renewal 2026.pdf", "url": RENEWAL_URL },
-                        { "title": "Acme MSA 2024.pdf", "url": MSA_URL },
+                        source("Acme renewal 2026.pdf", RENEWAL_URL),
+                        source("Acme MSA 2024.pdf", MSA_URL),
                     ]),
                 ),
                 user(114, "Draft a short reminder for the team."),
@@ -265,14 +299,15 @@ pub fn sample() -> Vec<Chat> {
                     "kind": "activity", "id": 52,
                     "title": "Read Drive, waiting to post to Slack", "details": "1 search",
                     "services": ["Drive", "Slack"], "pending": false,
+                    "logos": [logo("drive"), logo("slack")],
                     "steps": [
                         step("Searched Drive for “Falcon launch note”", &["Falcon launch note.docx"]),
-                        { "summary": "Post a message to #launch", "pending": false, "files": [], "waiting": true },
+                        { "summary": "Post a message to #launch", "pending": false, "files": [], "waiting": true, "logo": logo("slack") },
                     ],
                 }),
             ],
             approvals: vec![json!({
-                "id": 531, "service": "Slack", "effect": "write", "decidable": true,
+                "id": 531, "service": "Slack", "logo": logo("slack"), "effect": "write", "decidable": true,
                 "summary": "Post a message to #launch",
                 "details": [
                     { "label": "Channel", "value": "#launch" },
@@ -289,13 +324,13 @@ pub fn sample() -> Vec<Chat> {
                 json!({
                     "kind": "activity", "id": 42,
                     "title": "Asked Notion", "details": "1 question",
-                    "services": ["Notion"], "pending": false,
-                    "steps": [{ "summary": "Create a report in Notion", "pending": false, "files": [], "waiting": true }],
+                    "services": ["Notion"], "pending": false, "logos": [logo("notion")],
+                    "steps": [{ "summary": "Create a report in Notion", "pending": false, "files": [], "waiting": true, "logo": logo("notion") }],
                 }),
             ],
             approvals: Vec::new(),
             questions: vec![json!({
-                "id": 432, "service": "Notion", "decidable": true,
+                "id": 432, "service": "Notion", "logo": logo("notion"), "decidable": true,
                 "message": "Which report should I build?", "kind": "form",
                 "fields": [
                     { "name": "environment", "title": "Environment", "description": null, "type": "string",
@@ -325,9 +360,9 @@ pub fn sample() -> Vec<Chat> {
                 json!({
                     "kind": "activity", "id": 102,
                     "title": "Asked Linear", "details": "1 search",
-                    "services": ["Linear"], "pending": false,
+                    "services": ["Linear"], "pending": false, "logos": [logo("linear")],
                     "steps": [{
-                        "summary": "Searched Linear for “Falcon launch”", "pending": false, "files": [],
+                        "summary": "Searched Linear for “Falcon launch”", "pending": false, "files": [], "logo": logo("linear"),
                         "app": { "service": "Linear", "uri": "ui://linear/board/falcon" },
                     }],
                 }),
@@ -345,13 +380,13 @@ pub fn sample() -> Vec<Chat> {
                 json!({
                     "kind": "activity", "id": 32,
                     "title": "Asked Linear", "details": "1 question",
-                    "services": ["Linear"], "pending": false,
-                    "steps": [{ "summary": "Search Linear for “Falcon”", "pending": false, "files": [], "waiting": true }],
+                    "services": ["Linear"], "pending": false, "logos": [logo("linear")],
+                    "steps": [{ "summary": "Search Linear for “Falcon”", "pending": false, "files": [], "waiting": true, "logo": logo("linear") }],
                 }),
             ],
             approvals: Vec::new(),
             questions: vec![json!({
-                "id": 332, "service": "Linear", "decidable": true,
+                "id": 332, "service": "Linear", "logo": logo("linear"), "decidable": true,
                 "message": "Sign in to Linear so it can read your team's issues.", "kind": "url",
                 "fields": [], "url": "https://linear.app/oauth/authorize?client_id=northwind-demo",
                 "host": "linear.app", "note": NOTE.replace("{}", "Linear"),
@@ -375,6 +410,15 @@ pub fn sample() -> Vec<Chat> {
             questions: Vec::new(),
             entries: vec![
                 user(81, "Summarize our notes on competitor pricing."),
+                json!({
+                    "kind": "activity", "id": 83,
+                    "title": "Searched Alex's MacBook", "details": "1 search, read 1 file",
+                    "services": ["Alex's MacBook"], "logos": [null], "pending": false,
+                    "steps": [
+                        step("Searched for “competitor pricing”", &["Competitors/pricing.md"]),
+                        step("Read Competitors/pricing.md", &[]),
+                    ],
+                }),
                 assistant(
                     82,
                     "Most competitors price **per seat**, between €15 and €30 a month. Two offer a free tier for up to three people.",
@@ -388,6 +432,11 @@ pub fn sample() -> Vec<Chat> {
             questions: Vec::new(),
             entries: vec![
                 user(71, "What did we decide in this week's sync?"),
+                json!({
+                    "kind": "activity", "id": 73, "title": "Made a plan", "details": "2 steps",
+                    "services": [], "logos": [], "pending": false,
+                    "steps": [step("Planned the summary", &[]), step("Checked off the decisions", &[])],
+                }),
                 assistant(
                     72,
                     "Ship the onboarding emails on Monday, and move the pricing review to next week.",

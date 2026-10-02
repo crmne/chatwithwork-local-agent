@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use egui::{Id, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
-use cww::tui::chat::{Attachment, Can, Entry, Source, Step};
+use cww::tui::chat::{Asset, Attachment, Can, Entry, Source, Step};
 
 use super::cards::{Card, CardEvent, CardInputs, Cards};
 use super::composer::file_icon;
@@ -21,7 +21,7 @@ use super::prose::{self, Clicked, Prose};
 use super::state::ChatState;
 use super::state::Decision;
 use super::tokens::{self, Palette, Type, scale};
-use super::widgets;
+use super::widgets::{self, Face};
 
 /// How long a Copy button says Copied.
 const COPIED_FOR: f64 = 2.0;
@@ -335,9 +335,9 @@ impl Conversation<'_> {
                     details,
                     progress,
                     services,
+                    logos,
                     pending,
                     steps,
-                    ..
                 }) => {
                     let live_progress = if *pending {
                         state.progress.as_deref().or(progress.as_deref())
@@ -352,6 +352,7 @@ impl Conversation<'_> {
                         title,
                         detail,
                         services,
+                        logos,
                         *pending,
                         steps,
                         &here,
@@ -598,14 +599,18 @@ impl Conversation<'_> {
                     egui::Stroke::new(1.0, tokens::lerp_rgb(p.line, p.line_strong, t)),
                     egui::StrokeKind::Middle,
                 );
-                let (icon, tint) = file_icon(&attachment.content_type, p);
-                self.images.icon_at(
+                let icon_center = pos2(rect.left() + 8.0 + 12.0, rect.center().y);
+                if !self.images.logos.draw(
                     painter,
-                    pos2(rect.left() + 8.0 + 12.0, rect.center().y),
-                    24.0,
-                    icon,
-                    tint,
-                );
+                    attachment.icon.as_ref(),
+                    Rect::from_center_size(icon_center, vec2(24.0, 24.0)),
+                    0.0,
+                    p,
+                    1.0,
+                ) {
+                    let (icon, tint) = file_icon(&attachment.content_type, p);
+                    self.images.icon_at(painter, icon_center, 24.0, icon, tint);
+                }
                 let nx = rect.left() + 8.0 + 24.0 + 8.0;
                 painter.galley(
                     pos2(nx, rect.center().y - name.size().y / 2.0),
@@ -851,13 +856,20 @@ impl Conversation<'_> {
             painter.circle_filled(center, 10.4 + 2.0, p.canvas);
             painter.circle_filled(center, 10.4, p.surface);
             painter.circle_stroke(center, 9.9, egui::Stroke::new(1.0, p.line_strong));
-            self.images.icon_at(
-                painter,
-                center,
-                12.9,
-                prose::source_icon(source),
-                p.ink_muted,
-            );
+            let logo = Rect::from_center_size(center, vec2(12.9, 12.9));
+            if !self
+                .images
+                .logos
+                .draw(painter, source.icon.as_ref(), logo, 0.0, p, 1.0)
+            {
+                self.images.icon_at(
+                    painter,
+                    center,
+                    12.9,
+                    prose::source_icon(source),
+                    p.ink_muted,
+                );
+            }
             x += 20.8 - 5.6;
         }
         let color = tokens::lerp_rgb(p.ink_muted, p.ink, t);
@@ -962,13 +974,23 @@ impl Conversation<'_> {
                         number,
                         p.ink_faint,
                     );
-                    self.images.icon_at(
+                    let icon_center = pos2(row.left() + 32.0 + 8.0, row.center().y);
+                    if !self.images.logos.draw(
                         painter,
-                        pos2(row.left() + 32.0 + 8.0, row.center().y),
-                        16.0,
-                        prose::source_icon(source),
-                        p.ink_muted,
-                    );
+                        source.icon.as_ref(),
+                        Rect::from_center_size(icon_center, vec2(16.0, 16.0)),
+                        3.0,
+                        &p,
+                        1.0,
+                    ) {
+                        self.images.icon_at(
+                            painter,
+                            icon_center,
+                            16.0,
+                            prose::source_icon(source),
+                            p.ink_muted,
+                        );
+                    }
                     let has_url = source.url.as_deref().is_some_and(|u| !u.is_empty());
                     let title_w = row.width() - 58.0 - if has_url { 28.0 } else { 8.0 };
                     let galley = paint::layout(
@@ -1018,6 +1040,7 @@ impl Conversation<'_> {
         title: &str,
         details: Option<&str>,
         services: &[String],
+        logos: &[Option<Asset>],
         pending: bool,
         steps: &[Step],
         cards: &[(usize, Card)],
@@ -1045,11 +1068,23 @@ impl Conversation<'_> {
         } else {
             wire
         };
-        let names: Vec<&str> = services.iter().map(String::as_str).take(4).collect();
-        let avatar_w = if names.is_empty() {
+        // One avatar per service, or the plan's glyph without any.
+        let faces: Vec<Face> = if services.is_empty() && !logos_known(logos, steps) {
+            Vec::new()
+        } else if services.is_empty() {
+            vec![Face::Glyph(Icon::ListChecks)]
+        } else {
+            services
+                .iter()
+                .enumerate()
+                .take(4)
+                .map(|(n, name)| service_face(name, logos, n, steps))
+                .collect()
+        };
+        let avatar_w = if faces.is_empty() {
             0.0
         } else {
-            24.0 + (names.len() - 1) as f32 * (24.0 - 6.4)
+            24.0 + (faces.len() - 1) as f32 * (24.0 - 6.4)
         };
         let ty = scale::SMALL;
         let title_galley = paint::layout(
@@ -1099,11 +1134,11 @@ impl Conversation<'_> {
             self.wire(&painter, pos2(x, cy), 24.0 * wire, wire);
             x += 24.0 * wire + 4.0 * wire;
         }
-        if !names.is_empty() {
+        if !faces.is_empty() {
             let mut ax = x;
-            for (n, name) in names.iter().enumerate() {
+            for (n, face) in faces.iter().enumerate() {
                 let center = pos2(ax + 12.0, cy);
-                let active = pending && n + 1 == names.len();
+                let active = pending && n + 1 == faces.len();
                 if active {
                     // `avatar-live`: a live ring breathing out.
                     let phase = ((self.time / 1.6).fract()) as f32;
@@ -1118,7 +1153,16 @@ impl Conversation<'_> {
                         p.live().gamma_multiply(0.3 * k),
                     );
                 }
-                widgets::avatar(&painter, center, 24.0, name, p, p.canvas);
+                widgets::avatar(
+                    &painter,
+                    self.images,
+                    center,
+                    24.0,
+                    0.56,
+                    *face,
+                    p,
+                    p.canvas,
+                );
                 if active {
                     painter.circle_stroke(
                         center,
@@ -1183,7 +1227,8 @@ impl Conversation<'_> {
             );
             log.spacing_mut().item_spacing = vec2(0.0, 6.0);
             for (n, step) in steps.iter().enumerate() {
-                self.step(&mut log, step, pending);
+                let glyph = step_glyph(step, services, logos, steps);
+                self.step(&mut log, step, glyph, pending);
                 for (_, card) in cards.iter().filter(|(at, _)| *at == n) {
                     if let Some(e) = cards_ui.show(&mut log, *card, &mut view.inputs, review) {
                         events.push(card_event(e));
@@ -1264,7 +1309,7 @@ impl Conversation<'_> {
         painter.circle_filled(spark, 3.0, p.green.gamma_multiply(opacity));
     }
 
-    fn step(&self, ui: &mut Ui, step: &Step, live: bool) {
+    fn step(&self, ui: &mut Ui, step: &Step, glyph: Icon, live: bool) {
         let p = self.palette;
         let width = ui.available_width();
         let ty = scale::SMALLER;
@@ -1289,8 +1334,15 @@ impl Conversation<'_> {
                 p.live().gamma_multiply(0.25 * k),
             );
         }
-        self.images
-            .icon_at(painter, icon_center, 16.0, step_icon(step), p.ink_faint);
+        let logo = Rect::from_center_size(icon_center, vec2(16.0, 16.0));
+        if !self
+            .images
+            .logos
+            .draw(painter, step.logo.as_ref(), logo, 0.0, p, 1.0)
+        {
+            self.images
+                .icon_at(painter, icon_center, 16.0, glyph, p.ink_faint);
+        }
         // "4 found", in mono after the summary; the names on hover.
         let found = (!step.files.is_empty()).then(|| format!("{} found", step.files.len()));
         let found_galley = found.as_deref().map(|f| {
@@ -1427,6 +1479,60 @@ pub fn rails_size(bytes: u64) -> String {
         text
     };
     format!("{text} {}", units[unit])
+}
+
+/// Whether the server says which services have logos: older ones send no
+/// `logos`, and no `logo` on steps.
+fn logos_known(logos: &[Option<Asset>], steps: &[Step]) -> bool {
+    !logos.is_empty() || steps.iter().any(|s| s.logo.is_some())
+}
+
+/// A service with no logo is the person's own MCP server when a step names
+/// it ("Searched Wiki for …"); a computer's steps never name it.
+fn names_service(name: &str, steps: &[Step]) -> bool {
+    steps.iter().any(|s| s.summary.contains(name))
+}
+
+/// What an activity's avatar for its `n`th service shows: its logo, or the
+/// web's glyph where it has none (`laptop` for a computer,
+/// `plugs-connected` for a person's own MCP server). An older server sends
+/// no logos: the name's initial, then.
+fn service_face<'a>(
+    name: &'a str,
+    logos: &'a [Option<Asset>],
+    n: usize,
+    steps: &[Step],
+) -> Face<'a> {
+    match logos.get(n) {
+        Some(Some(asset)) => Face::Logo {
+            asset: Some(asset),
+            name,
+        },
+        Some(None) if names_service(name, steps) => Face::Glyph(Icon::PlugsConnected),
+        Some(None) => Face::Glyph(Icon::Laptop),
+        None => Face::Logo { asset: None, name },
+    }
+}
+
+/// The glyph a step shows without a logo, as the web's step rows: the
+/// plan's `list-checks`, `plugs-connected` for a person's own MCP server,
+/// `laptop` for a computer. An older server says nothing of it: guess from
+/// the summary, as before.
+fn step_glyph(step: &Step, services: &[String], logos: &[Option<Asset>], steps: &[Step]) -> Icon {
+    if !logos_known(logos, steps) {
+        return step_icon(step);
+    }
+    if services.is_empty() {
+        Icon::ListChecks
+    } else if services
+        .iter()
+        .zip(logos)
+        .any(|(name, logo)| logo.is_none() && step.summary.contains(name.as_str()))
+    {
+        Icon::PlugsConnected
+    } else {
+        Icon::Laptop
+    }
 }
 
 fn step_icon(step: &Step) -> Icon {

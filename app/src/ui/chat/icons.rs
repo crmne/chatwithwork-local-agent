@@ -47,9 +47,12 @@ pub enum Icon {
     FileCode,
     FileAudio,
     FileVideo,
+    Laptop,
+    PlugsConnected,
+    ListChecks,
 }
 
-const COUNT: usize = Icon::FileVideo as usize + 1;
+const COUNT: usize = Icon::ListChecks as usize + 1;
 const CELL: f32 = 64.0;
 /// Icons to a row of the atlas: 32 cells make 2048, the widest texture.
 const COLUMNS: usize = 32;
@@ -84,6 +87,8 @@ pub struct Images {
     logotype: TextureHandle,
     logotype_dark: TextureHandle,
     mark: TextureHandle,
+    /// The web's logos and file-type icons, from the paired server.
+    pub logos: super::logos::Logos,
 }
 
 impl Images {
@@ -107,6 +112,7 @@ impl Images {
                 options(),
             ),
             mark: ctx.load_texture("chat-mark", crate::icons::mark(), options()),
+            logos: super::logos::Logos::default(),
         }
     }
 

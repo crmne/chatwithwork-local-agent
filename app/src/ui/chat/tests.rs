@@ -374,7 +374,9 @@ fn the_list_stays_current_as_chats_change_elsewhere() {
     // Renamed elsewhere: the row says so.
     fx.server
         .edit_elsewhere(30, |c| c["title"] = serde_json::json!("Q4 hiring plan"));
-    fx.wait_for_label("Q4 hiring plan");
+    fx.wait("the new title", |h| {
+        h.query_by_label("Q4 hiring plan").is_some()
+    });
     assert!(
         fx.harness
             .query_by_label("Draft the Q4 hiring plan")
@@ -413,6 +415,59 @@ fn an_older_daemon_still_gets_the_list_read_again() {
     });
     assert!(fx.lists() > listed);
     assert!(!fx.chat().state().list_live);
+}
+
+#[test]
+fn the_webs_logos_come_from_the_server_once_and_are_kept() {
+    let mut fx = fixture(Options::default());
+    fx.ready();
+    // Nothing runs, so nothing but the logos could ask for frames.
+    fx.server.finish(12, 123, "Done.");
+    fx.open_waiting(11, "Want me to add it to the Q4 checklist?");
+    fx.harness
+        .get_by_label("Searched Drive and Slack · 3 searches, read 2 files")
+        .click_accesskit();
+    fx.logos();
+    let asked: Vec<String> = fx
+        .server
+        .requests()
+        .iter()
+        .filter(|r| r["cmd"] == "asset")
+        .map(|r| r["path"].as_str().unwrap_or_default().to_string())
+        .collect();
+    for path in [
+        "/assets/providers/vertexai-4d2e8f90.svg",
+        "/assets/providers/drive-7a3c91e0.svg",
+        "/assets/providers/slack-2b8d4f61.svg",
+        "/assets/mimetypes/application-pdf-1e2d3c4b.svg",
+        "/assets/mimetypes/x-office-spreadsheet-5a6b7c8d.svg",
+    ] {
+        assert_eq!(
+            asked.iter().filter(|p| *p == path).count(),
+            1,
+            "{path} once: {asked:?}"
+        );
+    }
+    let kept = fx
+        .server
+        .paths
+        .daemon
+        .data_dir
+        .join("chat-assets/chatwithwork.com/providers__drive-7a3c91e0.svg");
+    assert!(kept.is_file(), "kept at {}", kept.display());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&kept).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // Drawn from memory from now on: nothing more is asked, nothing moves.
+    let before = fx.server.requests().len();
+    fx.harness.run_steps(4);
+    assert_eq!(fx.server.requests().len(), before);
+    fx.harness
+        .try_run()
+        .expect("loaded logos ask for no frames");
 }
 
 #[test]
@@ -484,6 +539,7 @@ fn renders_like_the_web() {
                     .get_by_label("Searching Drive and Slack · Reading Q3 actuals.xlsx")
                     .click();
             }
+            fx.logos();
             // kittest paints a pointer wherever one hovers: take it away.
             fx.harness.event(egui::Event::PointerGone);
             // Let fonts and textures settle.
@@ -519,6 +575,15 @@ impl egui::DroppedFile for Dropped {
 }
 
 impl Fixture {
+    /// Draw a few frames, so the page asks for the images it shows, and
+    /// wait until they're all in.
+    fn logos(&mut self) {
+        self.harness.run_steps(2);
+        self.wait("the logos", |h| {
+            h.state().chat_ref().is_some_and(|c| c.logos_pending() == 0)
+        });
+    }
+
     /// Wait for the chats and the models.
     fn ready(&mut self) {
         self.wait("the models", |h| {
@@ -885,6 +950,7 @@ fn review_screens() -> Vec<Screen> {
                         size: 48_210,
                         content_type: "application/pdf".into(),
                         signed_id: Some("demo".into()),
+                        icon: None,
                     },
                     super::state::Attached {
                         key: 901,
@@ -895,6 +961,7 @@ fn review_screens() -> Vec<Screen> {
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                                 .into(),
                         signed_id: None,
+                        icon: None,
                     },
                 ];
             },
@@ -908,6 +975,38 @@ fn review_screens() -> Vec<Screen> {
             name: "approval",
             chat: Some(5),
             setup: nothing,
+        },
+        Screen {
+            name: "steps",
+            chat: Some(11),
+            setup: |fx| {
+                fx.harness
+                    .get_by_label("Searched Drive and Slack · 3 searches, read 2 files")
+                    .click_accesskit();
+            },
+        },
+        Screen {
+            name: "computer",
+            chat: Some(8),
+            setup: |fx| {
+                fx.harness
+                    .get_by_label("Searched Alex's MacBook · 1 search, read 1 file")
+                    .click_accesskit();
+            },
+        },
+        Screen {
+            name: "plan",
+            chat: Some(7),
+            setup: |fx| {
+                fx.harness
+                    .get_by_label("Made a plan · 2 steps")
+                    .click_accesskit();
+            },
+        },
+        Screen {
+            name: "sources",
+            chat: Some(11),
+            setup: |fx| fx.chat().conversation_mut().sources_open = Some(113),
         },
         Screen {
             name: "question",
@@ -1029,6 +1128,7 @@ fn renders_review_screens() {
             }
             fx.harness.run_steps(4);
             (screen.setup)(&mut fx);
+            fx.logos();
             fx.harness.event(egui::Event::PointerGone);
             fx.harness.run_steps(12);
             let image = fx.harness.render().expect("rendering");

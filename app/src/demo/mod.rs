@@ -4,6 +4,7 @@
 //! the window's tests, which also read the requests it received. Built only
 //! with the `demo` feature, and in tests.
 
+mod assets;
 mod chats;
 
 use std::collections::HashSet;
@@ -422,6 +423,7 @@ impl Demo {
                 self.sync_list();
                 answer
             }
+            "asset" => assets::serve(request["path"].as_str().unwrap_or_default()),
             "deny" => deny(),
             "audit_tail" => {
                 let n = request["lines"].as_u64().unwrap_or(50) as usize;
@@ -601,7 +603,7 @@ impl Demo {
                     chats::models()["models"]
                         .as_array()
                         .and_then(|m| m.iter().find(|m| model_id(m) == id).cloned())
-                        .map(|m| json!({ "id": m["id"], "name": m["name"] }))
+                        .map(|m| json!({ "id": m["id"], "name": m["name"], "logo": m["logo"] }))
                 });
                 let attachments: Vec<Value> = {
                     let state = self.state.lock().expect("demo lock");
@@ -610,7 +612,7 @@ impl Demo {
                         .into_iter()
                         .flatten()
                         .filter_map(|id| state.uploads.iter().find(|u| u["signed_id"] == *id))
-                        .map(|u| json!({ "filename": u["filename"], "byte_size": u["byte_size"], "content_type": u["content_type"] }))
+                        .map(|u| json!({ "filename": u["filename"], "byte_size": u["byte_size"], "content_type": u["content_type"], "icon": u["icon"] }))
                         .collect()
                 };
                 let (number, summary) = {
@@ -708,6 +710,7 @@ impl Demo {
             "filename": name,
             "byte_size": size,
             "content_type": request["content_type"].as_str().unwrap_or("application/octet-stream"),
+            "icon": assets::file_icon(request["content_type"].as_str().unwrap_or_default()),
         });
         state.uploads.push(uploaded.clone());
         let mut answer = uploaded;
@@ -1111,9 +1114,10 @@ impl Demo {
                             "kind": "activity", "id": id,
                             "title": "Searching Drive and Slack", "details": "1 search",
                             "progress": progress, "services": ["Drive", "Slack"], "pending": pending,
+                            "logos": [assets::logo("drive"), assets::logo("slack")],
                             "steps": [
-                                { "summary": "Searched Drive for “budget owner”", "pending": false, "files": ["Budget 2026.xlsx"] },
-                                { "summary": "Reading Budget 2026.xlsx…", "pending": true, "files": [] },
+                                { "summary": "Searched Drive for “budget owner”", "pending": false, "files": ["Budget 2026.xlsx"], "logo": assets::logo("drive") },
+                                { "summary": "Reading Budget 2026.xlsx…", "pending": true, "files": [], "logo": assets::logo("drive") },
                             ],
                         })),
                     }

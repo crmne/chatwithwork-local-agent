@@ -33,6 +33,15 @@ impl Card<'_> {
         }
     }
 
+    /// The service's logo; none for a person's own MCP server, which the
+    /// web shows as `plugs-connected`.
+    pub fn logo(&self) -> Option<&cww::tui::chat::Asset> {
+        match self {
+            Card::Approval(a) => a.logo.as_ref(),
+            Card::Question(q) => q.logo.as_ref(),
+        }
+    }
+
     pub fn decidable(&self) -> bool {
         match self {
             Card::Approval(a) => a.decidable,
@@ -148,7 +157,14 @@ impl Cards<'_> {
             ),
         };
         y = self.header(
-            ui, inner_left, y, inner_w, service, &kicker, &summary, &tint,
+            ui,
+            inner_left,
+            y,
+            inner_w,
+            (service, card.logo()),
+            &kicker,
+            &summary,
+            &tint,
         );
         let id = Id::new(("chat-card", card.id()));
         let busy = self.deciding == Some(card.id());
@@ -287,7 +303,7 @@ impl Cards<'_> {
         left: f32,
         top: f32,
         width: f32,
-        service: &str,
+        (service, logo): (&str, Option<&cww::tui::chat::Asset>),
         kicker: &str,
         summary: &str,
         tint: &Tint,
@@ -296,7 +312,23 @@ impl Cards<'_> {
         let painter = ui.painter().clone();
         let center = pos2(left + 12.0, top + 12.0);
         painter.circle_filled(center, 12.0 + 2.0, tint.wash);
-        widgets::avatar(&painter, center, 24.0, service, p, tint.wash);
+        let face = match logo {
+            Some(asset) => widgets::Face::Logo {
+                asset: Some(asset),
+                name: service,
+            },
+            None => widgets::Face::Glyph(Icon::PlugsConnected),
+        };
+        widgets::avatar(
+            &painter,
+            self.images,
+            center,
+            24.0,
+            0.56,
+            face,
+            p,
+            tint.wash,
+        );
         painter.circle_stroke(center, 11.5, egui::Stroke::new(1.0, tint.edge));
         let x = left + 24.0 + 12.0;
         let w = width - 36.0;

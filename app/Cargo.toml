@@ -61,6 +61,11 @@ fastframe-emoji = { version = "0.2.1", git = "https://github.com/crmne/fastframe
 memmap2 = "0.9"
 # Waits for the daemon's socket to appear instead of polling for it.
 notify = "8.2"
+# The web's logos and file-type icons, fetched from the paired server as
+# SVG (most file types and the big services) or PNG (the rest of the
+# connectors), drawn once into textures. No text, fonts or embedded rasters:
+# the web's images use none.
+resvg = { version = "0.48", default-features = false }
 # Answers in chats are Markdown (CommonMark with GitHub's tables and
 # strikethrough), parsed here and drawn as the web app draws them.
 pulldown-cmark = { version = "0.13", default-features = false }
