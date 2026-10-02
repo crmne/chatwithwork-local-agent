@@ -128,6 +128,11 @@ impl Conversation<'_> {
         view.latest_user = None;
         let entries: &[Entry] = state.transcript.as_ref().map_or(&[], |t| &t.entries);
         let mut items: Vec<Item> = entries.iter().map(Item::Entry).collect();
+        // A question still on its way goes before any answer streaming in
+        // ahead of the server's copy of it: that answer is its own.
+        if let Some(question) = &state.pending_question {
+            items.push(Item::Pending(question));
+        }
         for (id, text) in &state.streamed {
             let known = entries
                 .iter()
@@ -135,9 +140,6 @@ impl Conversation<'_> {
             if !known && !text.is_empty() {
                 items.push(Item::Streamed(*id, text));
             }
-        }
-        if let Some(question) = &state.pending_question {
-            items.push(Item::Pending(question));
         }
         let working = state.working();
         let live_activity = entries
