@@ -23,6 +23,9 @@ use super::state::Decision;
 use super::tokens::{self, Palette, Type, scale};
 use super::widgets;
 
+/// How long a Copy button says Copied.
+const COPIED_FOR: f64 = 2.0;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     OpenUrl(String),
@@ -504,10 +507,13 @@ impl Conversation<'_> {
                 let rect = Rect::from_min_size(pos2(x, row.top()), vec2(28.0, 28.0));
                 let mut faded = ui.new_child(UiBuilder::new().max_rect(rect));
                 faded.set_opacity(shown);
+                let button = id.with(("action", n));
+                let (icon, label, tip) = self.copied(ui, button, &event, (icon, label, tip));
                 if self
-                    .action(&mut faded, id.with(("action", n)), rect, icon, label, tip)
+                    .action(&mut faded, button, rect, icon, label, tip)
                     .clicked()
                 {
+                    self.mark_copied(ui, button, &event);
                     events.push(event);
                 }
                 x += 30.0;
@@ -730,17 +736,13 @@ impl Conversation<'_> {
                 let rect = Rect::from_min_size(pos2(x, footer.top()), vec2(28.0, 28.0));
                 let mut faded = ui.new_child(UiBuilder::new().max_rect(rect));
                 faded.set_opacity(shown);
+                let button = Id::new(("answer-action", id, n));
+                let (icon, label, tip) = self.copied(ui, button, &event, (icon, label, tip));
                 if self
-                    .action(
-                        &mut faded,
-                        Id::new(("answer-action", id, n)),
-                        rect,
-                        icon,
-                        label,
-                        tip,
-                    )
+                    .action(&mut faded, button, rect, icon, label, tip)
                     .clicked()
                 {
+                    self.mark_copied(ui, button, &event);
                     events.push(event);
                 }
                 x += 30.0;
@@ -750,6 +752,38 @@ impl Conversation<'_> {
             self.sources(ui, footer, id, sources, view, events);
         }
         ui.add_space(8.0);
+    }
+
+    /// A Copy button reads Copied, with a check, for two seconds after it
+    /// copies, as the web's clipboard controller shows; one more frame is
+    /// asked for to turn it back.
+    fn copied<'a>(
+        &self,
+        ui: &Ui,
+        button: Id,
+        event: &Event,
+        idle: (Icon, &'a str, &'a str),
+    ) -> (Icon, &'a str, &'a str) {
+        if !matches!(event, Event::Copy(_)) {
+            return idle;
+        }
+        let at = ui.ctx().data(|d| d.get_temp::<f64>(button.with("copied")));
+        match at.map(|at| COPIED_FOR - (self.time - at)) {
+            Some(left) if left > 0.0 => {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(left));
+                (Icon::Check, "Copied", "Copied")
+            }
+            _ => idle,
+        }
+    }
+
+    fn mark_copied(&self, ui: &Ui, button: Id, event: &Event) {
+        if matches!(event, Event::Copy(_)) {
+            let time = self.time;
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(button.with("copied"), time));
+        }
     }
 
     /// The Sources pill, and its menu of numbered sources.

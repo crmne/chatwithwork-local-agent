@@ -938,3 +938,22 @@ fn renders_review_screens() {
         }
     }
 }
+
+#[test]
+fn copying_a_message_says_copied_then_turns_back() {
+    let mut fx = fixture(Options::default());
+    fx.wait_for_label("Vendor contract renewal");
+    fx.open(11);
+    fx.wait_for_label("The Acme contract renews");
+    // The latest answer's actions sit below the fold of the test window.
+    fx.harness
+        .query_all_by_label("Copy message")
+        .last()
+        .expect("a Copy button")
+        .click_accesskit();
+    fx.wait_for_label("Copied");
+    // The harness steps a quarter of a second at a time.
+    fx.harness.run_steps(10);
+    assert!(fx.harness.query_all_by_label("Copied").next().is_none());
+    fx.harness.get_by_label("Copy message");
+}
