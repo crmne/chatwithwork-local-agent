@@ -550,3 +550,11 @@ Both ways of asking take an optional `model_id` (from `/local_agent/models`) and
 ```
 
 The server confirms it only for a device allowed to chat and a chat its owner may watch, and then sends updates as the channel's `message`: `{"type":"chunk","message_id":5,"text":"…"}` (answer text as it's written), `{"type":"progress","text":"…"}` (what the running step does), and `{"type":"changed"}` (anything else: read the chat again). The daemon subscribes once per chat however many terminals follow it, unsubscribes when the last one stops, and subscribes again after a reconnect. A refused chat channel never ends the session. With `mcp` framing there are no chat channels.
+
+**The chat list.** While a terminal shows the list, the daemon also subscribes, once, to the list's channel, which takes no parameters:
+
+```
+{"command":"subscribe","identifier":"{\"channel\":\"LocalAgent::ChatsChannel\"}"}
+```
+
+The server confirms it for a device allowed to chat whose owner is an active member of its organization (never a guest), and rejects it otherwise. After the confirmation the terminal lists the chats once, then applies each `message` on that identifier: `{"event":"chat","chat":{…}}` (a chat started, renamed, starting or stopping being answered, switching model, getting or losing its public link, or moving in or out of a project: the same JSON as the list's, inserted by `number` or replaced, sorted by `updated_at`), `{"event":"removed","number":42}` (deleted, or out of the owner's sight), `{"event":"projects","projects":[…]}` (the whole list again), and `{"event":"account","account":{…},"user":{…},"credits":{…},"locked_reason":…}` (the list's header again). When the owner leaves a project, the server closes the socket instead; the daemon reconnects, subscribes again, and the terminal lists again on the confirmation. A rejected list channel never ends the session, and the next terminal to watch the list asks again. The daemon unsubscribes when the last terminal stops watching. A server without the channel never confirms it, and the terminal reads the list after each change it makes, as before.

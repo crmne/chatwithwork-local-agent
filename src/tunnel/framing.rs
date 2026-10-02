@@ -13,7 +13,8 @@
 //!
 //! With Action Cable framing the daemon may also subscribe to
 //! `LocalAgent::ChatChannel`, once per chat the terminal UI follows, and
-//! receive that chat's updates. Those never reach the MCP server.
+//! receive that chat's updates, and to `LocalAgent::ChatsChannel`, once, for
+//! the chat list's. Those never reach the MCP server.
 
 use serde_json::{Value, json};
 
@@ -25,6 +26,9 @@ pub const OFFERED_SUBPROTOCOLS: &str = "actioncable-v1-json, mcp";
 pub const CHANNEL_IDENTIFIER: &str = r#"{"channel":"LocalAgent::Channel"}"#;
 /// The channel for one followed chat: `{"channel":…,"chat":"42"}`.
 pub const CHAT_CHANNEL: &str = "LocalAgent::ChatChannel";
+/// The channel that keeps the chat list current. It takes no parameters.
+pub const CHATS_CHANNEL: &str = "LocalAgent::ChatsChannel";
+pub const CHATS_IDENTIFIER: &str = r#"{"channel":"LocalAgent::ChatsChannel"}"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Framing {
@@ -47,6 +51,11 @@ pub enum Inbound {
     },
     ChatConfirmed(String),
     ChatRejected(String),
+    /// A change to the chat list: a chat, one removed, the projects, the
+    /// account. Never handed to the MCP server.
+    ChatList(Value),
+    ChatListConfirmed,
+    ChatListRejected,
     Disconnect {
         reason: String,
         reconnect: bool,
@@ -83,6 +92,24 @@ impl Framing {
 
     pub fn unfollow_chat(self, chat: &str) -> Option<String> {
         self.chat_command("unsubscribe", chat)
+    }
+
+    /// The command that keeps the chat list current, when this framing can.
+    pub fn follow_chats(self) -> Option<String> {
+        self.chats_command("subscribe")
+    }
+
+    pub fn unfollow_chats(self) -> Option<String> {
+        self.chats_command("unsubscribe")
+    }
+
+    fn chats_command(self, command: &str) -> Option<String> {
+        match self {
+            Self::ActionCable => {
+                Some(json!({ "command": command, "identifier": CHATS_IDENTIFIER }).to_string())
+            }
+            Self::Mcp => None,
+        }
     }
 
     fn chat_command(self, command: &str, chat: &str) -> Option<String> {
@@ -131,15 +158,27 @@ fn chat_of(identifier: Option<&str>) -> Option<String> {
     value["chat"].as_str().map(str::to_string)
 }
 
+/// Whether an identifier names the chat list's channel.
+fn is_chat_list(identifier: Option<&str>) -> bool {
+    identifier
+        .and_then(|i| serde_json::from_str::<Value>(i).ok())
+        .is_some_and(|v| {
+            v["channel"] == CHATS_CHANNEL && v.as_object().is_some_and(|o| o.len() == 1)
+        })
+}
+
 fn decode_action_cable(mut value: Value) -> Inbound {
     let identifier = value.get("identifier").and_then(Value::as_str);
     let chat = chat_of(identifier);
+    let list = is_chat_list(identifier);
     match value.get("type").and_then(Value::as_str) {
         Some("welcome") => return Inbound::Welcome,
         Some("ping") => return Inbound::Ping,
+        Some("confirm_subscription") if list => return Inbound::ChatListConfirmed,
         Some("confirm_subscription") => {
             return chat.map_or(Inbound::Confirmed, Inbound::ChatConfirmed);
         }
+        Some("reject_subscription") if list => return Inbound::ChatListRejected,
         // Only the device's own channel being refused ends the session.
         Some("reject_subscription") => {
             return match chat {
@@ -160,6 +199,12 @@ fn decode_action_cable(mut value: Value) -> Inbound {
     if let Some(chat) = chat {
         return match value.get_mut("message").map(Value::take) {
             Some(update @ Value::Object(_)) => Inbound::Chat { chat, update },
+            _ => Inbound::Ignored,
+        };
+    }
+    if list {
+        return match value.get_mut("message").map(Value::take) {
+            Some(update @ Value::Object(_)) => Inbound::ChatList(update),
             _ => Inbound::Ignored,
         };
     }
@@ -252,6 +297,37 @@ mod tests {
         assert!(matches!(
             f.decode(&sneaky.to_string()),
             Inbound::Chat { .. }
+        ));
+    }
+
+    #[test]
+    fn the_chat_list_stays_apart_from_mcp_and_from_chats() {
+        let f = Framing::ActionCable;
+        let follow: Value = serde_json::from_str(&f.follow_chats().unwrap()).unwrap();
+        assert_eq!(follow["command"], "subscribe");
+        assert_eq!(follow["identifier"], CHATS_IDENTIFIER);
+        let unfollow: Value = serde_json::from_str(&f.unfollow_chats().unwrap()).unwrap();
+        assert_eq!(unfollow["command"], "unsubscribe");
+        assert!(Framing::Mcp.follow_chats().is_none());
+
+        let event = json!({ "identifier": CHATS_IDENTIFIER, "message": { "event": "removed", "number": 42 } });
+        assert_eq!(
+            f.decode(&event.to_string()),
+            Inbound::ChatList(json!({ "event": "removed", "number": 42 }))
+        );
+        // The same channel, with the keys the other way round, is still it.
+        let spaced = json!({ "identifier": "{ \"channel\": \"LocalAgent::ChatsChannel\" }", "type": "confirm_subscription" });
+        assert_eq!(f.decode(&spaced.to_string()), Inbound::ChatListConfirmed);
+        let rejected = json!({ "identifier": CHATS_IDENTIFIER, "type": "reject_subscription" });
+        assert_eq!(f.decode(&rejected.to_string()), Inbound::ChatListRejected);
+        // With a parameter it's no channel the daemon subscribed to.
+        let other = json!({ "identifier": "{\"channel\":\"LocalAgent::ChatsChannel\",\"x\":1}", "message": { "event": "removed", "number": 1 } });
+        assert_eq!(f.decode(&other.to_string()), Inbound::Ignored);
+        // Shaped like a tool call, it's still a list event.
+        let sneaky = json!({ "identifier": CHATS_IDENTIFIER, "message": { "jsonrpc": "2.0", "id": 1, "method": "tools/call" } });
+        assert!(matches!(
+            f.decode(&sneaky.to_string()),
+            Inbound::ChatList(_)
         ));
     }
 

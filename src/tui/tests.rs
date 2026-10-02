@@ -12,8 +12,8 @@ use time::{OffsetDateTime, UtcOffset};
 
 use super::app::*;
 use super::chat::{
-    AccessRequest, ChatList, ChatSummary, Entry, Failure, Live, Named, Project, Source, Step,
-    Transcript,
+    AccessRequest, ChatList, ChatSummary, Entry, Failure, ListLive, Live, Named, Project, Source,
+    Step, Transcript,
 };
 use super::theme::{Depth, Signal, Theme};
 use super::ui::render;
@@ -1020,6 +1020,7 @@ fn chat_list() -> ChatList {
             name: "Carmine".into(),
         },
         locked_reason: None,
+        ..ChatList::default()
     }
 }
 
@@ -1230,10 +1231,12 @@ fn chats_taken_back_show_at_once_and_come_back_live() {
     assert!(matches!(app.chat.access, Access::NeedsApproval { .. }));
     assert_eq!(app.focus, Focus::Chats, "nothing to type into");
 
-    // Allowed again: the open chat is read and followed again.
+    // Allowed again: the list is kept current, and the open chat is read
+    // and followed again.
     assert_eq!(
         app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list())))),
         vec![
+            Effect::Chat(ChatCommand::FollowList(true)),
             Effect::Chat(ChatCommand::Follow(Some(42))),
             Effect::Chat(ChatCommand::Open(42)),
         ]
@@ -1377,7 +1380,13 @@ fn chats_load_once_a_running_daemon_is_paired() {
         "connected",
         vec![],
     )))));
-    assert_eq!(effects, vec![Effect::Chat(ChatCommand::List)]);
+    assert_eq!(
+        effects,
+        vec![
+            Effect::Chat(ChatCommand::List),
+            Effect::Chat(ChatCommand::FollowList(true))
+        ]
+    );
     assert_eq!(app.chat.access, Access::Loading);
     // More status events don't ask again.
     assert!(
@@ -2650,4 +2659,109 @@ fn the_list_keeps_its_selection_as_chats_come_and_go() {
     app.chat.remove_chat(40);
     assert!(app.chat.selected_chat().is_some(), "still on a row");
     assert!(app.chat.list.chats.iter().all(|c| c.number != 40));
+}
+
+#[test]
+fn the_list_stays_current_over_the_daemons_socket() {
+    let mut app = app();
+    budget_open(&mut app, every_action());
+    // Confirmed: list once to catch up.
+    assert_eq!(
+        app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Watching))),
+        vec![Effect::Chat(ChatCommand::List)]
+    );
+    assert!(app.chat.list_live);
+
+    // A chat started elsewhere appears on top; the selection stays put.
+    let selected = app.chat.selected_chat().map(|c| c.number);
+    let mut fresh = summary(51, "Started on the web", "2026-09-25T08:19:30Z");
+    fresh.state = "processing".into();
+    assert!(
+        app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Chat(fresh))))
+            .is_empty()
+    );
+    assert_eq!(app.chat.list.chats[0].number, 51);
+    assert_eq!(app.chat.selected_chat().map(|c| c.number), selected);
+    assert_eq!(
+        app.next_wakeup(NOW),
+        Some(FRAME),
+        "it shimmers while answered"
+    );
+    let mut done = summary(51, "Q4 forecast", "2026-09-25T08:19:40Z");
+    done.state = "idle".into();
+    app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Chat(done))));
+    assert_eq!(app.chat.list.chats[0].title, "Q4 forecast");
+    assert_eq!(app.next_wakeup(NOW), None);
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("Q4 forecast"), "{screen}");
+
+    // Asking here needs no read of the list: the server sends the chat.
+    type_text(&mut app, "And Q4?");
+    app.update(key(KeyCode::Enter));
+    let effects = app.update(Msg::Chat(ChatMsg::Sent {
+        chat: Some(42),
+        result: Ok(summary(42, "Q3 budget", "2026-09-25T08:20:00Z")),
+    }));
+    assert!(
+        !effects.contains(&Effect::Chat(ChatCommand::List)),
+        "{effects:?}"
+    );
+
+    // Projects and the header change in place.
+    app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Projects(vec![
+        Project {
+            id: 3,
+            name: "Falcon".into(),
+        },
+        Project {
+            id: 9,
+            name: "Hiring".into(),
+        },
+    ]))));
+    assert_eq!(app.chat.list.projects.len(), 2);
+    app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Account(
+        super::chat::AccountUpdate {
+            user: Named { name: "Ada".into() },
+            locked_reason: Some("You're out of credits.".into()),
+            ..super::chat::AccountUpdate::default()
+        },
+    ))));
+    assert_eq!(app.chat.list.user.name, "Ada");
+    assert_eq!(app.chat.locked_reason(), None, "the open chat says its own");
+
+    // The open chat deleted elsewhere closes, saying so.
+    let effects = app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Removed(42))));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Follow(None))));
+    assert_eq!(app.chat.open, None);
+    assert!(app.notice.as_ref().unwrap().text.contains("deleted"));
+    assert!(app.chat.list.chats.iter().all(|c| c.number != 42));
+
+    // Offline: changes are read again after each action, until it's back.
+    app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Offline)));
+    assert!(!app.chat.list_live);
+    assert_eq!(
+        app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Missed))),
+        vec![Effect::Chat(ChatCommand::List)]
+    );
+}
+
+#[test]
+fn an_older_daemon_or_server_keeps_reading_the_list() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(Msg::Chat(ChatMsg::ListFollowFailed(Failure::new(
+        "daemon_outdated",
+        "The daemon running now is older than this cww.",
+    ))));
+    assert!(!app.chat.list_live);
+    assert!(app.chat.ready(), "chats carry on");
+    assert_eq!(app.notice, None, "nothing to say about it");
+    app.update(char('n'));
+    type_text(&mut app, "Hi");
+    app.update(key(KeyCode::Enter));
+    let effects = app.update(Msg::Chat(ChatMsg::Sent {
+        chat: None,
+        result: Ok(summary(60, "Hi", "2026-09-25T08:20:00Z")),
+    }));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::List)));
 }

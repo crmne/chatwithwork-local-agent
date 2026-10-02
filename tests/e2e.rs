@@ -2077,3 +2077,153 @@ async fn relays_models_decisions_files_and_chat_actions() {
         .unwrap()
         .unwrap();
 }
+
+/// The chat list stays current over the daemon's socket: one subscription
+/// to the list's channel however many terminals watch it, its changes
+/// relayed as they come, and a refused one asked again by the next watcher.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keeps_the_chat_list_current_for_the_terminal() {
+    use cww::tui::chat::{Chats, ListLive};
+
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    pair(&fx, &server);
+    server.state.lock().unwrap().chat_access = true;
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let mut ws = tokio::time::timeout(Duration::from_secs(20), server.sockets.recv())
+        .await
+        .expect("the daemon connects")
+        .unwrap();
+    let chats = Chats::new(&fx.paths.socket_path());
+    let identifier = r#"{"channel":"LocalAgent::ChatsChannel"}"#;
+
+    type Closer = Arc<Mutex<Option<cww::control::Closer>>>;
+    let watch = |chats: &Chats| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let closer: Closer = Arc::default();
+        let (c, held) = (chats.clone(), Arc::clone(&closer));
+        let task = tokio::task::spawn_blocking(move || {
+            c.follow_list(
+                |c| *held.lock().unwrap() = c,
+                |live| match live {
+                    Some(live) => tx.send(live).is_ok(),
+                    None => true,
+                },
+            )
+        });
+        (rx, task, closer)
+    };
+    let hang_up = |closer: &Closer| {
+        if let Some(c) = closer.lock().unwrap().take() {
+            c.close();
+        }
+    };
+    /// The next change. A watcher that came before the tunnel's session
+    /// started hears it's offline first.
+    async fn next(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ListLive>) -> ListLive {
+        loop {
+            let live = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .expect("a change in time")
+                .expect("the watcher is running");
+            if live != ListLive::Offline {
+                return live;
+            }
+        }
+    }
+    async fn subscribed(ws: &mut WebSocketStream<TcpStream>) -> Value {
+        serde_json::from_str(&next_text(ws).await.unwrap()).unwrap()
+    }
+
+    // The first watcher subscribes; the server refuses (chats were just
+    // taken back, say).
+    let (mut first, first_task, first_closer) = watch(&chats);
+    let subscribe = subscribed(&mut ws).await;
+    assert_eq!(subscribe["command"], "subscribe");
+    assert_eq!(subscribe["identifier"], identifier);
+    ws.send(Message::text(
+        json!({ "identifier": identifier, "type": "reject_subscription" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next(&mut first).await, ListLive::Refused);
+
+    // The next watcher asks again, and this time it's confirmed.
+    let (mut second, second_task, second_closer) = watch(&chats);
+    assert_eq!(subscribed(&mut ws).await["identifier"], identifier);
+    ws.send(Message::text(
+        json!({ "identifier": identifier, "type": "confirm_subscription" }).to_string(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(next(&mut first).await, ListLive::Watching);
+    assert_eq!(next(&mut second).await, ListLive::Watching);
+
+    // Each change reaches every watcher, and none reaches the MCP server.
+    let changes = [
+        json!({ "event": "chat", "chat": { "number": 12, "title": "Started on the web", "state": "processing", "updated_at": "2026-10-02T09:05:00Z" } }),
+        json!({ "event": "removed", "number": 7 }),
+        json!({ "event": "projects", "projects": [{ "id": 7, "name": "Launch", "icon": "folder-simple", "hq": false, "all_access": false, "url": "https://x/projects/4" }] }),
+        json!({ "event": "account", "account": { "name": "Plenty UG", "logo": null }, "user": { "name": "Carmine", "avatar": null }, "credits": { "left": 1180, "capacity": 5000, "running_low": false }, "locked_reason": null }),
+        json!({ "jsonrpc": "2.0", "id": 77, "method": "tools/call", "params": {} }),
+    ];
+    for change in &changes {
+        ws.send(Message::text(
+            json!({ "identifier": identifier, "message": change }).to_string(),
+        ))
+        .await
+        .unwrap();
+    }
+    for rx in [&mut first, &mut second] {
+        let ListLive::Chat(chat) = next(rx).await else {
+            panic!("a chat first");
+        };
+        assert_eq!((chat.number, chat.processing()), (12, true));
+        assert_eq!(next(rx).await, ListLive::Removed(7));
+        let ListLive::Projects(projects) = next(rx).await else {
+            panic!("the projects");
+        };
+        assert_eq!(projects[0].name, "Launch");
+        let ListLive::Account(account) = next(rx).await else {
+            panic!("the account");
+        };
+        assert_eq!(account.credits.unwrap().left, 1180);
+    }
+    let mut s = Session {
+        ws,
+        next_id: 0,
+        legacy: false,
+    };
+    let tools = s.request("tools/list", json!({})).await;
+    assert!(tools["result"]["tools"].is_array(), "{tools}");
+
+    // The last watcher gone, the daemon unsubscribes at once.
+    hang_up(&first_closer);
+    hang_up(&second_closer);
+    let mut unsubscribed = false;
+    for _ in 0..20 {
+        let Some(text) = tokio::time::timeout(Duration::from_secs(10), next_text(&mut s.ws))
+            .await
+            .ok()
+            .flatten()
+        else {
+            break;
+        };
+        let frame: Value = serde_json::from_str(&text).unwrap();
+        if frame["command"] == "unsubscribe" && frame["identifier"] == identifier {
+            unsubscribed = true;
+            break;
+        }
+    }
+    assert!(unsubscribed, "the daemon leaves the list's channel");
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(10), first_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), second_task).await;
+}

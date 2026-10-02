@@ -331,6 +331,14 @@ To follow a chat, subscribe to the `chat` topic with its number:
 
 The daemon follows the chat on the server for as long as the connection stays open, once however many clients follow it. A refusal (not paired, a bad number) comes back as a failure with a `code` instead of `ok`.
 
+To keep the chat list current, subscribe to the `chats` topic:
+
+```json
+{"cmd": "subscribe", "topics": ["chats"]}
+```
+
+The daemon subscribes to the server's list channel once however many clients watch it, and leaves it when the last one hangs up. List the chats (`chats`) when it says `watching`, then apply each change as it comes. A server from before live lists never says `watching`, and a daemon from before it refuses the topic (`bad request: unknown variant`): read the list again after each change instead. Hanging up ends any subscription at once.
+
 ## 5. Events
 
 Each event is one line with an `event` field.
@@ -353,9 +361,23 @@ Each event is one line with an `event` field.
 {"event": "chat", "chat": "42", "update": { "type": "chunk", "message_id": 5, "text": "The Q3 budget is " }}
 ```
 
-**`heartbeat`**: sent every 30 seconds on a chat subscription while nothing else happens, so a client that stopped reading is noticed and the chat is no longer followed for it.
+**`chats`**: a change to the chat list, `update.event` being one of:
 
-**`lagged`**: the client read too slowly and `missed` events were dropped. Ask for `status` or `audit_tail` on another connection to catch up; a chat follower reads the chat again.
+- `chat`: a chat was started (here, on the web, or by someone in a project), renamed, started or stopped being answered, switched model, got or lost its public link, or moved in or out of a project. `update.chat` is the chat's JSON, as in `chats`: put it in by `number` if it's new, else replace it, and keep the list sorted by `updated_at`.
+- `removed`: chat `update.number` was deleted, or the owner can't see it any more. Drop it, and close it if it's open.
+- `projects`: `update.projects` is the whole list of projects again.
+- `account`: the list's header again: `account`, `user`, `credits` and `locked_reason`.
+- A note from the daemon: `watching` (the server keeps the list current now: list the chats once to catch up), `offline` (no connection to the server; the daemon keeps trying and says `watching` again later), `refused` (the server won't keep it current for this computer, for example while chats aren't allowed; subscribing again asks again), or `unsupported` (the daemon's connection speaks bare MCP).
+
+```json
+{"event": "chats", "update": { "event": "removed", "number": 42 }}
+```
+
+Pins aren't streamed: they are as current as the last `chats`.
+
+**`heartbeat`**: sent every 30 seconds on a chat or `chats` subscription while nothing else happens, so a client that stopped reading is noticed and the chat is no longer followed for it.
+
+**`lagged`**: the client read too slowly and `missed` events were dropped. Ask for `status` or `audit_tail` on another connection to catch up; a chat follower reads the chat again, and a `chats` subscriber lists the chats again.
 
 ```json
 {"event": "lagged", "missed": 12}

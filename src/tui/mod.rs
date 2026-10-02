@@ -88,6 +88,7 @@ pub fn run(paths: Paths) -> Result<()> {
         result = event_loop(&mut terminal, &mut app, &theme, &rx, &out);
     }
     out.chats.follow(None);
+    out.chats.follow_list(false);
     if mouse {
         let _ = execute!(stdout(), DisableMouseCapture);
     }
@@ -213,6 +214,8 @@ struct ChatRunner {
     /// The chat followed now: set its flag to stop it, and close its
     /// connection to stop it at once where the platform allows.
     following: Mutex<Option<Follower>>,
+    /// Keeping the chat list current, while it is.
+    list: Mutex<Option<Follower>>,
     /// Bumped to stop an earlier wait for chat access.
     access_wait: Arc<AtomicU64>,
 }
@@ -237,6 +240,7 @@ impl ChatRunner {
             chats,
             tx,
             following: Mutex::new(None),
+            list: Mutex::new(None),
             access_wait: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -368,10 +372,55 @@ impl ChatRunner {
                 });
             }
             ChatCommand::Follow(chat) => self.follow(chat),
+            ChatCommand::FollowList(on) => self.follow_list(on),
             ChatCommand::OpenUrl(url) => {
                 crate::browser::open(&url);
             }
         }
+    }
+
+    /// Keep the chat list current, starting over if it already is, or stop.
+    fn follow_list(&self, on: bool) {
+        let mut list = self.list.lock().expect("list");
+        if let Some(previous) = list.take() {
+            previous.stop();
+        }
+        if !on {
+            return;
+        }
+        let follower = Follower {
+            stop: Arc::new(AtomicBool::new(false)),
+            closer: Arc::new(Mutex::new(None)),
+        };
+        let (stop, closer) = (Arc::clone(&follower.stop), Arc::clone(&follower.closer));
+        *list = Some(follower);
+        let (chats, tx) = (self.chats.clone(), self.tx.clone());
+        thread::spawn(move || {
+            let result = chats.follow_list(
+                |c| {
+                    *closer.lock().expect("closer") = c;
+                    if stop.load(Ordering::SeqCst)
+                        && let Some(c) = closer.lock().expect("closer").take()
+                    {
+                        c.close();
+                    }
+                },
+                |live| {
+                    if stop.load(Ordering::SeqCst) {
+                        return false;
+                    }
+                    match live {
+                        Some(live) => tx.send(Msg::Chat(ChatMsg::ListLive(live))).is_ok(),
+                        None => true,
+                    }
+                },
+            );
+            if let Err(failure) = result
+                && !stop.load(Ordering::SeqCst)
+            {
+                let _ = tx.send(Msg::Chat(ChatMsg::ListFollowFailed(failure)));
+            }
+        });
     }
 
     /// Follow `chat` live, instead of whatever was followed before.

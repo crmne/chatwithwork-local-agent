@@ -728,6 +728,22 @@ impl ControlHandler for Daemon {
         self.chats.unwatch(chat);
     }
 
+    async fn watch_chats(&self) -> Result<()> {
+        if self.chat_client.lock().await.is_none() {
+            return Err(Refusal::new(
+                "not_paired",
+                "This computer isn't paired with Chat with Work. Pair it with cww login.",
+            )
+            .into());
+        }
+        self.chats.watch_list();
+        Ok(())
+    }
+
+    fn unwatch_chats(&self) {
+        self.chats.unwatch_list();
+    }
+
     async fn handle(&self, request: ControlRequest) -> Result<Value> {
         match request {
             ControlRequest::Hello => Ok(json!({

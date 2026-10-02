@@ -14,8 +14,8 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
 use super::chat::{
-    AccessRequest, Approval, ChatList, ChatSummary, Entry, Failure, Live, Model, Models, Project,
-    Shared, Transcript, Uploaded,
+    AccessRequest, Approval, ChatList, ChatSummary, Entry, Failure, ListLive, Live, Model, Models,
+    Project, Shared, Transcript, Uploaded,
 };
 use super::commands::{self, Cmd, Command};
 use super::composer::{Composer, History};
@@ -340,6 +340,8 @@ pub enum ChatCommand {
     Open(u64),
     /// Follow one chat live, or stop following.
     Follow(Option<u64>),
+    /// Keep the chat list current, or stop.
+    FollowList(bool),
     /// Ask in a chat, or in a new one.
     Send {
         chat: Option<u64>,
@@ -468,6 +470,10 @@ pub enum ChatMsg {
         chat: u64,
         failure: Failure,
     },
+    /// A change to the chat list.
+    ListLive(ListLive),
+    /// Keeping the list current stopped with an error.
+    ListFollowFailed(Failure),
     Models(Result<Models, Failure>),
     /// A change was approved or denied.
     Decided {
@@ -534,6 +540,9 @@ pub enum Following {
 pub struct ChatPane {
     pub access: Access,
     pub list: ChatList,
+    /// The server keeps the list current, so it needn't be read again
+    /// after each change made here.
+    pub list_live: bool,
     /// The selected row of the sidebar, in [`ChatPane::side_items`]: 0 is
     /// "New chat", then the chats the search leaves, then the projects.
     pub selected: usize,
@@ -594,6 +603,7 @@ impl Default for ChatPane {
         Self {
             access: Access::Unknown,
             list: ChatList::default(),
+            list_live: false,
             selected: 0,
             search: None,
             filter: None,
@@ -1227,8 +1237,13 @@ impl App {
                 .roots()
                 .iter()
                 .any(|r| r.index == "indexing" || r.index == "pending");
+        // A chat being answered shimmers in the list, while the list is
+        // current enough to say when it stops.
+        let listed = self.chat.list_live && self.chat.list.chats.iter().any(|c| c.processing());
         let chat = self.view == View::Chat
-            && (self.chat.working() || (self.chat.loading && self.chat.transcript.is_none()));
+            && (self.chat.working()
+                || listed
+                || (self.chat.loading && self.chat.transcript.is_none()));
         indexing || self.daemon.connection() == Some("connecting") || chat
     }
 
@@ -3112,6 +3127,7 @@ impl App {
             if self.chat.access != Access::Unknown {
                 self.chat.access = Access::Unknown;
                 self.chat.following = Following::No;
+                self.chat.list_live = false;
             }
             return Vec::new();
         }
@@ -3124,8 +3140,13 @@ impl App {
         if !retry {
             return Vec::new();
         }
+        let first = self.chat.access == Access::Unknown;
         self.chat.access = Access::Loading;
         let mut effects = vec![Effect::Chat(ChatCommand::List)];
+        if first {
+            // A daemon (new, or back) keeps the list current from now on.
+            effects.push(Effect::Chat(ChatCommand::FollowList(true)));
+        }
         if let Some(open) = self.chat.open {
             // A restarted daemon forgot what this TUI followed.
             self.chat.following = Following::Starting;
@@ -3142,19 +3163,24 @@ impl App {
                 let was_ready = self.chat.ready();
                 self.chat.access = Access::Ready;
                 self.chat.set_list(list);
+                // Allowed again (or for the first time): the server may have
+                // refused to keep the list current until now.
+                let follow_list = (!was_ready && !self.chat.list_live)
+                    .then_some(Effect::Chat(ChatCommand::FollowList(true)));
                 // Chats are back (allowed again, say): follow the open one
                 // again, unless that's already underway. A list that works
                 // after a refusal leaves it be: the refusal was about the
                 // chat, and following again would only be refused again.
+                let mut effects: Vec<Effect> = follow_list.into_iter().collect();
                 if let Some(open) = self.chat.open
                     && !was_ready
                     && self.chat.following != Following::Starting
                 {
                     self.chat.following = Following::Starting;
-                    let mut effects = vec![Effect::Chat(ChatCommand::Follow(Some(open)))];
+                    effects.push(Effect::Chat(ChatCommand::Follow(Some(open))));
                     effects.extend(self.refresh_chat(open));
-                    return effects;
                 }
+                return effects;
             }
             ChatMsg::Listed(Err(failure)) => {
                 self.chat_failure(failure);
@@ -3195,7 +3221,7 @@ impl App {
                     Ok(summary) => {
                         let number = summary.number;
                         self.chat.upsert_chat(summary);
-                        let mut effects = vec![Effect::Chat(ChatCommand::List)];
+                        let mut effects = self.list_again();
                         if chat.is_none() && self.chat.open.is_none() {
                             // The first question made the chat: follow it,
                             // and the model picked for it goes with it.
@@ -3291,6 +3317,10 @@ impl App {
                     Live::Unsupported => self.chat.following = Following::Unsupported,
                 }
             }
+            ChatMsg::ListLive(live) => return self.list_live(live),
+            // A daemon from before live lists, say: the list is read after
+            // each change instead, as before.
+            ChatMsg::ListFollowFailed(_) => self.chat.list_live = false,
             ChatMsg::FollowFailed { chat, failure } => {
                 if self.chat.open == Some(chat) {
                     self.chat.following = Following::Refused;
@@ -3376,6 +3406,63 @@ impl App {
         Vec::new()
     }
 
+    /// Read the list again after a change made here, unless the server
+    /// keeps it current anyway.
+    fn list_again(&self) -> Vec<Effect> {
+        if self.chat.list_live {
+            Vec::new()
+        } else {
+            vec![Effect::Chat(ChatCommand::List)]
+        }
+    }
+
+    /// A change to the chat list, as the server keeps it current.
+    fn list_live(&mut self, live: ListLive) -> Vec<Effect> {
+        use super::theme::Signal;
+        match live {
+            ListLive::Watching => {
+                self.chat.list_live = true;
+                // Catch up on what changed before the subscription.
+                if !matches!(self.chat.access, Access::Unknown | Access::Loading) {
+                    return vec![Effect::Chat(ChatCommand::List)];
+                }
+            }
+            ListLive::Missed => return vec![Effect::Chat(ChatCommand::List)],
+            ListLive::Refused | ListLive::Unsupported | ListLive::Offline => {
+                self.chat.list_live = false;
+            }
+            // Changes only apply to a list that was read.
+            _ if !self.chat.ready() => {}
+            ListLive::Chat(chat) => {
+                let reread = self.chat.open == Some(chat.number)
+                    && self
+                        .chat
+                        .open_summary()
+                        .is_some_and(|open| open.state != chat.state);
+                let number = chat.number;
+                self.chat.upsert_chat(chat);
+                // The open chat's follower says what changed, unless it
+                // can't follow it.
+                if reread && self.chat.following != Following::Live {
+                    return self.refresh_chat(number);
+                }
+            }
+            ListLive::Removed(number) => {
+                self.chat.remove_chat(number);
+                if self.chat.open == Some(number) {
+                    self.notice(
+                        Signal::Attention,
+                        "This chat was deleted, or you can't see it anymore.",
+                    );
+                    return self.new_chat();
+                }
+            }
+            ListLive::Projects(projects) => self.chat.set_projects(projects),
+            ListLive::Account(account) => self.chat.list.set_account(account),
+        }
+        Vec::new()
+    }
+
     /// A chat action finished.
     fn acted(
         &mut self,
@@ -3398,7 +3485,7 @@ impl App {
                 self.notice(Signal::Positive, "Branched into a new chat.");
                 self.select_chat(number);
                 let mut effects = self.open_chat(number);
-                effects.push(Effect::Chat(ChatCommand::List));
+                effects.extend(self.list_again());
                 effects
             }
             (ChatAction::Delete, _) => {

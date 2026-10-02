@@ -17,7 +17,7 @@ Pairing lets Chat with Work call four read-only tools. Reading your chats is wor
 
 ## Answers stream over the tunnel
 
-The daemon already holds a WebSocket to the server. To follow a chat, it subscribes to one more Action Cable channel on it, `LocalAgent::ChatChannel`, and relays what arrives to the TUI's `chat` subscription: answer text as it's written, the running tool's progress, and "changed" for everything else, after which the TUI reads the chat again. This beats Server-Sent Events here because the socket is already authenticated and reconnects on its own, it adds no connection per open chat, and on the server it doesn't hold a web worker per watcher. A reconnect subscribes again, and the TUI catches up by reading the chat.
+The daemon already holds a WebSocket to the server. To follow a chat, it subscribes to one more Action Cable channel on it, `LocalAgent::ChatChannel`, and relays what arrives to the TUI's `chat` subscription: answer text as it's written, the running tool's progress, and "changed" for everything else, after which the TUI reads the chat again. This beats Server-Sent Events here because the socket is already authenticated and reconnects on its own, it adds no connection per open chat, and on the server it doesn't hold a web worker per watcher. A reconnect subscribes again, and the TUI catches up by reading the chat. The chat list stays current the same way, through one subscription to `LocalAgent::ChatsChannel` however many terminals show it: new chats appear, titles and the answering state update, deleted chats go, and the projects and the header follow.
 
 ## What the TUI shows
 

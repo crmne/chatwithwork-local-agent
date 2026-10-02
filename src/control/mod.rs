@@ -99,7 +99,8 @@ pub enum ControlRequest {
     Deny,
     /// Stream events on this connection until it closes. With the `chat`
     /// topic, `chat` names the chat to follow, which the daemon follows on
-    /// the server for as long as the subscription is open.
+    /// the server for as long as the subscription is open; with `chats`,
+    /// the daemon keeps the chat list current the same way.
     Subscribe {
         #[serde(default = "all_topics")]
         topics: Vec<Topic>,
@@ -212,6 +213,9 @@ pub enum Topic {
     /// Updates of the chat named in `subscribe`: streamed answer text,
     /// progress, and "read it again".
     Chat,
+    /// Changes to the chat list: a chat started or changed, one removed,
+    /// the projects, the account.
+    Chats,
 }
 
 fn all_topics() -> Vec<Topic> {
@@ -234,6 +238,12 @@ pub enum ControlEvent {
         chat: String,
         update: Value,
     },
+    /// One change to the chat list, as the server sent it, or a note from
+    /// the daemon about the subscription (`watching`, `refused`, `offline`,
+    /// `unsupported`), each with its `event`.
+    Chats {
+        update: Value,
+    },
 }
 
 impl ControlEvent {
@@ -242,6 +252,7 @@ impl ControlEvent {
             Self::Audit { .. } => Topic::Audit,
             Self::Status { .. } => Topic::Status,
             Self::Chat { .. } => Topic::Chat,
+            Self::Chats { .. } => Topic::Chats,
         }
     }
 
@@ -304,6 +315,14 @@ pub trait ControlHandler: Send + Sync + 'static {
     }
 
     fn unwatch_chat(&self, _chat: &str) {}
+
+    /// Start keeping the chat list current for a new subscriber, matched by
+    /// one [`ControlHandler::unwatch_chats`] when the subscription ends.
+    fn watch_chats(&self) -> impl Future<Output = Result<()>> + Send {
+        async { bail!("chats are not available") }
+    }
+
+    fn unwatch_chats(&self) {}
 }
 
 /// Bind the control endpoint, refusing if another daemon is already
@@ -379,7 +398,11 @@ where
             }
         };
         if let ControlRequest::Subscribe { topics, chat } = request {
-            return stream_events(&mut write, handler.as_ref(), &topics, chat, shutdown).await;
+            let client = Subscriber {
+                write: &mut write,
+                lines: &mut lines,
+            };
+            return stream_events(client, handler.as_ref(), &topics, chat, shutdown).await;
         }
         let response = match handler.handle(request).await {
             Ok(mut value) => {
@@ -409,8 +432,15 @@ fn refusal_response(e: &anyhow::Error) -> Value {
     response
 }
 
-async fn stream_events<W, H>(
-    write: &mut W,
+/// A subscribed connection: events go out on `write`, and `lines` only
+/// tells when the client hangs up, so what it watched stops at once.
+struct Subscriber<'a, W, R> {
+    write: &'a mut W,
+    lines: &'a mut tokio::io::Lines<R>,
+}
+
+async fn stream_events<W, R, H>(
+    client: Subscriber<'_, W, R>,
     handler: &H,
     topics: &[Topic],
     chat: Option<String>,
@@ -418,8 +448,10 @@ async fn stream_events<W, H>(
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
     H: ControlHandler,
 {
+    let Subscriber { write, lines } = client;
     let Some(events) = handler.events() else {
         write_line(
             write,
@@ -444,8 +476,15 @@ where
             Some(chat)
         }
     };
+    let list = topics.contains(&Topic::Chats);
+    if list && let Err(e) = handler.watch_chats().await {
+        if let Some(chat) = &followed {
+            handler.unwatch_chat(chat);
+        }
+        return write_line(write, &refusal_response(&e)).await;
+    }
     let result = forward_events(
-        write,
+        Subscriber { write, lines },
         handler,
         topics,
         followed.as_deref(),
@@ -456,11 +495,14 @@ where
     if let Some(chat) = &followed {
         handler.unwatch_chat(chat);
     }
+    if list {
+        handler.unwatch_chats();
+    }
     result
 }
 
-async fn forward_events<W, H>(
-    write: &mut W,
+async fn forward_events<W, R, H>(
+    client: Subscriber<'_, W, R>,
     handler: &H,
     topics: &[Topic],
     followed: Option<&str>,
@@ -469,8 +511,10 @@ async fn forward_events<W, H>(
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
     H: ControlHandler,
 {
+    let Subscriber { write, lines } = client;
     write_line(write, &json!({ "ok": true, "topics": topics })).await?;
     if topics.contains(&Topic::Status)
         && let Some(status) = handler.initial_status().await
@@ -483,11 +527,19 @@ where
     }
     let mut heartbeat = tokio::time::interval(CHAT_HEARTBEAT);
     heartbeat.tick().await;
+    let beats = followed.is_some() || topics.contains(&Topic::Chats);
     loop {
         let event = tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
             event = events.recv() => event,
-            _ = heartbeat.tick(), if followed.is_some() => {
+            // The client sends nothing more: a line ends nothing, but
+            // hanging up ends the subscription now rather than at the next
+            // event.
+            line = lines.next_line() => match line {
+                Ok(Some(_)) => continue,
+                _ => return Ok(()),
+            },
+            _ = heartbeat.tick(), if beats => {
                 write_line(write, &json!({ "event": "heartbeat" })).await?;
                 continue;
             }
@@ -565,6 +617,20 @@ impl Client {
         })?;
         transport::clear_timeout(self.reader.get_ref());
         Ok(Events { client: self })
+    }
+
+    /// Keep the chat list current: `{"event":"chats",...}` changes and
+    /// heartbeats. A refusal comes back as the response's `code`.
+    pub fn follow_chats(mut self) -> Result<std::result::Result<Events, Value>> {
+        let response = self.call_raw(&ControlRequest::Subscribe {
+            topics: vec![Topic::Chats],
+            chat: None,
+        })?;
+        if response["ok"] != json!(true) {
+            return Ok(Err(response));
+        }
+        transport::clear_timeout(self.reader.get_ref());
+        Ok(Ok(Events { client: self }))
     }
 
     /// Follow one chat: `{"event":"chat",...}` updates and heartbeats. A

@@ -153,8 +153,53 @@ pub struct ChatList {
     pub projects: Vec<Project>,
     pub account: Named,
     pub user: Named,
+    /// The organization's credits; `None` from an older server.
+    pub credits: Option<Credits>,
     /// Why a new question can't be asked right now, as the composer says it.
     pub locked_reason: Option<String>,
+}
+
+/// The meter under the person's name: the organization's balance.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Credits {
+    #[serde(deserialize_with = "whole")]
+    pub left: u64,
+    #[serde(deserialize_with = "whole")]
+    pub capacity: u64,
+    /// Under 20% left: the web's sidebar shows the meter then.
+    pub running_low: bool,
+}
+
+/// A count the server may send as a whole or a decimal number.
+fn whole<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::Number(n) => n
+            .as_u64()
+            .or_else(|| n.as_f64().map(|f| f.max(0.0).round() as u64))
+            .unwrap_or_default(),
+        _ => 0,
+    })
+}
+
+/// The list's header again, when something in it changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct AccountUpdate {
+    pub account: Named,
+    pub user: Named,
+    pub credits: Option<Credits>,
+    pub locked_reason: Option<String>,
+}
+
+impl ChatList {
+    /// Take a header the list's live updates sent.
+    pub fn set_account(&mut self, update: AccountUpdate) {
+        self.account = update.account;
+        self.user = update.user;
+        self.credits = update.credits;
+        self.locked_reason = update.locked_reason;
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -489,6 +534,55 @@ impl Live {
     }
 }
 
+/// A change to the chat list, as the server keeps it current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListLive {
+    /// A chat started, or changed: put it in by `number`, newest first.
+    Chat(ChatSummary),
+    /// A chat deleted, or out of sight now: drop it, close it if open.
+    Removed(u64),
+    /// Every project again.
+    Projects(Vec<Project>),
+    /// The list's header again.
+    Account(AccountUpdate),
+    /// The server keeps the list current (again): list the chats once.
+    Watching,
+    /// The server won't keep it current for this computer.
+    Refused,
+    /// The daemon's connection can't (bare MCP).
+    Unsupported,
+    /// No connection to the server; the daemon keeps trying.
+    Offline,
+    /// Changes were missed: list the chats again.
+    Missed,
+}
+
+impl ListLive {
+    /// What one event of the daemon's stream says about the list. `None`
+    /// for heartbeats and anything this cww doesn't know.
+    fn from_event(event: &Value) -> Option<Self> {
+        match event["event"].as_str() {
+            Some("chats") => Self::from_update(&event["update"]),
+            Some("lagged") => Some(Self::Missed),
+            _ => None,
+        }
+    }
+
+    fn from_update(update: &Value) -> Option<Self> {
+        Some(match update["event"].as_str()? {
+            "chat" => Self::Chat(serde_json::from_value(update["chat"].clone()).ok()?),
+            "removed" => Self::Removed(update["number"].as_u64()?),
+            "projects" => Self::Projects(serde_json::from_value(update["projects"].clone()).ok()?),
+            "account" => Self::Account(serde_json::from_value(update.clone()).ok()?),
+            "watching" => Self::Watching,
+            "refused" => Self::Refused,
+            "unsupported" => Self::Unsupported,
+            "offline" => Self::Offline,
+            _ => return None,
+        })
+    }
+}
+
 /// The daemon, as the chat pane talks to it.
 #[derive(Debug, Clone)]
 pub struct Chats {
@@ -706,6 +800,30 @@ impl Chats {
         for event in events {
             let Ok(event) = event else { break };
             if !on_live(Live::from_event(&event)) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep the chat list current until `on_live` answers false or the
+    /// daemon goes away, as [`Chats::follow`] does for one chat. List the
+    /// chats when it says [`ListLive::Watching`]; a server from before live
+    /// lists never does, and the list is only as current as its last read.
+    pub fn follow_list(
+        &self,
+        on_start: impl FnOnce(Option<Closer>),
+        mut on_live: impl FnMut(Option<ListLive>) -> bool,
+    ) -> Result<(), Failure> {
+        let client = self.connect()?;
+        let events = client
+            .follow_chats()
+            .map_err(|e| Failure::new("daemon_stopped", format!("{e:#}")))?
+            .map_err(|response| Failure::from_response(&response))?;
+        on_start(events.closer());
+        for event in events {
+            let Ok(event) = event else { break };
+            if !on_live(ListLive::from_event(&event)) {
                 break;
             }
         }
@@ -944,6 +1062,58 @@ mod tests {
         assert_eq!(
             Live::from_update(&json!({ "type": "unsupported" })),
             Some(Live::Unsupported)
+        );
+    }
+
+    #[test]
+    fn reads_the_lists_live_changes() {
+        let read =
+            |update: Value| ListLive::from_event(&json!({ "event": "chats", "update": update }));
+        let Some(ListLive::Chat(chat)) = read(json!({
+            "event": "chat",
+            "chat": { "number": 42, "title": "Q3 budget", "state": "processing", "updated_at": "2026-10-02T09:05:00Z", "created_at": "x" }
+        })) else {
+            panic!("a chat");
+        };
+        assert_eq!((chat.number, chat.processing()), (42, true));
+        assert_eq!(
+            read(json!({ "event": "removed", "number": 42 })),
+            Some(ListLive::Removed(42))
+        );
+        assert_eq!(
+            read(
+                json!({ "event": "projects", "projects": [{ "id": 7, "name": "Launch", "icon": "folder-simple" }] })
+            ),
+            Some(ListLive::Projects(vec![Project {
+                id: 7,
+                name: "Launch".into(),
+            }]))
+        );
+        let Some(ListLive::Account(account)) = read(json!({
+            "event": "account",
+            "account": { "name": "Plenty UG", "logo": null },
+            "user": { "name": "Carmine", "avatar": null },
+            "credits": { "left": 1180.5, "capacity": 5000, "running_low": false },
+            "locked_reason": null
+        })) else {
+            panic!("the account");
+        };
+        assert_eq!(account.user.name, "Carmine");
+        assert_eq!(account.credits.unwrap().left, 1181);
+        for (note, live) in [
+            ("watching", ListLive::Watching),
+            ("refused", ListLive::Refused),
+            ("offline", ListLive::Offline),
+            ("unsupported", ListLive::Unsupported),
+        ] {
+            assert_eq!(read(json!({ "event": note })), Some(live));
+        }
+        assert_eq!(read(json!({ "event": "something_new" })), None);
+        assert_eq!(read(json!({ "event": "removed" })), None, "no number");
+        assert_eq!(ListLive::from_event(&json!({ "event": "heartbeat" })), None);
+        assert_eq!(
+            ListLive::from_event(&json!({ "event": "lagged", "missed": 3 })),
+            Some(ListLive::Missed)
         );
     }
 

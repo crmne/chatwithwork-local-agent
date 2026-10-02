@@ -183,6 +183,21 @@ where
                                     hub.note(&chat, "refused");
                                 }
                             }
+                            Inbound::ChatList(update) => {
+                                if let Some(hub) = &options.chats {
+                                    hub.publish_list(update);
+                                }
+                            }
+                            Inbound::ChatListConfirmed => {
+                                if let Some(hub) = &options.chats {
+                                    hub.list_confirmed(true);
+                                }
+                            }
+                            Inbound::ChatListRejected => {
+                                if let Some(hub) = &options.chats {
+                                    hub.list_confirmed(false);
+                                }
+                            }
                             Inbound::Disconnect { reason, reconnect } => {
                                 if !reconnect || reason == "unauthorized" {
                                     break SessionEnd::Unauthorized(reason);
@@ -208,25 +223,25 @@ where
                 }
             }
             follow = next_follow(&mut follows) => {
-                let (frame, chat) = match &follow {
-                    Some(Follow::Watch(chat)) => (framing.follow_chat(chat), chat),
-                    Some(Follow::Unwatch(chat)) => (framing.unfollow_chat(chat), chat),
+                let frame = match &follow {
+                    Some(Follow::Watch(chat)) => framing.follow_chat(chat),
+                    Some(Follow::Unwatch(chat)) => framing.unfollow_chat(chat),
+                    Some(Follow::WatchList) => framing.follow_chats(),
+                    Some(Follow::UnwatchList) => framing.unfollow_chats(),
                     None => {
                         follows = None;
                         continue;
                     }
                 };
-                match frame {
-                    Some(frame) => {
+                match (frame, &options.chats, &follow) {
+                    (Some(frame), _, _) => {
                         if let Err(e) = sink.send(Message::text(frame)).await {
                             break SessionEnd::Error(e.to_string());
                         }
                     }
-                    None => {
-                        if let (Some(hub), Some(Follow::Watch(_))) = (&options.chats, &follow) {
-                            hub.note(chat, "unsupported");
-                        }
-                    }
+                    (None, Some(hub), Some(Follow::Watch(chat))) => hub.note(chat, "unsupported"),
+                    (None, Some(hub), Some(Follow::WatchList)) => hub.note_list("unsupported"),
+                    (None, _, _) => {}
                 }
             }
             _ = ping.tick() => {

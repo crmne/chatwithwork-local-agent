@@ -351,7 +351,8 @@ fn projects_section(
 }
 
 /// A chat in the list. One that's being answered gets the live dot, and
-/// its title shimmers while it's the open one (the only one followed).
+/// its title shimmers while the TUI can tell when that stops: it's the open
+/// chat, or the server keeps the list current.
 fn chat_row(
     chat: &ChatSummary,
     pane: &ChatPane,
@@ -377,7 +378,7 @@ fn chat_row(
         spans.push(Span::styled(DOT, dot));
         spans.push(Span::raw(" "));
     }
-    if open && pane.working() {
+    if (open && pane.working()) || (pane.list_live && chat.processing()) {
         spans.extend(theme.shimmer_text(&title, sweep(now)));
     } else {
         spans.push(Span::styled(title, style));

@@ -10,6 +10,8 @@
 //! Answers stream over the tunnel's WebSocket rather than a new connection:
 //! the daemon subscribes to `LocalAgent::ChatChannel` for each chat a TUI
 //! follows ([`ChatHub`]) and passes its updates to the TUI's subscription.
+//! The chat list stays current the same way, through one subscription to
+//! `LocalAgent::ChatsChannel` however many clients watch it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -40,6 +42,9 @@ pub fn chat_number(chat: &str) -> Result<&str, Refusal> {
 pub enum Follow {
     Watch(String),
     Unwatch(String),
+    /// Keep the chat list current.
+    WatchList,
+    UnwatchList,
 }
 
 /// The chats TUIs follow, counted, and the tunnel session that follows
@@ -53,6 +58,10 @@ pub struct ChatHub {
 #[derive(Default)]
 struct HubState {
     followers: HashMap<String, usize>,
+    /// Clients watching the chat list.
+    list_watchers: usize,
+    /// The server confirmed the list's subscription on this session.
+    list_live: bool,
     session: Option<mpsc::UnboundedSender<Follow>>,
 }
 
@@ -103,14 +112,52 @@ impl ChatHub {
         }
     }
 
+    /// One more client watching the chat list. The first one subscribes on
+    /// the server, and so does one that comes while the server hasn't
+    /// confirmed it (it refused, say, before chats were allowed): asking
+    /// again is how a client tries again. Without a session, it hears
+    /// `offline`.
+    pub fn watch_list(&self) {
+        let mut state = self.state.lock().expect("chat hub");
+        state.list_watchers += 1;
+        match &state.session {
+            Some(_) if state.list_live => self.note_list("watching"),
+            Some(session) => {
+                let _ = session.send(Follow::WatchList);
+            }
+            None => self.note_list("offline"),
+        }
+    }
+
+    pub fn unwatch_list(&self) {
+        let mut state = self.state.lock().expect("chat hub");
+        state.list_watchers = state.list_watchers.saturating_sub(1);
+        if state.list_watchers == 0 {
+            state.list_live = false;
+            if let Some(session) = &state.session {
+                let _ = session.send(Follow::UnwatchList);
+            }
+        }
+    }
+
+    /// The server confirmed the list's subscription, or refused it.
+    pub fn list_confirmed(&self, live: bool) {
+        self.state.lock().expect("chat hub").list_live = live;
+        self.note_list(if live { "watching" } else { "refused" });
+    }
+
     /// A tunnel session starts: it receives what to follow, starting with
-    /// every chat followed now.
+    /// every chat followed now, and the list if anyone watches it.
     pub fn attach(&self) -> mpsc::UnboundedReceiver<Follow> {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut state = self.state.lock().expect("chat hub");
         for chat in state.followers.keys() {
             let _ = tx.send(Follow::Watch(chat.clone()));
         }
+        if state.list_watchers > 0 {
+            let _ = tx.send(Follow::WatchList);
+        }
+        state.list_live = false;
         state.session = Some(tx);
         rx
     }
@@ -119,9 +166,25 @@ impl ChatHub {
     pub fn detach(&self) {
         let mut state = self.state.lock().expect("chat hub");
         state.session = None;
+        state.list_live = false;
         for chat in state.followers.keys() {
             self.note(chat, "offline");
         }
+        if state.list_watchers > 0 {
+            self.note_list("offline");
+        }
+    }
+
+    /// A change to the chat list the server sent.
+    pub fn publish_list(&self, update: Value) {
+        let _ = self.events.send(ControlEvent::Chats { update });
+    }
+
+    /// A note about the list's subscription: `watching` once the server
+    /// confirms it (list the chats then), `refused`, `offline` without a
+    /// tunnel, `unsupported` on a connection that can't follow it.
+    pub fn note_list(&self, what: &str) {
+        self.publish_list(json!({ "event": what }));
     }
 
     /// An update the server sent for `chat`.
@@ -610,5 +673,46 @@ mod tests {
         let mut again = hub.attach();
         assert_eq!(again.try_recv().ok(), Some(Follow::Watch("8".into())));
         assert_eq!(hub.followed(), vec!["8".to_string()]);
+    }
+
+    #[test]
+    fn the_hub_watches_the_list_once_and_asks_again_until_confirmed() {
+        let (events, mut heard) = broadcast::channel(16);
+        let hub = ChatHub::new(events);
+        let note = |what: &str| ControlEvent::Chats {
+            update: json!({ "event": what }),
+        };
+
+        hub.watch_list();
+        assert_eq!(heard.try_recv().ok(), Some(note("offline")));
+        let mut session = hub.attach();
+        assert_eq!(session.try_recv().ok(), Some(Follow::WatchList));
+
+        // Refused (no chat access yet): the next watcher asks again.
+        hub.list_confirmed(false);
+        assert_eq!(heard.try_recv().ok(), Some(note("refused")));
+        hub.watch_list();
+        assert_eq!(session.try_recv().ok(), Some(Follow::WatchList));
+        hub.list_confirmed(true);
+        assert_eq!(heard.try_recv().ok(), Some(note("watching")));
+        // Once live, a newcomer only hears that it is.
+        hub.watch_list();
+        assert!(session.try_recv().is_err());
+        assert_eq!(heard.try_recv().ok(), Some(note("watching")));
+
+        for _ in 0..2 {
+            hub.unwatch_list();
+        }
+        assert!(session.try_recv().is_err(), "one watcher left");
+        hub.unwatch_list();
+        assert_eq!(session.try_recv().ok(), Some(Follow::UnwatchList));
+
+        // A reconnect subscribes again only while someone watches.
+        hub.watch_list();
+        let _ = session.try_recv();
+        hub.detach();
+        assert_eq!(heard.try_recv().ok(), Some(note("offline")));
+        let mut again = hub.attach();
+        assert_eq!(again.try_recv().ok(), Some(Follow::WatchList));
     }
 }
