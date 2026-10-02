@@ -1,17 +1,13 @@
- ◆ Chat with Work              │  New chat
+ ◆ Chat with Work              │  Ask anything.
+                               │  Chat with Work searches your shared folders and the services you
+ ▌+ New chat                   │  connected, and the chat stays in Chat with Work on the web too.
+  / Search chats               │
                                │
- ▌+ New chat                   │  Ask anything.
-  / Search chats               │  Chat with Work searches your shared folders and the services you
-                               │  connected, and the chat stays in Chat with Work on the web too.
-  PINNED                       │
-   Vendor contracts            │
-   Onboarding checklist        │
-                               │
-  TODAY                        │
+  RECENT                       │
    Q3 budget                   │
    Launch plan for Falcon      │
-                               │
-  EARLIER                      │
+   Onboarding checklist        │
+   Vendor contracts            │
    Hiring plan                 │
                                │
                                │
@@ -22,9 +18,13 @@
                                │
                                │
                                │
-  PROJECTS                all  │
+                               │
+                               │
+                               │
+  PINNED                  all  │
    Falcon                      │
-   HQ                          │
+   Vendor contracts            │
+   Onboarding checklist        │
                                │ ╭────────────────────────────────────────────────────────────────╮
   C  Carmine                   │ │ ❯ Ask anything…                                                │
   400 of 5,000 credits left    │ ╰────────────────────────────────────────────────────────────────╯

@@ -1,14 +1,14 @@
- ◆ Chat with Work              │
-                               │
-  Loading…                     │  ╭──────────────────────────────────────────────────────────────╮
+ ◆ Chat with Work              │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● Share your Documents folder?                               │
-                               │  │ Nothing is shared yet. Chat with Work can search your        │
+  Loading…                     │  │ Nothing is shared yet. Chat with Work can search your        │
                                │  │ Documents folder:                                            │
                                │  │   /home/carmine/Documents                                    │
                                │  │ Keys, .env files and password databases inside it stay       │
                                │  │ private either way.                                          │
                                │  │ y share it   n not now   a pick another folder               │
                                │  ╰──────────────────────────────────────────────────────────────╯
+                               │
+                               │
                                │
                                │
                                │

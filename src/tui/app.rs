@@ -674,8 +674,12 @@ impl Default for ChatPane {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SideItem {
     NewChat,
+    /// A chat in Recent.
     Chat(u64),
+    /// A pinned project, in Pinned.
     Project(u64),
+    /// A pinned chat, in Pinned (it stays in Recent too, as on the web).
+    PinnedChat(u64),
 }
 
 /// Whether `a` was updated after `b`, both RFC 3339.
@@ -880,27 +884,32 @@ impl ChatPane {
         self.access == Access::Ready
     }
 
-    /// The chats the search and the project picked leave: the pinned ones
-    /// first, in pin order, as the web keeps them apart, then the rest
-    /// newest first.
+    /// Recent: the chats the search and the project picked leave, newest
+    /// first, pinned ones included, as the web lists them.
     pub fn visible(&self) -> Vec<&ChatSummary> {
-        let mut chats = self.matching();
-        let pins = &self.list.pins.chats;
-        let pinned = |c: &ChatSummary| pins.iter().position(|n| *n == c.number);
-        chats.sort_by_key(|c| pinned(c).unwrap_or(usize::MAX));
-        chats
+        self.matching()
     }
 
-    pub fn pinned(&self, chat: &ChatSummary) -> bool {
-        self.list.pins.chats.contains(&chat.number)
+    /// Pinned, under Recent as on the web: the pinned projects, in pin order.
+    pub fn pinned_projects(&self) -> Vec<&Project> {
+        let projects = &self.list.projects;
+        self.list
+            .pins
+            .projects
+            .iter()
+            .filter_map(|id| projects.iter().find(|p| p.id == *id))
+            .collect()
     }
 
-    /// The projects, pinned ones first, as the sidebar lists them.
-    pub fn projects(&self) -> Vec<&Project> {
-        let mut projects: Vec<&Project> = self.list.projects.iter().collect();
-        let pins = &self.list.pins.projects;
-        projects.sort_by_key(|p| pins.iter().position(|id| *id == p.id).unwrap_or(usize::MAX));
-        projects
+    /// Pinned, after the projects: the pinned chats, in pin order.
+    pub fn pinned_chats(&self) -> Vec<&ChatSummary> {
+        let chats = &self.list.chats;
+        self.list
+            .pins
+            .chats
+            .iter()
+            .filter_map(|n| chats.iter().find(|c| c.number == *n))
+            .collect()
     }
 
     /// The chats the search and the project picked leave, newest first.
@@ -931,13 +940,22 @@ impl ChatPane {
             .collect()
     }
 
-    /// The sidebar's rows that can be selected, in order: "New chat", the
-    /// chats it shows, then the projects (not while searching).
+    /// The sidebar's rows that can be selected, in order: "New chat",
+    /// Recent, then Pinned's projects and chats (not while searching).
     pub fn side_items(&self) -> Vec<SideItem> {
         let mut items = vec![SideItem::NewChat];
         items.extend(self.visible().iter().map(|c| SideItem::Chat(c.number)));
         if self.search.is_none() {
-            items.extend(self.projects().iter().map(|p| SideItem::Project(p.id)));
+            items.extend(
+                self.pinned_projects()
+                    .iter()
+                    .map(|p| SideItem::Project(p.id)),
+            );
+            items.extend(
+                self.pinned_chats()
+                    .iter()
+                    .map(|c| SideItem::PinnedChat(c.number)),
+            );
         }
         items
     }
@@ -945,7 +963,9 @@ impl ChatPane {
     /// The selected chat, unless something else is selected.
     pub fn selected_chat(&self) -> Option<&ChatSummary> {
         match self.side_items().get(self.selected)? {
-            SideItem::Chat(number) => self.list.chats.iter().find(|c| c.number == *number),
+            SideItem::Chat(number) | SideItem::PinnedChat(number) => {
+                self.list.chats.iter().find(|c| c.number == *number)
+            }
             _ => None,
         }
     }
@@ -2857,7 +2877,7 @@ impl App {
 
     fn open_selected(&mut self) -> Vec<Effect> {
         match self.chat.side_items().get(self.chat.selected).copied() {
-            Some(SideItem::Chat(number)) => self.open_chat(number),
+            Some(SideItem::Chat(number) | SideItem::PinnedChat(number)) => self.open_chat(number),
             Some(SideItem::Project(id)) => self.pick_filter(id),
             _ => self.new_chat(),
         }

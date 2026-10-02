@@ -1,14 +1,14 @@
- ◆ Chat with Work              │
-                               │
-  Waiting for your OK          │  ╭──────────────────────────────────────────────────────────────╮
+ ◆ Chat with Work              │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● Waiting for your OK                                        │
-                               │  │ Allow chats for this computer in Chat with Work, under       │
+  Waiting for your OK          │  │ Allow chats for this computer in Chat with Work, under       │
                                │  │ Settings, Computers:                                         │
                                │  │   https://chatwithwork.com/482139075/settings?tab=connectors │
                                │  │   #computers                                                 │
                                │  │ This updates by itself once you do.                          │
                                │  │ o open the page   r check now                                │
                                │  ╰──────────────────────────────────────────────────────────────╯
+                               │
+                               │
                                │
                                │
                                │

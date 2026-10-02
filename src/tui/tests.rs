@@ -1045,7 +1045,11 @@ fn chat_list() -> ChatList {
                 .collect(),
             ..super::chat::Links::default()
         },
-        ..ChatList::default()
+        // Falcon is pinned, so it shows under Pinned as on the web.
+        pins: super::chat::Pins {
+            projects: vec![3],
+            ..super::chat::Pins::default()
+        },
     }
 }
 
@@ -2806,7 +2810,7 @@ fn an_older_daemon_or_server_keeps_reading_the_list() {
 }
 
 #[test]
-fn snapshot_pinned_chats_and_projects_come_first() {
+fn snapshot_pinned_sits_under_recent_as_on_the_web() {
     let mut app = app();
     running(
         &mut app,
@@ -2830,14 +2834,23 @@ fn snapshot_pinned_chats_and_projects_come_first() {
     list.credits.as_mut().unwrap().left = 400;
     list.credits.as_mut().unwrap().running_low = true;
     app.update(Msg::Chat(ChatMsg::Listed(Ok(list))));
+    // Recent keeps every chat, pinned ones too, newest first.
     let order: Vec<u64> = app.chat.visible().iter().map(|c| c.number).collect();
-    assert_eq!(
-        order,
-        [31, 38, 42, 40, 27],
-        "pinned in pin order, then newest"
-    );
-    let projects: Vec<u64> = app.chat.projects().iter().map(|p| p.id).collect();
-    assert_eq!(projects, [3, 1]);
+    let mut newest: Vec<(String, u64)> = app
+        .chat
+        .list
+        .chats
+        .iter()
+        .map(|c| (c.updated_at.clone(), c.number))
+        .collect();
+    newest.sort_by(|a, b| b.0.cmp(&a.0));
+    assert_eq!(order, newest.iter().map(|(_, n)| *n).collect::<Vec<_>>());
+    assert!(order.contains(&31) && order.contains(&38));
+    // Pinned, under it: the pinned projects, then the pinned chats, in pin order.
+    let projects: Vec<u64> = app.chat.pinned_projects().iter().map(|p| p.id).collect();
+    assert_eq!(projects, [3]);
+    let chats: Vec<u64> = app.chat.pinned_chats().iter().map(|c| c.number).collect();
+    assert_eq!(chats, [31, 38]);
     assert_snapshot("chat_pinned", &app);
 
     // The projects' page on the web, from the sidebar.

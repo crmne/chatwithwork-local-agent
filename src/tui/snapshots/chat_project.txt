@@ -1,9 +1,9 @@
- ◆ Chat with Work              │  New chat · Falcon
+ ◆ Chat with Work              │  Ask anything.
+                               │  Chat with Work searches your shared folders and the services you
+  + New chat                   │  connected, and the chat stays in Chat with Work on the web too.
+  / Search chats               │
                                │
-  + New chat                   │  Ask anything.
-  / Search chats               │  Chat with Work searches your shared folders and the services you
-                               │  connected, and the chat stays in Chat with Work on the web too.
-  TODAY                        │
+  RECENT                       │
    Launch plan for Falcon      │
                                │
                                │
@@ -24,7 +24,7 @@
                                │
                                │
                                │
-  PROJECTS                all  │
+  PINNED                  all  │
    Falcon                   ×  │ ╭────────────────────────────────────────────────────────────────╮
                                │ │ ❯ Ask anything…                                 / for commands │
   C  Carmine                   │ ╰────────────────────────────────────────────────────────────────╯

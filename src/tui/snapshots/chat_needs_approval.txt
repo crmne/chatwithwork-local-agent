@@ -1,13 +1,13 @@
- ◆ Chat with Work              │
-                               │
-  Chats need your OK · o asks  │  ╭──────────────────────────────────────────────────────────────╮
+ ◆ Chat with Work              │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● Chats need your OK                                         │
-                               │  │ This computer shares folders with Chat with Work. To read    │
+  Chats need your OK · o asks  │  │ This computer shares folders with Chat with Work. To read    │
                                │  │ and send your chats here too, allow it in Chat with Work.    │
                                │  │ It's a separate permission, and you can turn it off without  │
                                │  │ unsharing anything.                                          │
                                │  │ o ask, and open the page to allow it                         │
                                │  ╰──────────────────────────────────────────────────────────────╯
+                               │
+                               │
                                │
                                │
                                │

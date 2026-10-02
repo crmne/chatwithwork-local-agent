@@ -252,17 +252,17 @@ fn chats_section(
     hits.add(row(area, 1), Hit::Search);
 
     let mut body = below(area, 3);
-    // The projects, under the chats, as the web pins them under Recent.
-    let projects = &pane.list.projects;
-    if pane.search.is_none() && !projects.is_empty() && body.height >= 8 {
-        let height = (projects.len() as u16).min(body.height / 3).max(1) + 2;
+    // Pinned, under Recent, as on the web; it says how to pin when empty.
+    let pinned = pane.pinned_projects().len() + pane.pinned_chats().len();
+    if pane.search.is_none() && body.height >= 8 {
+        let height = (pinned as u16).min(body.height / 3).max(1) + 2;
         let at = Rect {
             y: body.bottom() - height,
             height,
             ..body
         };
         body.height -= height;
-        projects_section(frame, at, app, focused, theme, hits);
+        pinned_section(frame, at, app, focused, theme, now, hits);
     }
     // Rows, what clicking each does, and which of them is the selection.
     let mut rows: Vec<Line<'static>> = Vec::new();
@@ -276,22 +276,11 @@ fn chats_section(
         rows.push(Line::styled(ellipsize(&text, width), theme.faint()));
         targets.push(None);
     }
-    let mut group = "";
+    if !pane.visible().is_empty() {
+        rows.push(Line::styled(" RECENT", theme.micro()));
+        targets.push(None);
+    }
     for (i, chat) in pane.visible().iter().enumerate() {
-        let this = if pane.pinned(chat) {
-            "PINNED"
-        } else {
-            day_group(&chat.updated_at, now, app)
-        };
-        if this != group {
-            if !group.is_empty() {
-                rows.push(Line::raw(""));
-                targets.push(None);
-            }
-            group = this;
-            rows.push(Line::styled(format!(" {this}"), theme.micro()));
-            targets.push(None);
-        }
         let selected = pane.selected == i + 1;
         if selected {
             selected_row = rows.len();
@@ -320,18 +309,20 @@ fn chats_section(
     frame.render_widget(Paragraph::new(shown), body);
 }
 
-/// The projects: picking one shows its chats and starts a new chat in it;
-/// picking it again shows every chat.
-fn projects_section(
+/// Pinned, as the web shows it under Recent: the pinned projects (picking
+/// one shows its chats and starts a new chat in it; picking it again shows
+/// every chat), then the pinned chats, with "all" for every project.
+fn pinned_section(
     frame: &mut Frame,
     area: Rect,
     app: &App,
     focused: bool,
     theme: &Theme,
+    now: OffsetDateTime,
     hits: &mut Hits,
 ) {
     let pane = &app.chat;
-    let mut label = vec![Span::styled(" PROJECTS", theme.micro())];
+    let mut label = vec![Span::styled(" PINNED", theme.micro())];
     if pane.list.links.projects.is_some() {
         label = spread(label, vec![Span::styled("all ", theme.faint())], area.width).spans;
         hits.add(
@@ -345,33 +336,39 @@ fn projects_section(
     }
     frame.render_widget(Paragraph::new(Line::from(label)), row(area, 1));
     let rows = below(area, 2);
-    let projects = pane.projects();
-    let first = pane.side_items().len() - projects.len();
-    let height = rows.height as usize;
-    let selected = pane.selected.checked_sub(first);
-    let start = selected.map_or(0, |s| (s + 1).saturating_sub(height));
     let width = area.width as usize;
-    for (slot, (i, project)) in projects
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height)
-        .enumerate()
-    {
-        let here = selected == Some(i) && focused;
-        let active = pane.filter == Some(project.id);
-        let marker = if here {
+    let projects = pane.pinned_projects();
+    let chats = pane.pinned_chats();
+    if projects.is_empty() && chats.is_empty() {
+        let text = " Pin a chat or project to keep it here.";
+        frame.render_widget(
+            Paragraph::new(Line::styled(ellipsize(text, width), theme.faint())),
+            row(rows, 0),
+        );
+        return;
+    }
+    let marker = |here: bool| {
+        if here && focused {
             Span::styled("▌", theme.ink())
         } else {
             Span::raw(" ")
-        };
+        }
+    };
+    let first = pane.side_items().len() - projects.len() - chats.len();
+    let height = rows.height as usize;
+    let selected = pane.selected.checked_sub(first);
+    let start = selected.map_or(0, |s| (s + 1).saturating_sub(height));
+    let mut lines: Vec<(Line<'static>, Hit)> = Vec::new();
+    for (i, project) in projects.iter().enumerate() {
+        let here = selected == Some(i) && focused;
+        let active = pane.filter == Some(project.id);
         let style = if active {
             theme.strong()
         } else {
             theme.muted()
         };
         let mut spans = vec![
-            marker,
+            marker(here),
             Span::raw(" "),
             Span::styled(ellipsize(&project.name, width.saturating_sub(5)), style),
         ];
@@ -382,9 +379,17 @@ fn projects_section(
         if here {
             line = line.patch_style(theme.selected());
         }
+        lines.push((line, Hit::Project(project.id)));
+    }
+    for (i, chat) in chats.iter().enumerate() {
+        let here = selected == Some(projects.len() + i);
+        let line = chat_row(chat, pane, here && focused, marker(here), width, theme, now);
+        lines.push((line, Hit::Chat(chat.number)));
+    }
+    for (slot, (line, hit)) in lines.into_iter().skip(start).take(height).enumerate() {
         let at = row(rows, slot as u16);
         frame.render_widget(Paragraph::new(line), at);
-        hits.add(at, Hit::Project(project.id));
+        hits.add(at, hit);
     }
 }
 
@@ -426,21 +431,6 @@ fn chat_row(
         line.patch_style(theme.selected())
     } else {
         line
-    }
-}
-
-/// "TODAY", "YESTERDAY" or "EARLIER", in local time.
-fn day_group(updated_at: &str, now: OffsetDateTime, app: &App) -> &'static str {
-    let Some(at) = parse_ts(updated_at) else {
-        return "EARLIER";
-    };
-    let (day, today) = (local(at, app).date(), local(now, app).date());
-    if day >= today {
-        "TODAY"
-    } else if today.previous_day() == Some(day) {
-        "YESTERDAY"
-    } else {
-        "EARLIER"
     }
 }
 
@@ -523,58 +513,22 @@ fn main_pane(
     let most = (area.height / 2).max(3);
     let composer_height = (view.lines.len() as u16 + 2).clamp(3, most);
     let notice = notice_lines(app, area.width.saturating_sub(4) as usize, theme);
+    // No title over the chat, as on the web: the header only holds the
+    // status word, while something needs attention.
+    let header_height = if attention(app, now).is_some() { 2 } else { 0 };
     let [header, body, notice_area, composer] = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(header_height),
         Constraint::Min(0),
         Constraint::Length(notice.len() as u16),
         Constraint::Length(composer_height),
     ])
     .areas(area);
-    let header = pad(header, 2, 0);
-    heading(
-        frame,
-        header,
-        title_spans(app, header.width, theme),
-        app,
-        theme,
-        now,
-        hits,
-    );
+    if header_height > 0 {
+        heading(frame, pad(header, 2, 0), Vec::new(), app, theme, now, hits);
+    }
     chat_view(frame, pad(body, 2, 0), app, theme, now, hits);
     frame.render_widget(Paragraph::new(notice), pad(notice_area, 2, 0));
     composer_box(frame, pad(composer, 1, 0), app, theme, now, view, hits);
-}
-
-/// The open chat's title, and its project.
-fn title_spans(app: &App, width: u16, theme: &Theme) -> Vec<Span<'static>> {
-    let pane = &app.chat;
-    if !pane.ready() {
-        return Vec::new();
-    }
-    let (title, project) = match pane.open_summary() {
-        Some(chat) => (
-            chat.title.clone(),
-            chat.project.as_ref().map(|p| p.name.clone()),
-        ),
-        None if pane.open.is_some() => ("Loading…".into(), None),
-        None => (
-            "New chat".into(),
-            pane.project.as_ref().map(|p| p.name.clone()),
-        ),
-    };
-    // Room for the status word on the right.
-    let room = (width as usize).saturating_sub(18);
-    let mut spans = vec![Span::styled(ellipsize(&title, room), theme.strong())];
-    if let Some(project) = project {
-        let left = room.saturating_sub(title.chars().count() + 3);
-        if left >= 4 {
-            spans.push(Span::styled(
-                format!(" · {}", ellipsize(&project, left)),
-                theme.faint(),
-            ));
-        }
-    }
-    spans
 }
 
 /// What just happened, or went wrong, above the composer until the next
@@ -2313,69 +2267,94 @@ fn modal_box(frame: &mut Frame, area: Rect, modal: &Modal, app: &App, theme: &Th
 }
 
 fn help_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
-    let mut keys: Vec<(&str, &str)> = Vec::new();
+    // Grouped by where the keys work, so a key that means one thing in
+    // Shared folders and another on Account says so under each.
+    let mut groups: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
     if app.chat.ready() {
-        keys.extend([
-            ("tab", "move between the chats and the composer"),
-            ("↑ ↓  j k", "select a chat"),
-            ("enter", "open a chat; send a message"),
-            ("n", "new chat"),
-            ("/", "search chats; in the composer, commands"),
-            ("i", "write a message"),
-            (
-                "shift-enter",
-                "a new line (also alt-enter, ctrl-j, or \\ then enter)",
-            ),
-            ("↑ ↓", "in the composer: earlier questions"),
-            ("ctrl-a ctrl-e", "start and end of the line"),
-            ("ctrl-u ctrl-k", "delete to the start or end of the line"),
-            ("esc", "stop an answer; back to the chats"),
-            ("pgup pgdn", "scroll the chat"),
-            ("e", "show every tool step"),
-            ("o", "open the chat in the browser"),
-        ]);
+        groups.push((
+            "CHATS",
+            vec![
+                ("tab", "move between the chats and the composer"),
+                ("↑ ↓  j k", "select a chat"),
+                ("enter", "open a chat"),
+                ("n", "new chat"),
+                ("/", "search chats"),
+                ("i", "write a message"),
+                ("pgup pgdn", "scroll the chat"),
+                ("e", "show every tool step"),
+                ("o", "open the chat in the browser"),
+            ],
+        ));
+        groups.push((
+            "COMPOSER",
+            vec![
+                ("enter", "send"),
+                ("/", "commands"),
+                (
+                    "shift-enter",
+                    "a new line (also alt-enter, ctrl-j, or \\ then enter)",
+                ),
+                ("↑ ↓", "earlier questions"),
+                ("ctrl-a ctrl-e", "start and end of the line"),
+                ("ctrl-u ctrl-k", "delete to the start or end of the line"),
+                ("esc", "stop an answer; back to the chats"),
+            ],
+        ));
     } else if matches!(app.chat.access, Access::NeedsApproval { .. }) {
-        keys.push(("o", "ask to use your chats here"));
+        groups.push(("CHATS", vec![("o", "ask to use your chats here")]));
     }
-    keys.extend([
+    groups.extend([
         (
-            ",",
-            "settings: shared folders, activity, account, the daemon",
-        ),
-        ("tab ← →", "in settings: the next or previous page"),
-        (
-            "↑ ↓  j k",
-            "in settings: select a folder or a web page, scroll a list",
-        ),
-        ("a", "share a folder"),
-        (
-            "r",
-            "rename the folder (Shared folders); look for the daemon again",
+            "SETTINGS",
+            vec![
+                (",", "open settings"),
+                ("tab ← →", "the next or previous page"),
+                ("↑ ↓  j k", "select a folder or a web page, scroll a list"),
+                ("esc", "back to the chats"),
+            ],
         ),
         (
-            "d",
-            "stop sharing the folder (Shared folders); disconnect (Account)",
+            "SHARED FOLDERS",
+            vec![
+                ("r", "rename the selected folder"),
+                ("d", "stop sharing the selected folder"),
+            ],
         ),
-        ("l", "the activity log"),
-        ("p", "pause or resume answering Chat with Work"),
-        ("c", "pair this computer, when it isn't"),
-        ("s", "start the daemon, when it isn't running"),
-        ("?", "this help"),
-        ("ctrl-l", "draw the screen again"),
-        ("ctrl-c", "clear what's typed; twice quits"),
-        ("q", "quit"),
-        ("mouse", "click to select and open; the wheel scrolls"),
-        ("shift-drag", "select text while the mouse is on"),
+        ("ACCOUNT", vec![("d", "disconnect this computer")]),
+        (
+            "ANYWHERE ELSE",
+            vec![("r", "look for the daemon and read the chats again")],
+        ),
+        (
+            "ANYWHERE",
+            vec![
+                ("a", "share a folder"),
+                ("p", "pause or resume answering Chat with Work"),
+                ("l", "the activity log"),
+                ("s", "start the daemon, when it isn't running"),
+                ("c", "pair this computer, when it isn't"),
+                ("?", "this help"),
+                ("ctrl-l", "draw the screen again"),
+                ("ctrl-c", "clear what's typed; twice quits"),
+                ("q", "quit"),
+                ("mouse", "click to select and open; the wheel scrolls"),
+                ("shift-drag", "select text while the mouse is on"),
+            ],
+        ),
     ]);
-    let mut lines: Vec<Line<'static>> = keys
-        .into_iter()
-        .map(|(key, what)| {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (heading, keys) in groups {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(heading, theme.micro()));
+        lines.extend(keys.into_iter().map(|(key, what)| {
             Line::from(vec![
                 Span::styled(format!("{key:<14}"), theme.strong()),
                 Span::styled(what.to_string(), theme.muted()),
             ])
-        })
-        .collect();
+        }));
+    }
     if app.chat.ready() {
         lines.push(Line::raw(""));
         lines.push(Line::styled("COMMANDS", theme.micro()));
