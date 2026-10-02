@@ -151,7 +151,7 @@ pub struct AccessRequest {
 /// Why a chat call didn't work, with the code to act on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Failure {
-    /// `daemon_stopped`, `not_paired`, `revoked`, `unreachable`,
+    /// `daemon_stopped`, `daemon_outdated`, `not_paired`, `revoked`, `unreachable`,
     /// `unsupported`, `chat_access_required`, `locked`, `chat_busy`,
     /// `not_found`, `rate_limited`, `invalid`, `forbidden`, ...
     pub code: String,
@@ -171,6 +171,15 @@ impl Failure {
     }
 
     fn from_response(response: &Value) -> Self {
+        // A daemon from before chats doesn't know the request at all.
+        let error = response["error"].as_str().unwrap_or_default();
+        if response["code"].is_null() && error.starts_with("bad request: unknown variant") {
+            return Self::new(
+                "daemon_outdated",
+                "The daemon running now is older than this cww and can't relay chats. \
+                 Restart it with this version of cww.",
+            );
+        }
         Self {
             code: response["code"].as_str().unwrap_or("error").into(),
             message: response["error"]
@@ -336,6 +345,16 @@ fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, Failure> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_daemon_from_before_chats_reads_as_outdated() {
+        let failure = Failure::from_response(&json!({
+            "ok": false,
+            "error": "bad request: unknown variant `chats`, expected one of `hello`, `status`",
+        }));
+        assert_eq!(failure.code, "daemon_outdated");
+        assert!(failure.message.contains("older than this cww"));
+    }
 
     #[test]
     fn parses_the_servers_transcript() {

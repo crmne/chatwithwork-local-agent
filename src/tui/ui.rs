@@ -761,6 +761,7 @@ fn chat_card(app: &App) -> Option<Card> {
         Access::Unavailable(failure) => {
             let (signal, title) = match failure.code.as_str() {
                 "unsupported" => (Signal::Idle, "This server doesn't offer chats here"),
+                "daemon_outdated" => (Signal::Attention, "The daemon needs restarting"),
                 "revoked" => (Signal::Negative, "Chat with Work revoked this computer"),
                 "unreachable" => (Signal::Attention, "Can't reach Chat with Work"),
                 "forbidden" => (Signal::Attention, "Chats aren't available to you here"),
