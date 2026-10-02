@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::audit::{AuditEntry, AuditLog};
 use crate::auth::load_credentials;
-use crate::chats::{ChatClient, ChatHub, chat_number};
+use crate::chats::{ChatClient, ChatHub, MAX_UPLOAD_BYTES, Question, Upload, chat_number};
 use crate::config::Config;
 use crate::control::{
     self, ControlEvent, ControlHandler, ControlRequest, PROTOCOL_VERSION, Refusal,
@@ -56,6 +56,41 @@ struct Daemon {
 
 /// The longest question the terminal may send, as the server allows.
 const MAX_QUESTION_CHARS: usize = 20_000;
+
+/// The most files one question carries.
+const MAX_ATTACHMENTS: usize = 10;
+
+const MAX_TITLE_CHARS: usize = 200;
+
+/// An ID or type passed through to the server: printable ASCII without
+/// spaces, at most `max` bytes.
+fn plain_token<'a>(value: &'a str, max: usize, what: &str) -> Result<&'a str, Refusal> {
+    if !value.is_empty() && value.len() <= max && value.bytes().all(|b| b.is_ascii_graphic()) {
+        Ok(value)
+    } else {
+        Err(Refusal::new(
+            "bad_request",
+            format!("bad request: that {what} isn't valid"),
+        ))
+    }
+}
+
+/// A file's name as the server sees it: its last component, without
+/// control characters or quotes, at most 255 characters.
+fn upload_filename(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let clean: String = base
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .take(255)
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() || clean == "." || clean == ".." {
+        "file".into()
+    } else {
+        clean.to_string()
+    }
+}
 
 /// Set when a newly shared folder is outside the sandbox: the worker exits
 /// with `sandbox::RESTART_CODE` and its supervisor starts it again.
@@ -460,28 +495,71 @@ impl Daemon {
         tokio::task::spawn_blocking(move || call(&client)).await?
     }
 
-    async fn send_question(
-        &self,
-        chat: Option<String>,
-        text: String,
-        project: Option<u64>,
-    ) -> Result<Value> {
-        let text = text.trim().to_string();
-        if text.is_empty() {
+    async fn send_question(&self, question: Question) -> Result<Value> {
+        let mut question = question;
+        question.text = question.text.trim().to_string();
+        if question.text.is_empty() {
             return Err(Refusal::new("invalid", "Write a question first").into());
         }
-        if text.chars().count() > MAX_QUESTION_CHARS {
+        if question.text.chars().count() > MAX_QUESTION_CHARS {
             return Err(Refusal::new(
                 "invalid",
                 format!("Questions can be at most {MAX_QUESTION_CHARS} characters"),
             )
             .into());
         }
-        if let Some(chat) = &chat {
+        if let Some(chat) = &question.chat {
             chat_number(chat)?;
         }
-        self.chat(move |client| client.send(chat.as_deref(), &text, project))
-            .await
+        if let Some(model) = &question.model {
+            plain_token(model, 200, "model")?;
+        }
+        if question.attachments.len() > MAX_ATTACHMENTS {
+            return Err(Refusal::new(
+                "invalid",
+                format!("A question can carry at most {MAX_ATTACHMENTS} files"),
+            )
+            .into());
+        }
+        for attachment in &question.attachments {
+            plain_token(attachment, 2048, "attachment")?;
+        }
+        self.chat(move |client| client.send(&question)).await
+    }
+
+    /// Upload a file a client read for a question.
+    async fn upload(
+        &self,
+        filename: String,
+        content_type: Option<String>,
+        data: String,
+    ) -> Result<Value> {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|_| Refusal::new("bad_request", "bad request: data is not base64"))?;
+        if data.is_empty() {
+            return Err(Refusal::new("attachment_refused", "That file is empty").into());
+        }
+        if data.len() > MAX_UPLOAD_BYTES {
+            return Err(Refusal::new(
+                "attachment_refused",
+                format!(
+                    "Files can be at most {} MB",
+                    MAX_UPLOAD_BYTES / (1024 * 1024)
+                ),
+            )
+            .into());
+        }
+        let upload = Upload {
+            filename: upload_filename(&filename),
+            content_type: match content_type {
+                Some(t) => plain_token(&t, 200, "content type")?.to_string(),
+                None => "application/octet-stream".into(),
+            },
+            data,
+        };
+        self.chat(move |client| client.upload(&upload)).await
     }
 
     /// Load config.toml, change it with `edit`, and save it, one request at
@@ -695,7 +773,70 @@ impl ControlHandler for Daemon {
                 chat,
                 text,
                 project,
-            } => self.send_question(chat, text, project).await,
+                model,
+                attachments,
+            } => {
+                self.send_question(Question {
+                    chat,
+                    text,
+                    project,
+                    model,
+                    attachments,
+                })
+                .await
+            }
+            ControlRequest::Models => self.chat(|client| client.models()).await,
+            ControlRequest::ChatApprove {
+                chat,
+                tool_call,
+                for_rest_of_chat,
+            } => {
+                self.chat(move |client| client.approve(&chat, &tool_call, for_rest_of_chat))
+                    .await
+            }
+            ControlRequest::ChatDeny {
+                chat,
+                tool_call,
+                reason,
+            } => {
+                if reason
+                    .as_ref()
+                    .is_some_and(|r| r.chars().count() > MAX_QUESTION_CHARS)
+                {
+                    return Err(Refusal::new("invalid", "That reason is too long").into());
+                }
+                self.chat(move |client| client.deny(&chat, &tool_call, reason.as_deref()))
+                    .await
+            }
+            ControlRequest::ChatUpload {
+                filename,
+                content_type,
+                data,
+            } => self.upload(filename, content_type, data).await,
+            ControlRequest::ChatRetry { chat } => {
+                self.chat(move |client| client.retry(&chat)).await
+            }
+            ControlRequest::ChatBranch { chat, message } => {
+                self.chat(move |client| client.branch(&chat, &message))
+                    .await
+            }
+            ControlRequest::ChatRename { chat, title } => {
+                let title = title.trim().to_string();
+                if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+                    return Err(Refusal::new(
+                        "invalid",
+                        format!("A title needs 1 to {MAX_TITLE_CHARS} characters"),
+                    )
+                    .into());
+                }
+                self.chat(move |client| client.rename(&chat, &title)).await
+            }
+            ControlRequest::ChatDelete { chat } => {
+                self.chat(move |client| client.delete(&chat)).await
+            }
+            ControlRequest::ChatShare { chat } => {
+                self.chat(move |client| client.share(&chat)).await
+            }
             ControlRequest::ChatCancel { chat } => {
                 self.chat(move |client| client.cancel(&chat)).await
             }
@@ -744,5 +885,29 @@ async fn wait_for_signal() {
     tokio::select! {
         _ = term.recv() => {}
         _ = int.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uploaded_names_lose_their_directories_and_control_characters() {
+        assert_eq!(upload_filename("/home/me/Q3 plan.pdf"), "Q3 plan.pdf");
+        assert_eq!(upload_filename(r"C:\Users\me\notes.txt"), "notes.txt");
+        assert_eq!(upload_filename("a\r\nb\".txt"), "ab.txt");
+        for empty in ["", "..", "/", "\n"] {
+            assert_eq!(upload_filename(empty), "file", "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn ids_passed_to_the_server_are_plain() {
+        assert!(plain_token("claude-sonnet-4.5", 200, "model").is_ok());
+        assert!(plain_token("text/plain", 200, "content type").is_ok());
+        for bad in ["", "a b", "a\nb", "x\r\nHost: evil"] {
+            assert!(plain_token(bad, 200, "model").is_err(), "{bad:?}");
+        }
     }
 }

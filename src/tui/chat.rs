@@ -33,12 +33,96 @@ pub struct ChatSummary {
     /// RFC 3339.
     pub updated_at: String,
     pub url: String,
+    /// The model it answers with; `None` from an older server.
+    pub model: Option<ModelRef>,
+    /// What this person may do with it; `None` from an older server, which
+    /// offers none of it here.
+    pub can: Option<Can>,
 }
 
 impl ChatSummary {
     pub fn processing(&self) -> bool {
         self.state == "processing"
     }
+
+    /// Whether the server says this chat allows `action`.
+    pub fn can(&self, action: impl Fn(&Can) -> bool) -> bool {
+        self.can.as_ref().is_some_and(action)
+    }
+}
+
+/// A chat's model, as chats name it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ModelRef {
+    #[serde(deserialize_with = "id_string")]
+    pub id: String,
+    pub name: String,
+}
+
+/// What the server lets this person do with a chat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Can {
+    pub retry: bool,
+    pub branch: bool,
+    pub rename: bool,
+    pub delete: bool,
+    pub share: bool,
+}
+
+/// The models a question can be asked with (`GET /local_agent/models`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Models {
+    #[serde(deserialize_with = "id_string_opt")]
+    pub default_model_id: Option<String>,
+    pub models: Vec<Model>,
+}
+
+impl Models {
+    pub fn get(&self, id: &str) -> Option<&Model> {
+        self.models.iter().find(|m| m.id == id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Model {
+    #[serde(deserialize_with = "id_string")]
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub description: Option<String>,
+    /// False when it can't be used right now, for `reason`.
+    pub selectable: bool,
+    pub reason: Option<String>,
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            provider: String::new(),
+            description: None,
+            selectable: true,
+            reason: None,
+        }
+    }
+}
+
+/// An ID the server may send as a number or a string, kept as a string.
+fn id_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(id_string_opt(d)?.unwrap_or_default())
+}
+
+fn id_string_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(s) => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -77,6 +161,9 @@ pub struct Step {
     /// The tool's own view (an MCP App), when the step has one. The
     /// server doesn't send this yet; the desktop app keeps a place for it.
     pub app: Option<StepApp>,
+    /// The answer stopped here for the person: a change to approve (see
+    /// [`Transcript::approvals`]) or a question from the tool's server.
+    pub waiting: bool,
 }
 
 /// A tool's view (MCP Apps): the service it belongs to and the `ui://`
@@ -99,6 +186,9 @@ pub enum Entry {
         /// Who asked, when it wasn't this person (a project chat).
         #[serde(default)]
         author: Option<String>,
+        /// Files sent with the question.
+        #[serde(default)]
+        attachments: Vec<Attachment>,
     },
     Assistant {
         id: u64,
@@ -131,13 +221,105 @@ pub enum Entry {
     Unknown,
 }
 
+/// A file sent with a question.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Attachment {
+    pub filename: String,
+    pub byte_size: u64,
+    pub content_type: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Transcript {
     pub chat: ChatSummary,
     pub locked_reason: Option<String>,
     pub entries: Vec<Entry>,
+    /// Changes the answer stopped at, oldest first, until each is decided.
+    pub approvals: Vec<Approval>,
 }
+
+impl Transcript {
+    /// The first change this person can decide, if any.
+    pub fn next_decision(&self) -> Option<&Approval> {
+        self.approvals.iter().find(|a| a.decidable)
+    }
+
+    /// A step waits for the person, but not on a change to approve: the
+    /// tool's server asked them something, which is answered in the
+    /// browser for now.
+    pub fn waiting_for_answer(&self) -> Option<&Step> {
+        if self.chat.processing() || !self.approvals.is_empty() {
+            return None;
+        }
+        self.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Activity { steps, .. } => steps.iter().find(|s| s.waiting),
+            _ => None,
+        })
+    }
+}
+
+/// A change the answer stopped at, as the web's approval card shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Approval {
+    pub id: u64,
+    /// "Linear".
+    pub service: String,
+    pub effect: String,
+    /// This person decides it; otherwise it waits for `waiting_for`.
+    pub decidable: bool,
+    /// "Create issue in Linear".
+    pub summary: String,
+    pub details: Vec<Detail>,
+    /// It can be approved for the rest of the chat.
+    pub allow_for_rest_of_chat: bool,
+    pub waiting_for: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Detail {
+    pub label: String,
+    pub value: String,
+}
+
+/// A file uploaded for a question.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Uploaded {
+    pub signed_id: String,
+    pub filename: String,
+    pub byte_size: u64,
+    pub content_type: String,
+}
+
+/// What sharing a chat answered: usually the link.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Shared {
+    pub url: Option<String>,
+    /// The whole answer, for anything else the server says.
+    pub response: Value,
+}
+
+/// A question to ask with [`Chats::ask`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ask {
+    /// The chat to ask in; `None` starts one.
+    pub chat: Option<u64>,
+    pub text: String,
+    /// A project for a new chat.
+    pub project: Option<u64>,
+    /// A model ID from [`Chats::models`]; `None` keeps the chat's, or the
+    /// default for a new chat.
+    pub model: Option<String>,
+    /// Files from [`Chats::upload`], by `signed_id`.
+    pub attachments: Vec<String>,
+}
+
+/// The largest file a question can carry.
+pub const MAX_UPLOAD_BYTES: u64 = crate::chats::MAX_UPLOAD_BYTES as u64;
 
 /// Where asking for chat access leaves things.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -267,12 +449,136 @@ impl Chats {
 
     /// Ask in `chat`, or start a new chat. Answers with the chat.
     pub fn send(&self, chat: Option<u64>, text: &str) -> Result<ChatSummary, Failure> {
-        let response = self.call(&ControlRequest::ChatSend {
-            chat: chat.map(|c| c.to_string()),
+        self.ask(&Ask {
+            chat,
             text: text.to_string(),
-            project: None,
+            ..Ask::default()
+        })
+    }
+
+    /// Ask with a model, a project or files. `model_unavailable` means the
+    /// model can't be used (any more).
+    pub fn ask(&self, ask: &Ask) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatSend {
+            chat: ask.chat.map(|c| c.to_string()),
+            text: ask.text.clone(),
+            project: ask.project,
+            model: ask.model.clone(),
+            attachments: ask.attachments.clone(),
         })?;
         parse(response["chat"].clone())
+    }
+
+    /// The models to pick from. `unsupported` means a server without the
+    /// choice, `daemon_outdated` a daemon that can't relay it.
+    pub fn models(&self) -> Result<Models, Failure> {
+        parse(self.call(&ControlRequest::Models)?)
+    }
+
+    /// Approve a change the answer stopped at. Answers with the chat.
+    pub fn approve(
+        &self,
+        chat: u64,
+        tool_call: u64,
+        for_rest_of_chat: bool,
+    ) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatApprove {
+            chat: chat.to_string(),
+            tool_call: tool_call.to_string(),
+            for_rest_of_chat,
+        })?;
+        parse(response["chat"].clone())
+    }
+
+    /// Deny a change, optionally saying what to do instead.
+    pub fn deny(
+        &self,
+        chat: u64,
+        tool_call: u64,
+        reason: Option<&str>,
+    ) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatDeny {
+            chat: chat.to_string(),
+            tool_call: tool_call.to_string(),
+            reason: reason.map(str::to_string),
+        })?;
+        parse(response["chat"].clone())
+    }
+
+    /// Read a file and upload it for a question, through the daemon (which
+    /// can't read outside shared folders itself). Files over
+    /// [`MAX_UPLOAD_BYTES`] fail with `attachment_refused` before anything
+    /// is sent.
+    pub fn upload(&self, path: &Path) -> Result<Uploaded, Failure> {
+        use base64::Engine;
+        let refused = |message: String| Failure::new("attachment_refused", message);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        let size = std::fs::metadata(path)
+            .map_err(|e| refused(format!("Can't read {}: {e}", path.display())))?
+            .len();
+        if size > MAX_UPLOAD_BYTES {
+            return Err(refused(format!(
+                "{name} is larger than {} MB",
+                MAX_UPLOAD_BYTES / (1024 * 1024)
+            )));
+        }
+        let data = std::fs::read(path)
+            .map_err(|e| refused(format!("Can't read {}: {e}", path.display())))?;
+        let response = self.call_slow(&ControlRequest::ChatUpload {
+            filename: name.clone(),
+            content_type: Some(content_type(&name).into()),
+            data: base64::engine::general_purpose::STANDARD.encode(&data),
+        })?;
+        parse(response)
+    }
+
+    /// Answer the last question again. Answers with the chat.
+    pub fn retry(&self, chat: u64) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatRetry {
+            chat: chat.to_string(),
+        })?;
+        parse(response["chat"].clone())
+    }
+
+    /// A new chat with the conversation up to `message`. Answers with the
+    /// new chat.
+    pub fn branch(&self, chat: u64, message: u64) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatBranch {
+            chat: chat.to_string(),
+            message: message.to_string(),
+        })?;
+        parse(response["chat"].clone())
+    }
+
+    pub fn rename(&self, chat: u64, title: &str) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatRename {
+            chat: chat.to_string(),
+            title: title.to_string(),
+        })?;
+        parse(response["chat"].clone())
+    }
+
+    pub fn delete(&self, chat: u64) -> Result<(), Failure> {
+        self.call(&ControlRequest::ChatDelete {
+            chat: chat.to_string(),
+        })
+        .map(|_| ())
+    }
+
+    pub fn share(&self, chat: u64) -> Result<Shared, Failure> {
+        let mut response = self.call(&ControlRequest::ChatShare {
+            chat: chat.to_string(),
+        })?;
+        if let Some(object) = response.as_object_mut() {
+            object.remove("ok");
+        }
+        Ok(Shared {
+            url: response["url"].as_str().map(str::to_string),
+            response,
+        })
     }
 
     pub fn cancel(&self, chat: u64) -> Result<(), Failure> {
@@ -320,15 +626,57 @@ impl Chats {
     }
 
     fn call(&self, request: &ControlRequest) -> Result<Value, Failure> {
-        let response = self
-            .connect()?
-            .call_raw(request)
+        self.call_with(request, Client::call_raw)
+    }
+
+    /// A call that may take minutes, like an upload.
+    fn call_slow(&self, request: &ControlRequest) -> Result<Value, Failure> {
+        self.call_with(request, Client::call_slow)
+    }
+
+    fn call_with(
+        &self,
+        request: &ControlRequest,
+        call: impl FnOnce(&mut Client, &ControlRequest) -> anyhow::Result<Value>,
+    ) -> Result<Value, Failure> {
+        let response = call(&mut self.connect()?, request)
             .map_err(|e| Failure::new("daemon_stopped", format!("{e:#}")))?;
         if response["ok"] == Value::Bool(true) {
             Ok(response)
         } else {
             Err(Failure::from_response(&response))
         }
+    }
+}
+
+/// The type to upload a file as, from its extension. The server checks it
+/// again.
+pub fn content_type(name: &str) -> &'static str {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "txt" | "log" => "text/plain",
+        "md" | "markdown" => "text/markdown",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "doc" => "application/msword",
+        "xls" => "application/vnd.ms-excel",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "odt" => "application/vnd.oasis.opendocument.text",
+        "rtf" => "application/rtf",
+        _ => "application/octet-stream",
     }
 }
 
@@ -378,6 +726,77 @@ mod tests {
             matches!(&transcript.entries[1], Entry::Activity { pending: true, steps, .. } if steps.len() == 1)
         );
         assert_eq!(transcript.entries[4], Entry::Unknown);
+    }
+
+    #[test]
+    fn parses_models_approvals_and_what_a_chat_allows() {
+        let transcript: Transcript = serde_json::from_value(json!({
+            "chat": { "number": 7, "title": "Issue", "state": "idle",
+                      "model": { "id": 3, "name": "Claude Sonnet" },
+                      "can": { "retry": true, "branch": false } },
+            "entries": [
+                { "kind": "user", "id": 1, "content": "File it",
+                  "attachments": [{ "filename": "log.txt", "byte_size": 12, "content_type": "text/plain" }] },
+                { "kind": "activity", "id": 2, "title": "Creating an issue", "pending": false,
+                  "steps": [{ "summary": "Create issue in Linear", "pending": false, "waiting": true }] }
+            ],
+            "approvals": [
+                { "id": 12, "service": "Linear", "effect": "write", "decidable": true,
+                  "summary": "Create issue in Linear", "details": [{ "label": "Title", "value": "Fix login" }],
+                  "allow_for_rest_of_chat": true, "approve_path": "/x", "deny_path": "/y" },
+                { "id": 13, "service": "Linear", "effect": "write", "decidable": false, "waiting_for": "Ada" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            transcript.chat.model,
+            Some(ModelRef {
+                id: "3".into(),
+                name: "Claude Sonnet".into()
+            })
+        );
+        assert!(transcript.chat.can(|c| c.retry));
+        assert!(!transcript.chat.can(|c| c.branch));
+        assert!(
+            matches!(&transcript.entries[0], Entry::User { attachments, .. } if attachments[0].filename == "log.txt")
+        );
+        let next = transcript.next_decision().unwrap();
+        assert_eq!(next.id, 12);
+        assert_eq!(next.details[0].value, "Fix login");
+        assert_eq!(transcript.approvals[1].waiting_for.as_deref(), Some("Ada"));
+        assert_eq!(
+            transcript.waiting_for_answer(),
+            None,
+            "it waits on approvals"
+        );
+
+        // Waiting with nothing to approve: the tool's server asked something.
+        let mut asking = transcript.clone();
+        asking.approvals.clear();
+        assert_eq!(
+            asking.waiting_for_answer().map(|s| s.summary.as_str()),
+            Some("Create issue in Linear")
+        );
+
+        // An older server: no model, nothing it allows.
+        let old: ChatSummary = serde_json::from_value(json!({ "number": 1 })).unwrap();
+        assert_eq!((old.model, old.can), (None, None));
+
+        let models: Models = serde_json::from_value(json!({
+            "default_model_id": "gpt-5",
+            "models": [{ "id": "gpt-5", "name": "GPT-5", "provider": "openai" }]
+        }))
+        .unwrap();
+        assert!(
+            models.get("gpt-5").unwrap().selectable,
+            "selectable unless said"
+        );
+    }
+
+    #[test]
+    fn uploads_get_a_type_from_their_extension() {
+        assert_eq!(content_type("Q3.PDF"), "application/pdf");
+        assert_eq!(content_type("notes"), "application/octet-stream");
     }
 
     #[test]

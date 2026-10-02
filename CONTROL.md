@@ -37,7 +37,7 @@ There is no authentication beyond this: any process running as the user can driv
 
 ## 3. Framing
 
-- UTF-8 JSON, one object per line, each line ending in `\n`. A request line is at most 16 KiB.
+- UTF-8 JSON, one object per line, each line ending in `\n`. A request line is at most 16 KiB, except `chat_upload`, which carries a file of up to 25 MB.
 - The client sends a request object with a `cmd` field. The daemon answers with exactly one response line, in order. A connection can carry any number of requests.
 - A successful response has `"ok": true` plus the fields listed below. A failure is `{"ok": false, "error": "<message for a person>"}`.
 - A malformed request gets `{"ok": false, "error": "bad request: ..."}` and the connection stays open.
@@ -244,19 +244,48 @@ The terminal UI's chats go through the daemon, which asks Chat with Work as this
 {"cmd": "chats"}
 ```
 
-The server's list, as it sent it: `chats` (newest first, each with `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`), `projects`, `account`, `user`, and `locked_reason`, the sentence the composer shows when a question can't be asked.
+The server's list, as it sent it: `chats` (newest first, each with `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`, and from newer servers `model` (`{"id", "name"}` or null) and `can` (`retry`, `branch`, `rename`, `delete`, `share`, each true or false; without `can`, offer none of them)), `projects`, `account`, `user`, and `locked_reason`, the sentence the composer shows when a question can't be asked.
 
 ```json
 {"cmd": "chat", "chat": "42"}
 ```
 
-One chat: `chat`, `locked_reason`, and `entries`, each with a `kind`: `user`, `activity` (a title such as "Searched Drive and Slack", `details`, `pending`, and `steps` with file names and, reserved for a tool's own view, an optional `app` with `service` and `uri` that the server doesn't send yet), `assistant` (Markdown `content` and `sources`), or `notice` (a failure or running out of credits). Chat numbers are digits only.
+One chat: `chat`, `locked_reason`, `entries`, and `approvals`. Each entry has a `kind`: `user` (with `attachments`, each `filename`, `byte_size`, `content_type`), `activity` (a title such as "Searched Drive and Slack", `details`, `pending`, and `steps` with file names, `waiting` when the answer stopped there for the person and, reserved for a tool's own view, an optional `app` with `service` and `uri` that the server doesn't send yet), `assistant` (Markdown `content` and `sources`), or `notice` (a failure or running out of credits). `approvals` lists the changes the answer stopped at, oldest first: `id`, `service`, `effect`, and either `decidable: true` with `summary`, `details` (`label` and `value` pairs) and `allow_for_rest_of_chat`, or `decidable: false` with `waiting_for`, the person who decides it. A step that waits with no approval listed is a question from the tool's server, answered in the browser for now. Chat numbers are digits only.
 
 ```json
 {"cmd": "chat_send", "text": "And Q4?", "chat": "42"}
 ```
 
-Asks in chat 42, or in a new chat without `chat` (`project` puts a new chat in a project). Answers `{"chat": {...}}`. Follow the chat to see the answer.
+Asks in chat 42, or in a new chat without `chat` (`project` puts a new chat in a project). `model` picks the model by its ID from `models`, and `attachments` lists files from `chat_upload` by `signed_id`. Answers `{"chat": {...}}`. Follow the chat to see the answer. A model that can't be used fails with `model_unavailable`, and a file the server won't take with `attachment_refused`.
+
+```json
+{"cmd": "models"}
+```
+
+The models a question can be asked with: `{"default_model_id": 3, "models": [{"id": 3, "name": "Claude Sonnet", "provider": "anthropic", "description": "…", "selectable": true, "reason": null}, ...]}`. `selectable: false` comes with the `reason`. IDs may be numbers or strings; pass them back as strings. A server without the choice fails with `unsupported` and a sentence saying so.
+
+```json
+{"cmd": "chat_approve", "chat": "42", "tool_call": "12", "for_rest_of_chat": false}
+{"cmd": "chat_deny", "chat": "42", "tool_call": "12", "reason": "Use the Web team"}
+```
+
+Approves or denies a change the answer stopped at (an entry of `approvals` with `decidable: true`), as the web's approval card does. `for_rest_of_chat` stops asking about that tool in this chat, where `allow_for_rest_of_chat` says it can; `reason` goes back to the model. The answer carries on once nothing waits. Answers `{"chat": {...}}`; `already_decided` means someone decided it first.
+
+```json
+{"cmd": "chat_upload", "filename": "notes.pdf", "content_type": "application/pdf", "data": "<base64>"}
+```
+
+Uploads a file for a question. The daemon can only read shared folders, so the client reads the file and sends its bytes, base64-encoded, in `data`; files can be at most 25 MB, Chat with Work's limit, and only this request may be longer than 16 KiB. The daemon keeps only the file's own name. Answers `{"signed_id", "filename", "byte_size", "content_type"}`; pass `signed_id` in `chat_send`'s `attachments`. The upload may take a while, so wait for the answer without a timeout.
+
+```json
+{"cmd": "chat_retry", "chat": "42"}
+{"cmd": "chat_branch", "chat": "42", "message": "5"}
+{"cmd": "chat_rename", "chat": "42", "title": "Q3 budget"}
+{"cmd": "chat_delete", "chat": "42"}
+{"cmd": "chat_share", "chat": "42"}
+```
+
+What the chat's `can` allows: answer the last question again (`{"chat"}`), start a new chat with the conversation up to message 5 (`{"chat"}`, the new one), rename it (`{"chat"}`), delete it (`{}`), and share it (the server's answer, usually with the link in `url`). A server without one of these fails with `unsupported` and a sentence saying so.
 
 ```json
 {"cmd": "chat_cancel", "chat": "42"}
@@ -356,9 +385,12 @@ Some failures carry a `code` for clients to act on, with more fields where they 
 | `not_paired` | This computer isn't paired. |
 | `revoked` | The server revoked it; pair again. |
 | `unreachable` | The server can't be reached right now. |
-| `unsupported` | The server has no chat API for the terminal. |
+| `unsupported` | The server has no chat API for the terminal, or not this call yet (`error` says which). |
 | `chat_access_required` | The owner hasn't allowed chats (yet): `requested` says whether they were asked, `approve_url` where to answer. |
 | `locked` | A question can't be asked now; `error` says why (for example, out of credits). |
+| `model_unavailable` | The model asked for can't be used; `error` says why. |
+| `attachment_refused` | The server, or the 25 MB limit, refused a file; `error` says why. |
+| `already_decided` | Someone decided that change first. |
 | `chat_busy`, `not_found`, `rate_limited`, `invalid`, `forbidden`, `bad_request` | As they say. |
 
 ## 6. When the daemon isn't running

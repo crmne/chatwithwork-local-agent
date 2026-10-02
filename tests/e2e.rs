@@ -50,6 +50,14 @@ struct ServerState {
     stale_scope: bool,
     /// Questions posted to the chat API.
     questions: Vec<String>,
+    /// The `model_id` and `attachments` each question asked with.
+    asked_with: Vec<Value>,
+    /// The server predates choosing a model and the newer chat actions.
+    old_api: bool,
+    /// Approvals, denials and chat actions, as "what chat id detail".
+    decisions: Vec<String>,
+    /// Files uploaded: (filename, content type, bytes).
+    uploads: Vec<(String, String, String)>,
 }
 
 struct FakeServer {
@@ -237,16 +245,27 @@ async fn http(mut stream: TcpStream, state: Arc<Mutex<ServerState>>, origin: Str
         .next()
         .unwrap_or_default()
         .to_string();
-    let (status, json) = if path.starts_with("/local_agent/chat") {
+    let (status, json) = if [
+        "/local_agent/chat",
+        "/local_agent/models",
+        "/local_agent/uploads",
+    ]
+    .iter()
+    .any(|api| path.starts_with(api))
+    {
         let authorization = header(&head, "authorization").unwrap_or_default();
+        let content_type = header(&head, "content-type").unwrap_or_default();
         chat_api(
             &state,
             &origin,
-            &method,
-            &path,
-            &authorization,
-            &dpop,
-            &body,
+            ChatRequest {
+                method: &method,
+                path: &path,
+                authorization: &authorization,
+                dpop: &dpop,
+                content_type: &content_type,
+                body: &body,
+            },
         )
     } else {
         oauth(&state, &origin, &path, &dpop, &form)
@@ -269,16 +288,25 @@ fn header(head: &str, name: &str) -> Option<String> {
     })
 }
 
+struct ChatRequest<'a> {
+    method: &'a str,
+    path: &'a str,
+    authorization: &'a str,
+    dpop: &'a str,
+    content_type: &'a str,
+    body: &'a str,
+}
+
 /// The chat API, as Rails serves it to a device allowed to chat.
-fn chat_api(
-    state: &Mutex<ServerState>,
-    origin: &str,
-    method: &str,
-    path: &str,
-    authorization: &str,
-    dpop: &str,
-    body: &str,
-) -> (u16, Value) {
+fn chat_api(state: &Mutex<ServerState>, origin: &str, request: ChatRequest) -> (u16, Value) {
+    let ChatRequest {
+        method,
+        path,
+        authorization,
+        dpop,
+        content_type,
+        body,
+    } = request;
     let mut st = state.lock().unwrap();
     let key = st.public_key.clone().unwrap_or_default();
     // The device's own token, and a proof bound to it for this request.
@@ -314,12 +342,120 @@ fn chat_api(
         st.stale_scope = false;
         return (403, json!({ "error": "insufficient_scope" }));
     }
+    let old_api = st.old_api;
     let chat = |number: u64, title: &str, state: &str| {
-        json!({ "number": number, "title": title, "state": state, "project": null, "mine": true,
+        let mut chat = json!({ "number": number, "title": title, "state": state, "project": null, "mine": true,
                 "created_at": "2026-09-25T08:00:00Z", "updated_at": "2026-09-25T08:14:03Z",
-                "url": format!("{origin}/1000001/chats/{number}") })
+                "url": format!("{origin}/1000001/chats/{number}") });
+        if !old_api {
+            chat["model"] = json!({ "id": 3, "name": "Claude Sonnet" });
+            chat["can"] = json!({ "retry": true, "branch": true, "rename": true, "delete": true, "share": true });
+        }
+        chat
     };
+    // Rails without the route: an HTML 404, not the API's JSON.
+    let newer = path.starts_with("/local_agent/models")
+        || path.starts_with("/local_agent/uploads")
+        || path.ends_with("/retry")
+        || path.ends_with("/branches")
+        || path.ends_with("/share")
+        || (path == "/local_agent/chats/7" && matches!(method, "PATCH" | "DELETE"));
+    if old_api && newer {
+        return (404, Value::Null);
+    }
+    let posted: Value = serde_json::from_str(body).unwrap_or_default();
+    if let Some(model) = posted.get("model_id")
+        && model != "3"
+        && model != 3
+    {
+        return (
+            422,
+            json!({ "error": "model_unavailable", "error_description": "That model isn't available on your plan" }),
+        );
+    }
     match (method, path) {
+        ("GET", "/local_agent/models") => (
+            200,
+            json!({ "default_model_id": 3, "models": [
+                { "id": 3, "name": "Claude Sonnet", "provider": "anthropic", "description": "Fast and capable", "selectable": true, "reason": null },
+                { "id": 4, "name": "Claude Opus", "provider": "anthropic", "description": null, "selectable": false, "reason": "Upgrade to use it" }
+            ] }),
+        ),
+        ("POST", "/local_agent/uploads") => {
+            let Some(boundary) = content_type
+                .strip_prefix("multipart/form-data; boundary=")
+                .map(str::to_string)
+            else {
+                return (
+                    422,
+                    json!({ "error": "attachment_refused", "error_description": "Not multipart" }),
+                );
+            };
+            // One part: its headers, a blank line, then the file.
+            let part = body
+                .split(&format!("--{boundary}"))
+                .nth(1)
+                .unwrap_or_default();
+            let (headers, data) = part.split_once("\r\n\r\n").unwrap_or_default();
+            let filename = headers
+                .split("filename=\"")
+                .nth(1)
+                .and_then(|r| r.split('"').next())
+                .unwrap_or_default()
+                .to_string();
+            let file_type = headers
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Type: "))
+                .unwrap_or_default()
+                .to_string();
+            let data = data.strip_suffix("\r\n").unwrap_or(data).to_string();
+            let size = data.len();
+            st.uploads.push((filename.clone(), file_type.clone(), data));
+            (
+                201,
+                json!({ "signed_id": format!("signed-{}", st.uploads.len()), "filename": filename,
+                        "byte_size": size, "content_type": file_type }),
+            )
+        }
+        ("POST", "/local_agent/chats/7/tool_calls/12/approval") => {
+            st.decisions
+                .push(format!("approve 7 12 {}", posted["for_rest_of_chat"]));
+            (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
+        }
+        ("POST", "/local_agent/chats/7/tool_calls/12/denial") => {
+            st.decisions.push(format!("deny 7 12 {}", posted["reason"]));
+            (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
+        }
+        ("POST", "/local_agent/chats/7/retry") => {
+            st.decisions.push("retry 7".into());
+            (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
+        }
+        ("POST", "/local_agent/chats/7/branches") => {
+            st.decisions
+                .push(format!("branch 7 {}", posted["message_id"]));
+            (
+                201,
+                json!({ "chat": chat(9, "Q3 budget (branch)", "idle") }),
+            )
+        }
+        ("PATCH", "/local_agent/chats/7") => {
+            st.decisions.push(format!("rename 7 {}", posted["title"]));
+            (
+                200,
+                json!({ "chat": chat(7, posted["title"].as_str().unwrap_or_default(), "idle") }),
+            )
+        }
+        ("DELETE", "/local_agent/chats/7") => {
+            st.decisions.push("delete 7".into());
+            (204, Value::Null)
+        }
+        ("POST", "/local_agent/chats/7/share") => {
+            st.decisions.push("share 7".into());
+            (
+                200,
+                json!({ "url": format!("{origin}/shared/abc"), "visibility": "link" }),
+            )
+        }
         ("GET", "/local_agent/chats") => (
             200,
             json!({ "account": { "name": "Plenty" }, "user": { "name": "Carmine" }, "locked_reason": null,
@@ -336,12 +472,22 @@ fn chat_api(
         ),
         ("POST", "/local_agent/chats") => {
             let body: Value = serde_json::from_str(body).unwrap_or_default();
+            st.asked_with.push(json!([
+                body["model_id"],
+                body["attachments"],
+                body["project_id"]
+            ]));
             st.questions
                 .push(body["content"].as_str().unwrap_or_default().to_string());
             (201, json!({ "chat": chat(8, "Chat #8", "processing") }))
         }
         ("POST", "/local_agent/chats/7/messages") => {
             let body: Value = serde_json::from_str(body).unwrap_or_default();
+            st.asked_with.push(json!([
+                body["model_id"],
+                body["attachments"],
+                body["project_id"]
+            ]));
             st.questions
                 .push(body["content"].as_str().unwrap_or_default().to_string());
             (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
@@ -1721,4 +1867,162 @@ async fn relays_chats_for_the_terminal() {
         .unwrap()
         .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(10), follower).await;
+}
+
+/// What the terminal's chats can do beyond asking, relayed the same way:
+/// choosing a model, deciding a change the answer stopped at, attaching a
+/// file, and the chat actions. An older server without these says so with
+/// a sentence, never a raw error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relays_models_decisions_files_and_chat_actions() {
+    use cww::tui::chat::{Ask, Chats};
+
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    pair(&fx, &server);
+    server.state.lock().unwrap().chat_access = true;
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let _ws = tokio::time::timeout(Duration::from_secs(20), server.sockets.recv())
+        .await
+        .expect("the daemon connects")
+        .unwrap();
+    let chats = Chats::new(&fx.paths.socket_path());
+    async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        tokio::task::spawn_blocking(f).await.unwrap()
+    }
+
+    // Models, with the chat's own and a reason for one that can't be used.
+    let c = chats.clone();
+    let models = blocking(move || c.models()).await.unwrap();
+    assert_eq!(models.default_model_id.as_deref(), Some("3"));
+    assert_eq!(models.models.len(), 2);
+    assert!(!models.models[1].selectable);
+    assert_eq!(
+        models.models[1].reason.as_deref(),
+        Some("Upgrade to use it")
+    );
+    let c = chats.clone();
+    let list = blocking(move || c.list()).await.unwrap();
+    assert_eq!(list.chats[0].model.as_ref().unwrap().name, "Claude Sonnet");
+    assert!(list.chats[0].can(|can| can.retry));
+
+    // A file, read by the client and uploaded by the daemon.
+    let file = fx.base.join("notes.txt");
+    std::fs::write(&file, "Q3 notes").unwrap();
+    let c = chats.clone();
+    let uploaded = blocking(move || c.upload(&file)).await.unwrap();
+    assert_eq!(uploaded.signed_id, "signed-1");
+    assert_eq!(
+        server.state.lock().unwrap().uploads,
+        [(
+            "notes.txt".to_string(),
+            "text/plain".to_string(),
+            "Q3 notes".to_string()
+        )]
+    );
+
+    // Asking with the model and the file; a model that can't be used says why.
+    let c = chats.clone();
+    blocking(move || {
+        c.ask(&Ask {
+            chat: None,
+            text: "Summarize".into(),
+            project: Some(5),
+            model: Some("3".into()),
+            attachments: vec!["signed-1".into()],
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        server.state.lock().unwrap().asked_with,
+        [json!(["3", ["signed-1"], 5])]
+    );
+    let c = chats.clone();
+    let refused = blocking(move || {
+        c.ask(&Ask {
+            chat: Some(7),
+            text: "Again".into(),
+            model: Some("4".into()),
+            ..Ask::default()
+        })
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code, "model_unavailable");
+    assert_eq!(refused.message, "That model isn't available on your plan");
+
+    // Deciding a change, and the chat actions.
+    let c = chats.clone();
+    blocking(move || c.approve(7, 12, true)).await.unwrap();
+    let c = chats.clone();
+    blocking(move || c.deny(7, 12, Some("Use the Web team")))
+        .await
+        .unwrap();
+    let c = chats.clone();
+    blocking(move || c.retry(7)).await.unwrap();
+    let c = chats.clone();
+    let branch = blocking(move || c.branch(7, 3)).await.unwrap();
+    assert_eq!(branch.number, 9);
+    let c = chats.clone();
+    let renamed = blocking(move || c.rename(7, "Budget")).await.unwrap();
+    assert_eq!(renamed.title, "Budget");
+    let c = chats.clone();
+    let shared = blocking(move || c.share(7)).await.unwrap();
+    assert_eq!(
+        shared.url.as_deref(),
+        Some(format!("{}/shared/abc", server.origin).as_str())
+    );
+    let c = chats.clone();
+    blocking(move || c.delete(7)).await.unwrap();
+    assert_eq!(
+        server.state.lock().unwrap().decisions,
+        [
+            "approve 7 12 true",
+            "deny 7 12 \"Use the Web team\"",
+            "retry 7",
+            "branch 7 3",
+            "rename 7 \"Budget\"",
+            "share 7",
+            "delete 7",
+        ]
+    );
+
+    // A file over the limit never leaves the computer.
+    let big = fx.base.join("big.bin");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(cww::tui::chat::MAX_UPLOAD_BYTES + 1)
+        .unwrap();
+    let c = chats.clone();
+    let too_big = blocking(move || c.upload(&big)).await.unwrap_err();
+    assert_eq!(too_big.code, "attachment_refused");
+    assert_eq!(server.state.lock().unwrap().uploads.len(), 1);
+
+    // An older server: a sentence for each, and chats without a model.
+    server.state.lock().unwrap().old_api = true;
+    let c = chats.clone();
+    let old = blocking(move || c.models()).await.unwrap_err();
+    assert_eq!(old.code, "unsupported");
+    assert!(
+        old.message.contains("doesn't let you pick a model"),
+        "{}",
+        old.message
+    );
+    let c = chats.clone();
+    let old = blocking(move || c.retry(7)).await.unwrap_err();
+    assert_eq!(old.code, "unsupported");
+    assert!(old.message.contains("can't retry"), "{}", old.message);
+    let c = chats.clone();
+    let list = blocking(move || c.list()).await.unwrap();
+    assert_eq!(list.chats[0].model, None);
+    assert_eq!(list.chats[0].can, None);
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
 }

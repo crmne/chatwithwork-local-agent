@@ -816,6 +816,8 @@ fn summary(number: u64, title: &str, updated_at: &str) -> ChatSummary {
         mine: true,
         updated_at: updated_at.into(),
         url: format!("https://chatwithwork.com/482139075/chats/{number}"),
+        model: None,
+        can: None,
     }
 }
 
@@ -854,11 +856,13 @@ fn budget_transcript(state: &str) -> Transcript {
     Transcript {
         chat,
         locked_reason: None,
+        approvals: vec![],
         entries: vec![
             Entry::User {
                 id: 1,
                 content: "What did we budget for Q3, and who signed it off?".into(),
                 author: None,
+                attachments: vec![],
             },
             Entry::Activity {
                 id: 2,
@@ -873,12 +877,14 @@ fn budget_transcript(state: &str) -> Transcript {
                         pending: false,
                         files: vec!["Q3 plan.pdf".into(), "Budget 2026.xlsx".into()],
                         app: None,
+                        waiting: false,
                     },
                     Step {
                         summary: "Read plans/q3.md".into(),
                         pending: false,
                         files: vec![],
                         app: None,
+                        waiting: false,
                     },
                 ],
             },
@@ -942,6 +948,7 @@ fn snapshot_chat_streaming() {
         id: 4,
         content: "And Q4?".into(),
         author: None,
+        attachments: vec![],
     });
     transcript.entries.push(Entry::Activity {
         id: 5,
@@ -955,6 +962,7 @@ fn snapshot_chat_streaming() {
             pending: true,
             files: vec![],
             app: None,
+            waiting: false,
         }],
     });
     app.update(Msg::Chat(ChatMsg::Shown {
@@ -1283,6 +1291,7 @@ fn a_streamed_answer_builds_up_then_the_chat_is_read_back() {
             id: 8,
             content: "q3 budget?".into(),
             author: None,
+            attachments: vec![],
         },
         Entry::Assistant {
             id: 9,

@@ -176,6 +176,7 @@ impl Conversation<'_> {
                     id,
                     content,
                     author,
+                    ..
                 }) => {
                     self.user(
                         &mut child,

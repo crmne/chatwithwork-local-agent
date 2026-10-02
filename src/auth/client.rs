@@ -201,6 +201,20 @@ pub enum RefreshError {
     Other(#[from] anyhow::Error),
 }
 
+/// How long an upload may take, against 30 seconds for other calls.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// What a request to the server's API carries.
+pub enum Body<'a> {
+    Empty,
+    Json(&'a serde_json::Value),
+    /// Raw bytes, such as a `multipart/form-data` upload.
+    Bytes {
+        content_type: String,
+        data: Vec<u8>,
+    },
+}
+
 pub struct AuthClient {
     server: ServerUrl,
     agent: ureq::Agent,
@@ -351,32 +365,63 @@ impl AuthClient {
         access_token: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<(u16, serde_json::Value)> {
+        let body = match body {
+            Some(json) => Body::Json(json),
+            None => Body::Empty,
+        };
+        self.send(key, method, path, access_token, &body)
+    }
+
+    /// [`AuthClient::send_json`] with any [`Body`] and method (`GET`,
+    /// `POST`, `PATCH`, `DELETE`). An upload gets longer than the usual 30
+    /// seconds.
+    pub fn send(
+        &self,
+        key: &DeviceKey,
+        method: &str,
+        path: &str,
+        access_token: &str,
+        body: &Body,
+    ) -> Result<(u16, serde_json::Value)> {
         let url = self.server.endpoint(path);
         for attempt in 0..2 {
             let proof = key.proof(method, &url, self.nonce().as_deref(), Some(access_token));
             let authorization = format!("DPoP {access_token}");
-            let result = match (method, body) {
-                ("GET", _) => self
-                    .agent
-                    .get(&url)
-                    .header("Authorization", &authorization)
-                    .header("DPoP", &proof)
-                    .header("Accept", "application/json")
-                    .call(),
-                (_, Some(body)) => self
-                    .agent
-                    .post(&url)
-                    .header("Authorization", &authorization)
-                    .header("DPoP", &proof)
-                    .header("Accept", "application/json")
-                    .send_json(body),
-                (_, None) => self
-                    .agent
-                    .post(&url)
-                    .header("Authorization", &authorization)
-                    .header("DPoP", &proof)
-                    .header("Accept", "application/json")
-                    .send_empty(),
+            let result = match method {
+                "GET" | "DELETE" => {
+                    let request = if method == "GET" {
+                        self.agent.get(&url)
+                    } else {
+                        self.agent.delete(&url)
+                    };
+                    request
+                        .header("Authorization", &authorization)
+                        .header("DPoP", &proof)
+                        .header("Accept", "application/json")
+                        .call()
+                }
+                "POST" | "PATCH" => {
+                    let request = if method == "POST" {
+                        self.agent.post(&url)
+                    } else {
+                        self.agent.patch(&url)
+                    };
+                    let request = request
+                        .header("Authorization", &authorization)
+                        .header("DPoP", &proof)
+                        .header("Accept", "application/json");
+                    match body {
+                        Body::Empty => request.send_empty(),
+                        Body::Json(json) => request.send_json(json),
+                        Body::Bytes { content_type, data } => request
+                            .header("Content-Type", content_type)
+                            .config()
+                            .timeout_global(Some(UPLOAD_TIMEOUT))
+                            .build()
+                            .send(&data[..]),
+                    }
+                }
+                other => bail!("unsupported method {other}"),
             };
             let mut response = result.with_context(|| format!("contacting {url}"))?;
             let status = response.status().as_u16();

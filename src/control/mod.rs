@@ -47,6 +47,10 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Longest request line accepted.
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 
+/// Longest `chat_upload` line: the largest file Chat with Work takes, in
+/// base64, with room for the rest of the request.
+const MAX_UPLOAD_REQUEST_BYTES: usize = crate::chats::MAX_UPLOAD_BYTES.div_ceil(3) * 4 + 4096;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "cmd")]
 pub enum ControlRequest {
@@ -116,6 +120,58 @@ pub enum ControlRequest {
         /// A project for a new chat.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<u64>,
+        /// The model to answer with, by its ID in `models`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Files from `chat_upload`, by `signed_id`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
+    },
+    /// The models a question can be asked with, and the owner's default.
+    Models,
+    /// Approve a change the answer in `chat` stopped at.
+    ChatApprove {
+        chat: String,
+        tool_call: String,
+        /// Don't ask again for this tool in this chat.
+        #[serde(default)]
+        for_rest_of_chat: bool,
+    },
+    /// Deny a change the answer in `chat` stopped at, optionally saying
+    /// what to do instead.
+    ChatDeny {
+        chat: String,
+        tool_call: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// Upload a file for a question. The client reads it (the daemon can
+    /// only read shared folders) and sends its bytes as base64 in `data`.
+    ChatUpload {
+        filename: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+        data: String,
+    },
+    /// Answer the last question in `chat` again.
+    ChatRetry {
+        chat: String,
+    },
+    /// A new chat with `chat`'s conversation up to `message`.
+    ChatBranch {
+        chat: String,
+        message: String,
+    },
+    ChatRename {
+        chat: String,
+        title: String,
+    },
+    ChatDelete {
+        chat: String,
+    },
+    /// Share `chat`, as the web's Share does.
+    ChatShare {
+        chat: String,
     },
     /// Stop the answer being written in `chat`.
     ChatCancel {
@@ -281,10 +337,17 @@ where
             line = tokio::time::timeout(Duration::from_secs(300), lines.next_line()) => line??,
         };
         let Some(line) = line else { return Ok(()) };
-        if line.len() > MAX_REQUEST_BYTES {
+        if line.len() > MAX_UPLOAD_REQUEST_BYTES {
             bail!("control request too long");
         }
         let request = match serde_json::from_str::<ControlRequest>(&line) {
+            // Only an upload carries a file.
+            Ok(request)
+                if line.len() > MAX_REQUEST_BYTES
+                    && !matches!(request, ControlRequest::ChatUpload { .. }) =>
+            {
+                bail!("control request too long");
+            }
             Ok(request) => request,
             Err(e) => {
                 write_line(
@@ -464,6 +527,13 @@ impl Client {
         self.send(request)?;
         self.next_line()?
             .context("the daemon closed the connection")
+    }
+
+    /// [`Client::call_raw`] for a request that may take minutes, such as
+    /// an upload: it waits as long as the daemon takes.
+    pub fn call_slow(&mut self, request: &ControlRequest) -> Result<Value> {
+        transport::clear_timeout(self.reader.get_ref());
+        self.call_raw(request)
     }
 
     /// Turn this connection into an event stream. Each item is one event
@@ -687,7 +757,9 @@ mod tests {
             serde_json::to_string(&ControlRequest::ChatSend {
                 chat: None,
                 text: "hi".into(),
-                project: None
+                project: None,
+                model: None,
+                attachments: vec![],
             })
             .unwrap(),
             r#"{"cmd":"chat_send","text":"hi"}"#
@@ -705,6 +777,40 @@ mod tests {
                 r#"{"cmd":"roots_label","root":"docs","label":"Work"}"#,
             ),
             (ControlRequest::Deny, r#"{"cmd":"deny"}"#),
+            (ControlRequest::Models, r#"{"cmd":"models"}"#),
+            (
+                ControlRequest::ChatSend {
+                    chat: Some("42".into()),
+                    text: "hi".into(),
+                    project: None,
+                    model: Some("7".into()),
+                    attachments: vec!["abc".into()],
+                },
+                r#"{"cmd":"chat_send","chat":"42","text":"hi","model":"7","attachments":["abc"]}"#,
+            ),
+            (
+                ControlRequest::ChatApprove {
+                    chat: "42".into(),
+                    tool_call: "9".into(),
+                    for_rest_of_chat: true,
+                },
+                r#"{"cmd":"chat_approve","chat":"42","tool_call":"9","for_rest_of_chat":true}"#,
+            ),
+            (
+                ControlRequest::ChatDeny {
+                    chat: "42".into(),
+                    tool_call: "9".into(),
+                    reason: Some("Not that team".into()),
+                },
+                r#"{"cmd":"chat_deny","chat":"42","tool_call":"9","reason":"Not that team"}"#,
+            ),
+            (
+                ControlRequest::ChatBranch {
+                    chat: "42".into(),
+                    message: "5".into(),
+                },
+                r#"{"cmd":"chat_branch","chat":"42","message":"5"}"#,
+            ),
         ] {
             assert_eq!(serde_json::to_string(&request).unwrap(), wire);
             assert_eq!(
