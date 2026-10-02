@@ -1181,19 +1181,17 @@ fn transcript(
     if let Some(question) = &pane.pending_question {
         bubble(&mut lines, question, None, width, theme, true);
     }
-    if pane.working() && !live_activity && !writing {
+    if pane.working() && !live_activity {
+        // As the web says it: "Writing" once the answer streams in.
         let word = if pane.stopping {
             "Stopping…"
-        } else if pane.sending {
-            "Sending…"
+        } else if writing || pane.streamed.values().any(|t| !t.trim().is_empty()) {
+            "Writing"
         } else {
             "Thinking"
         };
-        let mut spans = vec![
-            Span::styled(spinner(now), theme.signal(Signal::Live)),
-            Span::raw(" "),
-        ];
-        spans.extend(theme.rainbow_text(word));
+        let mut spans = vec![working_mark(theme, now), Span::raw(" ")];
+        spans.extend(theme.shimmer_text(word, sweep(now)));
         if let Some(progress) = &pane.progress {
             spans.push(Span::styled(format!(" · {progress}"), theme.faint()));
         }
@@ -1542,11 +1540,8 @@ fn activity_lines(
     now: OffsetDateTime,
 ) {
     let mut spans = if activity.pending {
-        let mut spans = vec![
-            Span::styled(spinner(now), theme.signal(Signal::Live)),
-            Span::raw(" "),
-        ];
-        spans.extend(theme.rainbow_text(activity.title));
+        let mut spans = vec![working_mark(theme, now), Span::raw(" ")];
+        spans.extend(theme.shimmer_text(activity.title, sweep(now)));
         spans
     } else {
         let caret = if activity.expanded { "▾" } else { "▸" };
@@ -2720,6 +2715,18 @@ pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// How far along its two-second sweep the shimmer is.
+fn sweep(now: OffsetDateTime) -> f32 {
+    (now.unix_timestamp_nanos().rem_euclid(2_000_000_000)) as f32 / 2_000_000_000.0
+}
+
+/// The mark beside "Thinking": the spinner, its colour going round the
+/// rainbow as the web's ring does around the brand mark.
+fn working_mark(theme: &Theme, now: OffsetDateTime) -> Span<'static> {
+    let t = (now.unix_timestamp_nanos().rem_euclid(2_400_000_000)) as f32 / 2_400_000_000.0;
+    Span::styled(spinner(now), theme.rainbow(1.0 - (2.0 * t - 1.0).abs()))
 }
 
 fn spinner(now: OffsetDateTime) -> &'static str {

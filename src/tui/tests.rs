@@ -2371,3 +2371,44 @@ fn the_mouse_selects_opens_and_scrolls() {
         ]
     );
 }
+
+#[test]
+fn thinking_shimmers_in_grey_rather_than_the_rainbow() {
+    use super::theme::{FAINT, MUTED};
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("processing")),
+    }));
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &app, &Theme::new(Depth::TrueColor), NOW))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let (x, y) = find(&app, "Thinking");
+    let between = |v: u8, a: u8, b: u8| a.min(b) <= v && v <= a.max(b);
+    for i in 0..8 {
+        let cell = &buffer[(x + i, y)];
+        let ratatui::style::Color::Rgb(r, g, b) = cell.fg else {
+            panic!("no colour on {:?}", cell.symbol());
+        };
+        assert!(
+            between(r, FAINT.0, MUTED.0)
+                && between(g, FAINT.1, MUTED.1)
+                && between(b, FAINT.2, MUTED.2),
+            "{} is ({r}, {g}, {b})",
+            cell.symbol()
+        );
+    }
+    // Writing, once the answer streams in.
+    app.update(Msg::Chat(ChatMsg::Live {
+        chat: 42,
+        live: Live::Chunk {
+            message_id: 7,
+            text: "It's".into(),
+        },
+    }));
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("Writing"), "{screen}");
+}

@@ -217,6 +217,25 @@ impl Theme {
         self.fg(mix(rainbow_at(t), CANVAS, 0.45))
     }
 
+    /// `text` in muted ink with a band of faint ink sweeping across it, the
+    /// web's `.shimmer` for status words like "Thinking". `t` (0 to 1) is
+    /// how far along its two-second sweep the band is.
+    pub fn shimmer_text(&self, text: &str, t: f32) -> Vec<Span<'static>> {
+        if self.mono() {
+            return vec![Span::styled(text.to_string(), self.muted())];
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let width = chars.len().max(1) as f32;
+        chars
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let k = shimmer_at(i as f32 + 0.5, width, t);
+                Span::styled(c.to_string(), self.fg(mix(FAINT, MUTED, k)))
+            })
+            .collect()
+    }
+
     /// `text` with the rainbow running across it.
     pub fn rainbow_text(&self, text: &str) -> Vec<Span<'static>> {
         let chars: Vec<char> = text.chars().collect();
@@ -238,6 +257,23 @@ pub fn rainbow_at(t: f32) -> Rgb {
         }
     }
     RAINBOW[RAINBOW.len() - 1].1
+}
+
+/// How much of the shimmer's faint band covers `x` in text `width` wide,
+/// `t` of the way through its sweep: 0 outside the band, 1 at its middle.
+/// As the web draws it: a gradient twice the text's width, faint from 35%
+/// to 65% and peaking at 50%, moving across in one sweep.
+pub fn shimmer_at(x: f32, width: f32, t: f32) -> f32 {
+    let width = width.max(1.0);
+    let offset = -2.0 * width + 4.0 * width * t.rem_euclid(1.0);
+    let u = ((x - offset) / (2.0 * width)).rem_euclid(1.0);
+    if !(0.35..=0.65).contains(&u) {
+        0.0
+    } else if u < 0.5 {
+        (u - 0.35) / 0.15
+    } else {
+        (0.65 - u) / 0.15
+    }
 }
 
 /// `a` weighted by `amount`, the rest `b`.
@@ -287,6 +323,28 @@ mod tests {
         assert_eq!(rainbow_at(0.0), (0x44, 0xFF, 0x9A));
         assert_eq!(rainbow_at(1.0), (0xEB, 0xFF, 0x70));
         assert_eq!(rainbow_at(0.4836), (0x8B, 0x44, 0xFF));
+    }
+
+    #[test]
+    fn the_shimmer_band_sweeps_across() {
+        // Somewhere along the sweep each letter is under the band, and
+        // the band moves on rather than staying put.
+        let width = 8.0;
+        let at = |x: f32| {
+            (0..100)
+                .map(|i| shimmer_at(x, width, i as f32 / 100.0))
+                .fold(0.0, f32::max)
+        };
+        for x in 0..8 {
+            assert!(at(x as f32 + 0.5) > 0.9, "letter {x}");
+        }
+        assert_ne!(shimmer_at(0.5, width, 0.3), shimmer_at(0.5, width, 0.4));
+        let theme = Theme::new(Depth::TrueColor);
+        assert_eq!(theme.shimmer_text("Thinking", 0.0).len(), 8);
+        assert_eq!(
+            Theme::new(Depth::Mono).shimmer_text("Thinking", 0.0).len(),
+            1
+        );
     }
 
     #[test]
