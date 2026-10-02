@@ -525,14 +525,7 @@ fn live_pill(app: &App, theme: &Theme, now: OffsetDateTime) -> Vec<Span<'static>
         Daemon::NotRunning(_) => pill(RING, Signal::Negative, "DAEMON STOPPED"),
         Daemon::Running(status) if status.paused => pill("‖", Signal::Attention, "PAUSED"),
         Daemon::Running(status) => match status.connection.connection.as_str() {
-            "connected" => {
-                let mut spans = vec![
-                    Span::styled(DOT, theme.signal(Signal::Positive)),
-                    Span::raw(" "),
-                ];
-                spans.extend(theme.rainbow_text("LIVE"));
-                spans
-            }
+            "connected" => pill(DOT, Signal::Positive, "LIVE"),
             "connecting" => pill(spinner(now), Signal::Attention, "CONNECTING"),
             "not_paired" => pill(RING, Signal::Attention, "NOT PAIRED"),
             "revoked" => pill(DOT, Signal::Negative, "REVOKED"),
@@ -896,7 +889,7 @@ fn conversation(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: Of
             meta.push(Span::raw("  "));
             meta.push(Span::styled(DOT, theme.signal(Signal::Positive)));
             meta.push(Span::raw(" "));
-            meta.extend(theme.rainbow_text("LIVE"));
+            meta.push(Span::styled("LIVE", theme.signal_ink(Signal::Positive)));
         }
         Following::Offline => {
             meta.push(Span::raw("  "));
@@ -1232,9 +1225,10 @@ fn activity_line(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: O
     let at = parse_ts(&entry.ts);
     let live = at.is_some_and(|t| (now - t).whole_seconds() < LIVE_SECS);
     let mut spans = if live {
-        let mut spans = theme.rainbow_text("LIVE");
-        spans.push(Span::raw("      "));
-        spans
+        vec![
+            Span::styled("LIVE", theme.signal_ink(Signal::Positive)),
+            Span::raw("      "),
+        ]
     } else {
         vec![Span::styled("ACTIVITY  ", theme.micro())]
     };
