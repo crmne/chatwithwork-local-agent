@@ -78,6 +78,16 @@ pub struct ChatPage {
     /// Frames left to keep scrolling to the latest message: the scroll
     /// area learns how tall the chat is a frame late.
     scroll_to_bottom: u8,
+    /// Frames left to scroll the latest question to near the top, as the
+    /// web's scroll controller does on opening a chat and on each new
+    /// question; smoothly for a new one.
+    pin: u8,
+    pin_smooth: bool,
+    /// Where the latest question was pinned, from the top of the
+    /// conversation: room is kept under the answer to stay there.
+    pinned: Option<f32>,
+    /// The latest question seen, to notice a new one.
+    last_user: Option<String>,
     /// The chat shown last frame, to start fresh on another.
     shown: Option<Option<u64>>,
     greeting: usize,
@@ -118,7 +128,11 @@ impl ChatPage {
             drawer: false,
             focus_composer: false,
             focus_search: false,
-            scroll_to_bottom: 3,
+            scroll_to_bottom: 0,
+            pin: 3,
+            pin_smooth: false,
+            pinned: None,
+            last_user: None,
             shown: None,
             greeting: seed % GREETINGS.len(),
             new_chat_since: None,
@@ -237,7 +251,11 @@ impl ChatPage {
         if self.shown != Some(self.state.open) {
             self.shown = Some(self.state.open);
             self.conversation.reset();
-            self.scroll_to_bottom = 3;
+            self.scroll_to_bottom = 0;
+            self.pin = 3;
+            self.pin_smooth = false;
+            self.pinned = None;
+            self.last_user = None;
             self.new_chat_since = None;
         }
         let images = self.images.take().unwrap_or_else(|| Images::load(&ctx));
@@ -664,9 +682,9 @@ impl ChatPage {
     ) {
         match event {
             Some(composer::Event::Send) => {
+                // The question shows, and is pinned near the top as it does.
                 let commands = self.state.send();
                 self.run(commands);
-                self.scroll_to_bottom = 3;
             }
             Some(composer::Event::Stop) => {
                 let commands = self.state.stop();
@@ -732,17 +750,18 @@ impl ChatPage {
         let mut events = Vec::new();
         let mut project_url = None;
         let mut child = ui.new_child(UiBuilder::new().max_rect(main));
-        // On the chat's first read: start at the latest message.
+        // Back to the latest message, from the scroll button.
         let scroll_to_bottom = self.scroll_to_bottom > 0 && !self.state.loading;
         if scroll_to_bottom {
             self.scroll_to_bottom -= 1;
+            self.pinned = None;
             ctx.request_repaint();
         }
         let output = egui::ScrollArea::vertical()
             .id_salt(("chat-conversation", self.state.open))
             .auto_shrink([false, false])
-            .stick_to_bottom(true)
             .show(&mut child, |ui| {
+                let origin = ui.cursor().top();
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 ui.add_space(24.0);
                 let left = main.center().x - column / 2.0;
@@ -792,6 +811,52 @@ impl ChatPage {
                 let height = col.min_rect().height();
                 ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
                 ui.add_space(176.0);
+                // The web's scroll controller: a new question (asked here or
+                // elsewhere), and the latest one when a chat opens, scrolls
+                // to 24 under the top, and the answer writes itself in under
+                // it; the page doesn't follow it down.
+                let latest = self.conversation.latest_user.clone();
+                if let Some((key, _)) = &latest
+                    && self.last_user.as_ref() != Some(key)
+                {
+                    if self.last_user.is_some() {
+                        self.pin = 3;
+                        self.pin_smooth = true;
+                    }
+                    self.last_user = Some(key.clone());
+                }
+                let pinning = self.pin > 0 && !self.state.loading;
+                if pinning {
+                    self.pin -= 1;
+                    ui.ctx().request_repaint();
+                    self.pinned = latest.as_ref().map(|(_, y)| (y - origin - 24.0).max(0.0));
+                }
+                // Room under the answer, so the question can stay pinned
+                // while the answer is still short.
+                if let Some(target) = self.pinned {
+                    let content = ui.cursor().top() - origin;
+                    ui.add_space((target - (content - main.height())).max(0.0));
+                }
+                match (pinning, self.pinned) {
+                    (true, Some(target)) => {
+                        let animation = if self.pin_smooth && !self.still {
+                            egui::style::ScrollAnimation::default()
+                        } else {
+                            egui::style::ScrollAnimation::none()
+                        };
+                        ui.scroll_to_rect_animation(
+                            Rect::from_min_size(pos2(main.left(), origin + target), vec2(1.0, 1.0)),
+                            Some(egui::Align::TOP),
+                            animation,
+                        );
+                    }
+                    // Nothing asked yet: the end.
+                    (true, None) => ui.scroll_to_cursor_animation(
+                        Some(egui::Align::BOTTOM),
+                        egui::style::ScrollAnimation::none(),
+                    ),
+                    _ => {}
+                }
                 if scroll_to_bottom {
                     ui.scroll_to_cursor_animation(
                         Some(egui::Align::BOTTOM),
@@ -865,6 +930,7 @@ impl ChatPage {
             });
         if jump {
             self.scroll_to_bottom = 3;
+            self.pinned = None;
         }
         if let Some(notice) = self.state.notice.clone() {
             notice_toast(&ctx, rect, &notice, p, images);

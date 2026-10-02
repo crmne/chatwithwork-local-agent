@@ -60,6 +60,9 @@ pub struct ConversationView {
     pub inputs: CardInputs,
     /// Review was clicked: bring the first card into view.
     review: bool,
+    /// The latest question, by key, and where its message starts on
+    /// screen, as last drawn: the page pins it near the top on sending.
+    pub latest_user: Option<(String, f32)>,
 }
 
 impl ConversationView {
@@ -122,6 +125,7 @@ impl Conversation<'_> {
     ) -> (Vec<Event>, bool) {
         let mut events = Vec::new();
         let mut animating = false;
+        view.latest_user = None;
         let entries: &[Entry] = state.transcript.as_ref().map_or(&[], |t| &t.entries);
         let mut items: Vec<Item> = entries.iter().map(Item::Entry).collect();
         for (id, text) in &state.streamed {
@@ -259,6 +263,10 @@ impl Conversation<'_> {
             );
             child.set_opacity(eased);
             let caret = streaming && Some(i) == last_answer && i + 2 >= count;
+            if matches!(item, Item::Entry(Entry::User { .. }) | Item::Pending(_)) {
+                // The message itself starts under its 12 of margin.
+                view.latest_user = Some((key.clone(), top + 12.0));
+            }
             match item {
                 Item::Entry(Entry::User {
                     id,

@@ -212,11 +212,14 @@ fn sources_open_in_the_browser() {
     fx.wait_for_label("Vendor contract renewal");
     fx.open(11);
     fx.wait_for_label("2 sources");
-    // Let it scroll to the latest message first.
+    // Let it scroll to the latest question first: this answer is above it,
+    // so it's clicked as a screen reader would.
     fx.harness.run_steps(5);
-    fx.harness.get_by_label("2 sources").click();
+    fx.harness.get_by_label("2 sources").click_accesskit();
     fx.wait_for_label("1. Acme renewal 2026.pdf");
-    fx.harness.get_by_label("2. Acme MSA 2024.pdf").click();
+    fx.harness
+        .get_by_label("2. Acme MSA 2024.pdf")
+        .click_accesskit();
     fx.harness.run_steps(2);
     // The chip is above the fold now: clicked as a screen reader would.
     fx.harness
@@ -583,6 +586,41 @@ fn credits_and_projects_change_in_place() {
 }
 
 #[test]
+fn a_question_sent_is_pinned_near_the_top_with_its_answer_under_it() {
+    let mut fx = fixture(Options::default());
+    fx.ready();
+    fx.open_waiting(11, "Want me to add it to the Q4 checklist?");
+    // Opened, the latest question sits 24 under the top, as on the web.
+    let top = fx
+        .harness
+        .get_by_label("Draft a short reminder for the team.")
+        .rect()
+        .top();
+    assert!((top - 34.0).abs() < 4.0, "pinned at {top}");
+    let field = fx
+        .harness
+        .get_by_role(egui::accesskit::Role::MultilineTextInput);
+    field.focus();
+    field.type_text("Who signs the renewal?");
+    fx.harness.run_steps(2);
+    fx.harness.get_by_label("Send message").click();
+    fx.wait_for_request("chat_send", |_| true);
+    // The new question scrolls up to the same place, smoothly, with room
+    // under it for the answer to come.
+    fx.wait("the question pinned", |h| {
+        h.query_all_by_label("Who signs the renewal?")
+            .last()
+            .is_some_and(|q| (q.rect().top() - 34.0).abs() < 4.0)
+    });
+    assert!(
+        fx.harness
+            .query_by_label("Draft a short reminder for the team.")
+            .is_none_or(|q| q.rect().bottom() < 34.0),
+        "the earlier one scrolled up"
+    );
+}
+
+#[test]
 fn a_narrow_window_keeps_the_sidebar_in_a_drawer() {
     let mut fx = fixture(Options {
         size: [760.0, 820.0],
@@ -904,7 +942,8 @@ fn a_tools_question_is_answered_with_its_form() {
     days.focus();
     days.type_text("0");
     fx.harness.run_steps(1);
-    fx.harness.get_by_label("Send").click();
+    // The card's foot is below the fold, under the question pinned at top.
+    fx.harness.get_by_label("Send").click_accesskit();
     let answered = fx.wait_for_request("chat_answer", |_| true);
     assert_eq!(answered["tool_call"], "432");
     assert_eq!(
@@ -1113,6 +1152,17 @@ fn review_screens() -> Vec<Screen> {
                 fx.harness
                     .get_by_label("Made a plan · 2 steps")
                     .click_accesskit();
+            },
+        },
+        Screen {
+            name: "sent",
+            chat: Some(11),
+            setup: |fx| {
+                fx.chat().state_mut().input = "Who signs the renewal?".into();
+                fx.harness.run_steps(2);
+                fx.harness.get_by_label("Send message").click();
+                fx.wait_for_request("chat_send", |_| true);
+                fx.harness.run_steps(20);
             },
         },
         Screen {
