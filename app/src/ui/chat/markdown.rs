@@ -471,6 +471,7 @@ mod tests {
         let sources = vec![Source {
             title: "Acme renewal 2026 — final signed version.pdf".into(),
             url: Some("https://drive.google.com/file/d/1AcmeRenewal2026Draft/view".into()),
+            icon: None,
         }];
         let md = "Renews in March [renewal](https://docs.google.com/document/d/1AcmeRenewal2026Draft/edit), \
                   see [the site](https://acme.example/terms).";

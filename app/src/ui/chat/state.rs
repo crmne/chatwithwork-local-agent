@@ -1415,6 +1415,7 @@ mod tests {
                 filename: "Q3 plan.pdf".into(),
                 byte_size: 4,
                 content_type: "application/pdf".into(),
+                icon: None,
             }),
         });
         // Files alone can be sent.

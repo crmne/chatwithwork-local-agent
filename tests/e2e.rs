@@ -58,6 +58,8 @@ struct ServerState {
     decisions: Vec<String>,
     /// Files uploaded: (filename, content type, bytes).
     uploads: Vec<(String, String, String)>,
+    /// Images asked for that came with a token or a proof.
+    assets_with_credentials: usize,
 }
 
 struct FakeServer {
@@ -245,6 +247,40 @@ async fn http(mut stream: TcpStream, state: Arc<Mutex<ServerState>>, origin: Str
         .next()
         .unwrap_or_default()
         .to_string();
+    if path.starts_with("/assets/") {
+        if header(&head, "authorization").is_some() || !dpop.is_empty() {
+            state.lock().unwrap().assets_with_credentials += 1;
+        }
+        let (status, extra, content_type, body): (u16, &str, &str, Vec<u8>) = match path.as_str() {
+            "/assets/providers/slack-0c9450af.svg" => (
+                200,
+                "",
+                "image/svg+xml",
+                b"<svg xmlns='http://www.w3.org/2000/svg'/>".to_vec(),
+            ),
+            "/assets/big.png" => (200, "", "image/png", vec![0; 2 * 1024 * 1024]),
+            "/assets/page.svg" => (
+                200,
+                "",
+                "text/html; charset=utf-8",
+                b"<html></html>".to_vec(),
+            ),
+            "/assets/moved.svg" => (
+                302,
+                "location: https://evil.example/x.svg\r\n",
+                "text/plain",
+                Vec::new(),
+            ),
+            _ => (404, "", "text/plain", b"not found".to_vec()),
+        };
+        let head = format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: {content_type}\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes()).await;
+        let _ = stream.write_all(&body).await;
+        return;
+    }
     let (status, json) = if [
         "/local_agent/chat",
         "/local_agent/models",
@@ -2226,4 +2262,70 @@ async fn keeps_the_chat_list_current_for_the_terminal() {
         .unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(10), first_task).await;
     let _ = tokio::time::timeout(Duration::from_secs(10), second_task).await;
+}
+
+/// Logos and file-type icons come from the paired server through the
+/// daemon: only images under /assets/, without the token, small, and never
+/// through a redirect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fetches_the_webs_images_for_clients() {
+    use cww::tui::chat::Chats;
+
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    pair(&fx, &server);
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let _ws = tokio::time::timeout(Duration::from_secs(20), server.sockets.recv())
+        .await
+        .expect("the daemon connects")
+        .unwrap();
+    let chats = Chats::new(&fx.paths.socket_path());
+    let fetch = |path: &'static str| {
+        let c = chats.clone();
+        tokio::task::spawn_blocking(move || c.asset(path))
+    };
+
+    let logo = fetch("/assets/providers/slack-0c9450af.svg")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(logo.content_type, "image/svg+xml");
+    assert!(logo.bytes.starts_with(b"<svg"));
+    for (path, code) in [
+        ("/assets/missing.svg", "not_found"),
+        ("/assets/big.png", "unreachable"),
+        ("/assets/page.svg", "unsupported"),
+        ("/assets/moved.svg", "unreachable"),
+        ("/local_agent/chats", "invalid"),
+        ("/assets/../local_agent/chats", "invalid"),
+    ] {
+        let failure = fetch(path).await.unwrap().unwrap_err();
+        assert_eq!(failure.code, code, "{path}: {}", failure.message);
+    }
+    // A client that skips the check is refused by the daemon too.
+    let refused = control_error(
+        &fx.paths,
+        ControlRequest::Asset {
+            path: "/local_agent/chats".into(),
+        },
+    )
+    .await;
+    assert!(refused.contains("isn't an image"), "{refused}");
+    {
+        let st = server.state.lock().unwrap();
+        assert_eq!(st.assets_with_credentials, 0, "images go without the token");
+        assert!(
+            !st.log.iter().any(|l| l.contains("/local_agent/chats")),
+            "nothing but images was asked for: {:?}",
+            st.log
+        );
+    }
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
 }

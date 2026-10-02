@@ -888,6 +888,7 @@ impl ControlHandler for Daemon {
                 self.chat(move |client| client.cancel(&chat)).await
             }
             ControlRequest::ChatAccess => self.chat(|client| client.request_access()).await,
+            ControlRequest::Asset { path } => self.chat(move |client| client.asset(&path)).await,
             ControlRequest::RootsLabel { root, label } => self.label_root(root, label).await,
             ControlRequest::Deny => Ok(self.deny().await),
             ControlRequest::Subscribe { .. } => {

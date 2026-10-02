@@ -337,6 +337,7 @@ impl Conversation<'_> {
                     services,
                     pending,
                     steps,
+                    ..
                 }) => {
                     let live_progress = if *pending {
                         state.progress.as_deref().or(progress.as_deref())

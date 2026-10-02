@@ -451,6 +451,43 @@ impl AuthClient {
         unreachable!("the loop returns on the second attempt")
     }
 
+    /// GET a public file of the server's (an image under `/assets/`),
+    /// without any token or proof: the status, the content type, and at
+    /// most `limit` bytes (more is an error). Redirects are never
+    /// followed, so it can't be sent anywhere else.
+    pub fn get_asset(&self, path: &str, limit: usize) -> Result<(u16, String, Vec<u8>)> {
+        let url = self.server.endpoint(path.trim_start_matches('/'));
+        let mut response = self
+            .agent
+            .get(&url)
+            .header("Accept", "image/*")
+            .call()
+            .with_context(|| format!("contacting {url}"))?;
+        let status = response.status().as_u16();
+        if (300..400).contains(&status) {
+            bail!(
+                "the server answered {url} with a redirect ({status}); redirects are never followed"
+            );
+        }
+        let content_type = response
+            .headers()
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = if status == 200 {
+            response
+                .body_mut()
+                .with_config()
+                .limit(limit as u64)
+                .read_to_vec()
+                .with_context(|| format!("reading {url} (at most {limit} bytes)"))?
+        } else {
+            Vec::new()
+        };
+        Ok((status, content_type, bytes))
+    }
+
     /// Exchange the refresh credential for a short-lived access token.
     pub fn refresh(
         &self,

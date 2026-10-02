@@ -191,7 +191,7 @@ Questions you ask, and the commands you run, are kept in `~/.local/state/cww/his
 
 A first run is three keys: `c` to pair, `s` to start the daemon if the installer didn't, and `y` to share your Documents folder, which it offers when nothing is shared and never shares on its own. Until the daemon runs, the UI works from `config.toml` and the audit file, and changes are saved there, like the `cww roots` commands. `CWW_SERVER=https://chat.example.com cww` pairs with a self-hosted server.
 
-Chats in the terminal are a separate permission from sharing folders. `cww login` asks for both, and the approval page lets you decline chats (`cww login --no-chats` doesn't ask). A computer paired without them asks when you press `o`, and you allow it in Chat with Work under Settings, Computers; you can turn it off there at any time. The TUI never holds a token: the daemon asks Chat with Work for it, and answers stream over the daemon's connection. [CHAT_API.md](CHAT_API.md) explains the design.
+Chats in the terminal are a separate permission from sharing folders. `cww login` asks for both, and the approval page lets you decline chats (`cww login --no-chats` doesn't ask). A computer paired without them asks when you press `o`, and you allow it in Chat with Work under Settings, Computers; you can turn it off there at any time. The TUI never holds a token: the daemon asks Chat with Work for it, and answers stream over the daemon's connection. The logos and file-type icons chats show (in the desktop app) come from the paired server too: the daemon fetches only images under its `/assets/`, without the token, at most 1 MiB each and never through a redirect. [CHAT_API.md](CHAT_API.md) explains the design.
 
 The UI uses no CPU while nothing happens, follows `NO_COLOR`, and falls back to 256 colours on terminals without true colour.
 
@@ -285,7 +285,7 @@ The same layout is used on macOS. On Windows everything lives under `%LOCALAPPDA
 
 ## Behind a proxy
 
-Some networks only let traffic out through an HTTP proxy. `cww` sends pairing, token refreshes and the WebSocket through one with HTTP `CONNECT`, so TLS still runs end to end between `cww` and Chat with Work: the proxy sees the server's host name and nothing else.
+Some networks only let traffic out through an HTTP proxy. `cww` sends pairing, token refreshes, the chats, the images they show and the WebSocket through one with HTTP `CONNECT`, so TLS still runs end to end between `cww` and Chat with Work: the proxy sees the server's host name and nothing else.
 
 The daemon runs as a background service (systemd, launchd, or a Windows logon task), and services don't inherit your shell's environment. So set the proxy in `config.toml`, at the top of the file, before any `[section]`:
 

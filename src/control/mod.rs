@@ -201,6 +201,12 @@ pub enum ControlRequest {
     /// Ask the owner to let this computer use their chats. Nothing is
     /// allowed until they say yes in Chat with Work.
     ChatAccess,
+    /// An image the web shows (a logo, a file-type icon), from the paired
+    /// server: `path` is under `/assets/`. Answers `content_type` and the
+    /// bytes in base64 as `data`.
+    Asset {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -863,6 +869,12 @@ mod tests {
                 r#"{"cmd":"roots_label","root":"docs","label":"Work"}"#,
             ),
             (ControlRequest::Deny, r#"{"cmd":"deny"}"#),
+            (
+                ControlRequest::Asset {
+                    path: "/assets/providers/slack-0c9450af.svg".into(),
+                },
+                r#"{"cmd":"asset","path":"/assets/providers/slack-0c9450af.svg"}"#,
+            ),
             (ControlRequest::Models, r#"{"cmd":"models"}"#),
             (
                 ControlRequest::ChatSend {

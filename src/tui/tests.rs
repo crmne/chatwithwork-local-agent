@@ -1017,9 +1017,11 @@ fn chat_list() -> ChatList {
         }],
         account: Named {
             name: "Plenty".into(),
+            ..Named::default()
         },
         user: Named {
             name: "Carmine".into(),
+            ..Named::default()
         },
         locked_reason: None,
         credits: Some(super::chat::Credits {
@@ -1068,6 +1070,7 @@ fn budget_transcript(state: &str) -> Transcript {
                 details: Some("2 searches, read 1 file".into()),
                 progress: None,
                 services: vec!["Drive".into(), "Carmine's MacBook".into()],
+                logos: vec![],
                 pending: false,
                 steps: vec![
                     Step {
@@ -1076,6 +1079,7 @@ fn budget_transcript(state: &str) -> Transcript {
                         files: vec!["Q3 plan.pdf".into(), "Budget 2026.xlsx".into()],
                         app: None,
                         waiting: false,
+                        logo: None,
                     },
                     Step {
                         summary: "Read plans/q3.md".into(),
@@ -1083,6 +1087,7 @@ fn budget_transcript(state: &str) -> Transcript {
                         files: vec![],
                         app: None,
                         waiting: false,
+                        logo: None,
                     },
                 ],
             },
@@ -1095,6 +1100,7 @@ fn budget_transcript(state: &str) -> Transcript {
                 sources: vec![Source {
                     title: "Q3 plan.pdf".into(),
                     url: Some("https://drive.google.com/file/d/q3".into()),
+                    icon: None,
                 }],
             },
         ],
@@ -1154,6 +1160,7 @@ fn snapshot_chat_streaming() {
         details: Some("1 search".into()),
         progress: None,
         services: vec!["Carmine's MacBook".into()],
+        logos: vec![],
         pending: true,
         steps: vec![Step {
             summary: "Searching for “q4 budget”…".into(),
@@ -1161,6 +1168,7 @@ fn snapshot_chat_streaming() {
             files: vec![],
             app: None,
             waiting: false,
+            logo: None,
         }],
     });
     app.update(Msg::Chat(ChatMsg::Shown {
@@ -1742,6 +1750,7 @@ fn budget_open(app: &mut App, can: Option<super::chat::Can>) {
     transcript.chat.model = Some(super::chat::ModelRef {
         id: "12".into(),
         name: "Gemini 3.8 Flash".into(),
+        logo: None,
     });
     app.update(Msg::Chat(ChatMsg::Shown {
         chat: 42,
@@ -2120,6 +2129,7 @@ fn approval() -> super::chat::Approval {
     super::chat::Approval {
         id: 31,
         service: "Slack".into(),
+        logo: None,
         effect: "write".into(),
         decidable: true,
         summary: "Post a message to #general".into(),
@@ -2367,6 +2377,7 @@ fn files_go_with_the_next_question() {
             filename: "notes.txt".into(),
             byte_size: 2048,
             content_type: "text/plain".into(),
+            icon: None,
         }),
     }));
     let screen = render_to_string(&app, 100, 30);
@@ -2746,7 +2757,10 @@ fn the_list_stays_current_over_the_daemons_socket() {
     assert_eq!(app.chat.list.projects.len(), 2);
     app.update(Msg::Chat(ChatMsg::ListLive(ListLive::Account(
         super::chat::AccountUpdate {
-            user: Named { name: "Ada".into() },
+            user: Named {
+                name: "Ada".into(),
+                ..Named::default()
+            },
             locked_reason: Some("You're out of credits.".into()),
             ..super::chat::AccountUpdate::default()
         },

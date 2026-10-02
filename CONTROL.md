@@ -307,6 +307,14 @@ Stops the answer being written.
 
 Asks the owner to let this computer use their chats: `{"granted": false, "requested": true, "approve_url": "https://…/settings?tab=connectors#computers"}`. Nothing is allowed until they say yes in Chat with Work.
 
+### `asset`
+
+```json
+{"cmd": "asset", "path": "/assets/providers/slack-0c9450af.svg"}
+```
+
+An image the chats show, fetched from the paired server: a model's maker or a service's logo, or a file type's icon. Chat JSON gives each as `{"path", "monochrome"}` (`logo` on a chat's `model`, on `models`, on `approvals` and `questions`, and on each activity `step`; `logos` beside an activity's `services`, one each or null; `icon` on attachments, uploads and sources, null for a web page). `path` must be under `/assets/` and hold only letters, digits, `-`, `_`, `.` and `/`, never `..` or `//`; anything else fails with `invalid` before anything is fetched. The daemon asks the server's origin for it without its token, never follows a redirect, and takes only an image of at most 1 MiB. Answers `{"path", "content_type", "data"}`, the bytes in base64; `not_found` when the server has no such image. Paths are fingerprinted, so keep what comes back. `monochrome` logos are drawn as they are on light backgrounds and white on dark ones.
+
 ### `shutdown`
 
 ```json

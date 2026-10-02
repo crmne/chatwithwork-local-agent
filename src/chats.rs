@@ -37,6 +37,33 @@ pub fn chat_number(chat: &str) -> Result<&str, Refusal> {
     }
 }
 
+/// The longest image the daemon fetches for a client.
+pub const MAX_ASSET_BYTES: usize = 1024 * 1024;
+
+/// An image path on the paired server, as the chat API gives them:
+/// `/assets/` and then only letters, digits, `-`, `_`, `.` and `/`, never
+/// `..` or `//`. Checked before anything is fetched, so nothing else on the
+/// server (and nothing elsewhere) can be asked for.
+pub fn asset_path(path: &str) -> Result<&str, Refusal> {
+    let ok = path.len() <= 512
+        && path
+            .strip_prefix("/assets/")
+            .is_some_and(|rest| !rest.is_empty() && !rest.ends_with('/'))
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
+        && !path.contains("..")
+        && !path.contains("//");
+    if ok {
+        Ok(path)
+    } else {
+        Err(Refusal::new(
+            "invalid",
+            format!("{path:?} isn't an image of Chat with Work's"),
+        ))
+    }
+}
+
 /// What a tunnel session is asked to do with the server's chat channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Follow {
@@ -459,6 +486,44 @@ impl ChatClient {
         self.call("POST", "local_agent/chat_access_request", Body::Empty)
     }
 
+    /// An image under `/assets/` on the paired server, without the token
+    /// (the server serves them to anyone): `{content_type, data}`, the
+    /// bytes in base64. Only images, at most [`MAX_ASSET_BYTES`], and never
+    /// through a redirect.
+    pub fn asset(&self, path: &str) -> Result<Value> {
+        use base64::Engine;
+        let path = asset_path(path)?;
+        let (status, content_type, bytes) =
+            self.tokens
+                .client()
+                .get_asset(path, MAX_ASSET_BYTES)
+                .map_err(|e| Refusal::new("unreachable", format!("Can't fetch {path}: {e:#}")))?;
+        let content_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        match status {
+            200 if content_type.starts_with("image/") => Ok(json!({
+                "path": path,
+                "content_type": content_type,
+                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            })),
+            200 => Err(Refusal::new(
+                "unsupported",
+                format!("{path} isn't an image ({content_type})"),
+            )
+            .into()),
+            404 => Err(Refusal::new("not_found", format!("Chat with Work has no {path}")).into()),
+            _ => Err(Refusal::new(
+                "unreachable",
+                format!("Chat with Work answered {status} for {path}"),
+            )
+            .into()),
+        }
+    }
+
     /// One call, refreshing the token and trying again once when the server
     /// says it's expired, or lacks chats that were allowed since it was
     /// issued. Failures come back as [`Refusal`]s with the server's code.
@@ -620,6 +685,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(kept.downcast_ref::<Refusal>().unwrap().code, "not_found");
+    }
+
+    #[test]
+    fn only_image_paths_on_the_server_are_fetched() {
+        for good in [
+            "/assets/providers/slack-0c9450af.svg",
+            "/assets/mimetypes/application-pdf-a0ad3afb.svg",
+        ] {
+            assert_eq!(asset_path(good).unwrap(), good);
+        }
+        for bad in [
+            "",
+            "/assets/",
+            "/assets/a/",
+            "assets/x.svg",
+            "/local_agent/chats",
+            "/assets/../local_agent/chats",
+            "/assets//evil.example/x.svg",
+            "https://evil.example/assets/x.svg",
+            "//evil.example/assets/x.svg",
+            "/assets/x.svg?y=1",
+            "/assets/x.svg#y",
+            "/assets/x y.svg",
+            "/assets/x%2e%2e/y.svg",
+            "/assets/x\\y.svg",
+        ] {
+            assert!(asset_path(bad).is_err(), "{bad:?}");
+        }
+        assert!(asset_path(&format!("/assets/{}", "a".repeat(600))).is_err());
     }
 
     #[test]

@@ -71,6 +71,52 @@ pub struct ModelRef {
     #[serde(deserialize_with = "id_string")]
     pub id: String,
     pub name: String,
+    /// Its maker's logo, as the picker's button shows it.
+    #[serde(deserialize_with = "asset")]
+    pub logo: Option<Asset>,
+}
+
+/// A logo or a file-type icon the web shows, as an image on the paired
+/// server: `path` is always under `/assets/`, fingerprinted, so it never
+/// changes and can be cached for good. Fetch it with [`Chats::asset`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Asset {
+    pub path: String,
+    /// A single-colour logo: drawn as is on light backgrounds, white on
+    /// dark ones, as the web inverts it in dark mode.
+    pub monochrome: bool,
+}
+
+/// An image, or nothing where the server sends none or something this
+/// cww can't read: a logo never stops the rest from reading.
+fn asset<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Asset>, D::Error> {
+    Ok(serde_json::from_value::<Asset>(Value::deserialize(d)?)
+        .ok()
+        .filter(|a| a.path.starts_with("/assets/")))
+}
+
+/// [`asset`] for a list of images, one per name, `None` where there's none.
+fn assets<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Option<Asset>>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value::<Asset>(item)
+                    .ok()
+                    .filter(|a| a.path.starts_with("/assets/"))
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// An image's bytes, as [`Chats::asset`] fetched them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AssetData {
+    /// `image/svg+xml`, `image/png`, ...
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -114,6 +160,9 @@ pub struct Model {
     pub id: String,
     pub name: String,
     pub provider: String,
+    /// Its maker's logo, as the picker shows it.
+    #[serde(deserialize_with = "asset")]
+    pub logo: Option<Asset>,
     pub description: Option<String>,
     /// "About 3 credits per answer".
     pub rate: Option<String>,
@@ -128,6 +177,7 @@ impl Default for Model {
             id: String::new(),
             name: String::new(),
             provider: String::new(),
+            logo: None,
             description: None,
             rate: None,
             selectable: true,
@@ -153,6 +203,13 @@ fn id_string_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String
 #[serde(default)]
 pub struct Named {
     pub name: String,
+    /// The organization's logo; the server sends none yet (the web draws
+    /// the name's first letter).
+    #[serde(deserialize_with = "asset")]
+    pub logo: Option<Asset>,
+    /// The person's picture; the server sends none (draw initials).
+    #[serde(deserialize_with = "asset")]
+    pub avatar: Option<Asset>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -254,6 +311,10 @@ impl ChatList {
 pub struct Source {
     pub title: String,
     pub url: Option<String>,
+    /// A file's type icon; `None` for a web page (the web asks Google for
+    /// its favicon from the browser).
+    #[serde(deserialize_with = "asset")]
+    pub icon: Option<Asset>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -270,6 +331,9 @@ pub struct Step {
     /// The answer stopped here for the person: a change to approve (see
     /// [`Transcript::approvals`]) or a question from the tool's server.
     pub waiting: bool,
+    /// Its service's logo; `None` where the web shows a glyph instead.
+    #[serde(deserialize_with = "asset")]
+    pub logo: Option<Asset>,
 }
 
 /// A tool's view (MCP Apps): the service it belongs to and the `ui://`
@@ -316,6 +380,11 @@ pub enum Entry {
         progress: Option<String>,
         #[serde(default)]
         services: Vec<String>,
+        /// One per name in `services`: its logo, or `None` where the web
+        /// shows a glyph (Phosphor's `laptop` for a computer,
+        /// `plugs-connected` for a person's own MCP server).
+        #[serde(default, deserialize_with = "assets")]
+        logos: Vec<Option<Asset>>,
         #[serde(default)]
         pending: bool,
         #[serde(default)]
@@ -334,6 +403,9 @@ pub struct Attachment {
     pub filename: String,
     pub byte_size: u64,
     pub content_type: String,
+    /// Its file type's icon.
+    #[serde(deserialize_with = "asset")]
+    pub icon: Option<Asset>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -368,6 +440,10 @@ pub struct Question {
     pub id: u64,
     /// "Notion".
     pub service: String,
+    /// The service's logo; `None` where the web shows the
+    /// `plugs-connected` glyph (a person's own MCP server).
+    #[serde(deserialize_with = "asset")]
+    pub logo: Option<Asset>,
     /// This person answers it; otherwise it waits for `waiting_for`.
     pub decidable: bool,
     pub message: String,
@@ -422,6 +498,10 @@ pub struct Approval {
     pub id: u64,
     /// "Linear".
     pub service: String,
+    /// The service's logo, as the card's avatar shows it; `None` where
+    /// the web shows the `plugs-connected` glyph.
+    #[serde(deserialize_with = "asset")]
+    pub logo: Option<Asset>,
     pub effect: String,
     /// This person decides it; otherwise it waits for `waiting_for`.
     pub decidable: bool,
@@ -448,6 +528,9 @@ pub struct Uploaded {
     pub filename: String,
     pub byte_size: u64,
     pub content_type: String,
+    /// Its file type's icon.
+    #[serde(deserialize_with = "asset")]
+    pub icon: Option<Asset>,
 }
 
 /// A chat's new public link.
@@ -828,6 +911,35 @@ impl Chats {
         parse(self.call(&ControlRequest::ChatAccess)?)
     }
 
+    /// An image the web shows (an [`Asset`]'s `path`), fetched from the
+    /// paired server by the daemon: only paths under `/assets/`, images of
+    /// at most 1 MiB, never through a redirect. Fingerprinted paths never
+    /// change, so keep what this returns. `not_found` when the server has
+    /// no such image, `invalid` for a path that isn't one.
+    pub fn asset(&self, path: &str) -> Result<AssetData, Failure> {
+        use base64::Engine;
+        crate::chats::asset_path(path)
+            .map_err(|refusal| Failure::new(&refusal.code, refusal.message))?;
+        let response = self.call(&ControlRequest::Asset {
+            path: path.to_string(),
+        })?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(response["data"].as_str().unwrap_or_default())
+            .map_err(|_| {
+                Failure::new(
+                    "unsupported",
+                    "The daemon sent an image this cww can't read.",
+                )
+            })?;
+        Ok(AssetData {
+            content_type: response["content_type"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            bytes,
+        })
+    }
+
     /// Follow `chat` until `on_live` answers false or the daemon goes
     /// away. `on_live` also hears `None` now and then, when nothing
     /// happened, so it can stop; `on_start` gets a way to stop it sooner
@@ -1012,7 +1124,8 @@ mod tests {
             transcript.chat.model,
             Some(ModelRef {
                 id: "3".into(),
-                name: "Claude Sonnet".into()
+                name: "Claude Sonnet".into(),
+                logo: None,
             })
         );
         assert!(transcript.chat.can(|c| c.retry));
@@ -1110,6 +1223,82 @@ mod tests {
             Live::from_update(&json!({ "type": "unsupported" })),
             Some(Live::Unsupported)
         );
+    }
+
+    #[test]
+    fn parses_the_webs_logos_and_icons_without_failing_on_them() {
+        let logo = |path: &str, mono: bool| {
+            Some(Asset {
+                path: path.into(),
+                monochrome: mono,
+            })
+        };
+        let transcript: Transcript = parse(json!({
+            "chat": { "number": 42, "model": { "id": 12, "name": "Gemini", "logo": { "path": "/assets/providers/gemini-1.svg", "monochrome": false } } },
+            "entries": [
+                { "kind": "user", "id": 1, "content": "Hi", "attachments": [
+                    { "filename": "Q3.pdf", "byte_size": 4, "content_type": "application/pdf",
+                      "icon": { "path": "/assets/mimetypes/application-pdf-a.svg", "monochrome": false } }
+                ] },
+                { "kind": "activity", "id": 2, "title": "Searched Drive", "services": ["Drive", "Carmine's MacBook", "Odd"],
+                  "logos": [ { "path": "/assets/providers/google_drive-7.svg", "monochrome": false }, null, { "path": "https://evil.example/x.svg" } ],
+                  "steps": [ { "summary": "Searched", "logo": { "path": "/assets/providers/google_drive-7.svg", "monochrome": false } }, { "summary": "Read", "logo": null } ] },
+                { "kind": "assistant", "id": 3, "content": "It's €40k", "sources": [
+                    { "title": "Q3 plan.pdf", "url": "https://drive.google.com/x", "icon": { "path": "/assets/mimetypes/application-pdf-a.svg", "monochrome": false } },
+                    { "title": "Review", "url": "https://news.example/r", "icon": null },
+                    { "title": "Odd", "icon": "a string, not an image" }
+                ] }
+            ],
+            "approvals": [ { "id": 31, "service": "Slack", "logo": { "path": "/assets/providers/slack-0.svg", "monochrome": false }, "decidable": false, "waiting_for": "Ada" } ],
+            "questions": [ { "id": 32, "service": "Mine", "logo": null, "decidable": false, "waiting_for": "Ada" } ]
+        }))
+        .unwrap();
+        assert_eq!(
+            transcript.chat.model.unwrap().logo,
+            logo("/assets/providers/gemini-1.svg", false)
+        );
+        let Entry::User { attachments, .. } = &transcript.entries[0] else {
+            panic!("a question");
+        };
+        assert_eq!(
+            attachments[0].icon,
+            logo("/assets/mimetypes/application-pdf-a.svg", false)
+        );
+        let Entry::Activity { logos, steps, .. } = &transcript.entries[1] else {
+            panic!("an activity");
+        };
+        assert_eq!(
+            logos,
+            &[
+                logo("/assets/providers/google_drive-7.svg", false),
+                None,
+                None
+            ],
+            "one per service; off the server, none"
+        );
+        assert!(steps[0].logo.is_some() && steps[1].logo.is_none());
+        let Entry::Assistant { sources, .. } = &transcript.entries[2] else {
+            panic!("an answer");
+        };
+        assert!(sources[0].icon.is_some());
+        assert_eq!(
+            (sources[1].icon.clone(), sources[2].icon.clone()),
+            (None, None)
+        );
+        assert_eq!(
+            transcript.approvals[0].logo,
+            logo("/assets/providers/slack-0.svg", false)
+        );
+        assert_eq!(transcript.questions[0].logo, None);
+
+        let models: Models = parse(json!({ "models": [ { "id": 15, "name": "GPT", "logo": { "path": "/assets/providers/openai-9.svg", "monochrome": true } } ] })).unwrap();
+        assert_eq!(
+            models.models[0].logo,
+            logo("/assets/providers/openai-9.svg", true)
+        );
+        let uploaded: Uploaded = parse(json!({ "signed_id": "s", "filename": "a.txt", "byte_size": 1, "content_type": "text/plain",
+            "icon": { "path": "/assets/mimetypes/unknown.svg", "monochrome": false } })).unwrap();
+        assert_eq!(uploaded.icon, logo("/assets/mimetypes/unknown.svg", false));
     }
 
     #[test]
