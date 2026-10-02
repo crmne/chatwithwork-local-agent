@@ -1,7 +1,6 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                    ○ NOT PAIRED
-                               │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Pair this computer to chat    │  ╭──────────────────────────────────────────────────────────────╮
+ ◆ Chat with Work              │                                                      ○ not paired
+                               │
+  Pair this computer to chat   │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● Approve "carmine-mbp" on Chat with Work                    │
                                │  │ The page is open in your browser. If it isn't, open:         │
                                │  │   https://chatwithwork.com/device?user_code=WDJB-MJHT        │
@@ -20,11 +19,12 @@
                                │
                                │
                                │
- ━━ ROOTS                      │
- Nothing shared yet            │
- a shares a folder             │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ○ not paired      since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   $ cww login                 │ │ ❯ Pair this computer to chat here: press c                     │
-   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- esc cancel pairing   a add folder   l audit log   p pause   ? help   q quit
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ Pair this computer to chat here: press c                     │
+  Settings                     │ ╰────────────────────────────────────────────────────────────────╯

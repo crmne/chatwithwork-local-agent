@@ -1,7 +1,6 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                ○ DAEMON STOPPED
-                               │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Start the daemon to chat      │  ╭──────────────────────────────────────────────────────────────╮
+ ◆ Chat with Work              │                                                  ○ daemon stopped
+                               │
+  Start the daemon to chat     │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● The daemon isn't running                                   │
                                │  │ Chat with Work can't search your folders until it runs.      │
                                │  │ Start it in the background with:                             │
@@ -20,11 +19,12 @@
                                │
                                │
                                │
- ━━ ROOTS                    1 │
- ▌○ Work docs                  │
-    work-docs · not running    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  ● connected · https://chatwithwork.com · 5m ago
- ○ not running                 │ ╭────────────────────────────────────────────────────────────────╮
-   $ cww daemon install        │ │ ❯ Start the daemon to chat here: press s                       │
-   not paired                  │ ╰────────────────────────────────────────────────────────────────╯
- c pair   s start daemon   ↑↓ select   a add folder   d remove   l audit log   p pause   r retry
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ Start the daemon to chat here: press s                       │
+  Settings                     │ ╰────────────────────────────────────────────────────────────────╯

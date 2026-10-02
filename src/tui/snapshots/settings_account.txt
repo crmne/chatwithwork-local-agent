@@ -1,14 +1,14 @@
- ◆ Chat with Work              │  Shared folders
+ ◆ Chat with Work              │  Account
                                │
-  ← Chats                  esc │  Chat with Work can search and read the files in these folders,
-                               │  and nothing else on this computer.
-  SETTINGS                     │
- ▌ Shared folders              │  ▌● Work docs                               Indexed · 1,532 files
-   Activity                    │     /home/carmine/Work docs · work-docs:
-   Account                     │   ⠋ Projects                                       Indexing · 214
-   General                     │     /home/carmine/Projects · projects:
+  ← Chats                  esc │  This computer's pairing with your Chat with Work account.
                                │
-                               │  ↑↓ select   a share a folder   r rename   d stop sharing
+  SETTINGS                     │  Chat with Work  chatwithwork.com
+   Shared folders              │  Connection      ● Online since 08:14
+   Activity                    │  Device ID       42
+ ▌ Account                     │  Chats here      Allowed
+   General                     │
+                               │  d disconnect this computer
+                               │
                                │
                                │
                                │

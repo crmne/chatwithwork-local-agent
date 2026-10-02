@@ -1,10 +1,12 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
-                               │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Loading…                      │  TIME      RESULT   TOOL        DETAIL                  8 entries
-                               │  08:14:00  ·        started
-                               │  08:14:03  ·        connected   https://chatwithwork.com
-                               │  08:16:10  allowed  read        work-docs:plans/q3.md → 5.1 KB ·
+ ◆ Chat with Work              │  Activity
+                               │
+  ← Chats                  esc │  Every request from Chat with Work, as logged on this computer.
+                               │  The log never leaves it.
+  SETTINGS                     │
+   Shared folders              │  TIME      RESULT   TOOL        DETAIL                  8 entries
+ ▌ Activity                    │  08:14:00  ·        started
+   Account                     │  08:14:03  ·        connected   https://chatwithwork.com
+   General                     │  08:16:10  allowed  read        work-docs:plans/q3.md → 5.1 KB ·
                                │  08:17:30  denied   read        work-docs:.env · chat 1234
                                │                                 this path is on the deny list
                                │                                 (.env*)
@@ -20,11 +22,9 @@
                                │
                                │
                                │
- ━━ ROOTS                    1 │
- ▌● Work docs                  │
-    work-docs · 1,532 files    │
- DAEMON                        │
- ● connected       since 08:14 │
-   chatwithwork.com · #42      │
-   answering · cww 0.1.0       │
- ↑↓ scroll   l chat   p pause   ? help   q quit
+                               │
+                               │
+                               │
+                               │
+                               │
+  Settings                     │

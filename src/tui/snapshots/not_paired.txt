@@ -1,7 +1,6 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                    ○ NOT PAIRED
-                               │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Pair this computer to chat    │  ╭──────────────────────────────────────────────────────────────╮
+ ◆ Chat with Work              │                                                      ○ not paired
+                               │
+  Pair this computer to chat   │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● This computer isn't paired                                 │
                                │  │ Chat with Work can't search your folders until you pair it.  │
                                │  │ Press c to pair it here, or run cww login in a terminal.     │
@@ -20,11 +19,12 @@
                                │
                                │
                                │
- ━━ ROOTS                    1 │
- ▌● Work docs                  │
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ○ not paired      since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   $ cww login                 │ │ ❯ Pair this computer to chat here: press c                     │
-   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- c pair   ↑↓ select   a add folder   d remove   l audit log   p pause   ? help   q quit
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ Pair this computer to chat here: press c                     │
+  Settings                     │ ╰────────────────────────────────────────────────────────────────╯

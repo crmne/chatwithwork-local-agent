@@ -1,17 +1,18 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
-                               │────────────────────────────────────────────────────────────────────
- CHATS                       5 │
-  + New chat                   │  Q3 budget                                                    #42
-  TODAY                        │
+ ◆ Chat with Work              │  Q3 budget
+                               │
+  + New chat                   │                    What did we budget for Q3, and who signed it
+  / Search chats               │                    off?
+                               │
+  TODAY                        │  ▸ Searched Drive and Carmine's MacBook · 2 searches, read 1 file
    Q3 budget                   │
    Launch plan for Falcon      │  The Q3 budget is €40k, signed off by Ada on 12 September.
-  YESTERDAY                    │
-   Onboarding checklist        │  • Marketing: €18k
-  EARLIER                      │  • Engineering: €22k
-   Vendor contracts            │
-   Hiring plan                 │  Details are in the plan[1].
                                │
-                               │  SOURCES
+  YESTERDAY                    │  • Marketing: €18k
+   Onboarding checklist        │  • Engineering: €22k
+                               │
+  EARLIER                      │  Details are in the plan[1].
+   Vendor contracts            │
+   Hiring plan                 │  SOURCES
                                │  [1] Q3 plan.pdf  https://drive.google.com/file/d/q3
                                │
                                │  ● Waiting for your approval · Slack
@@ -20,11 +21,10 @@
                                │    Message  We shipped!
                                │  ❯ 1. Approve
                                │    2. Approve for the rest of this chat
- ROOTS                       1 │    3. Deny
-  ● Work docs                  │    4. Deny, and say what to do instead
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Approve or deny above: ↑ ↓ and enter, or y and n             │
-   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- ↑↓ choose   enter confirm   y approve   a always in this chat   n deny   esc back
+                               │    3. Deny
+                               │    4. Deny, and say what to do instead
+                               │
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ Approve or deny above: ↑ ↓ and enter, or y and n             │
+  C  Carmine                   │ ╰────────────────────────────────────────────────────────────────╯

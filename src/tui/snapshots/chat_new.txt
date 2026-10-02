@@ -1,12 +1,15 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
-                               │────────────────────────────────────────────────────────────────────
- CHATS                       5 │
-  + New chat                   │  New chat
+ ◆ Chat with Work              │  New chat
+                               │
+  + New chat                   │  Ask anything.
+  / Search chats               │  Chat with Work searches your shared folders and the services you
+                               │  connected, and the chat stays in Chat with Work on the web too.
   TODAY                        │
-   Q3 budget                   │  Ask anything.
-   Launch plan for Falcon      │  Chat with Work searches your shared folders and the services you
-  YESTERDAY                    │  connected, and the chat stays in Chat with Work on the web too.
+   Q3 budget                   │
+   Launch plan for Falcon      │
+                               │
+  YESTERDAY                    │
    Onboarding checklist        │
+                               │
   EARLIER                      │
    Vendor contracts            │
    Hiring plan                 │
@@ -20,11 +23,8 @@
                                │
                                │
                                │
- ROOTS                       1 │
-  ● Work docs                  │
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ What changed in Falcon this week?                            │
-   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- enter send   / commands   shift-enter new line   ↑ history   esc back   tab focus   ctrl-c clear
+                               │
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ What changed in Falcon this week?                            │
+  C  Carmine                   │ ╰────────────────────────────────────────────────────────────────╯

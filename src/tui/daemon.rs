@@ -214,6 +214,8 @@ fn offline(paths: &Paths, error: Option<String>) -> DaemonMsg {
             paused: config.paused,
             roots,
             error: error.or(config_error),
+            config_file: Some(paths.config_file().display().to_string()),
+            audit_file: Some(paths.audit_file().display().to_string()),
         }),
         audit: audit::tail(&paths.audit_file(), HISTORY).unwrap_or_default(),
         suggestion,
@@ -343,6 +345,20 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
             config.save(paths)?;
             Ok((format!("Stopped sharing {}.", root.path.display()), true))
         }
+        DaemonCommand::LabelRoot { id, label } => {
+            let request = ControlRequest::RootsLabel {
+                root: id.clone(),
+                label: label.clone(),
+            };
+            let renamed = format!("Chat with Work sees {id} as {} now.", label.trim());
+            if control::request(&socket, request)?.is_some() {
+                return Ok((renamed, false));
+            }
+            let mut config = Config::load(paths)?;
+            label_root(&mut config, id, label)?;
+            config.save(paths)?;
+            Ok((format!("{renamed} Saved for when the daemon starts."), true))
+        }
         DaemonCommand::InstallService => {
             let exe = std::env::current_exe().context("finding the cww binary")?;
             let output = std::process::Command::new(exe)
@@ -379,6 +395,24 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
             Ok((String::new(), false))
         }
     }
+}
+
+/// Give a shared folder a new label in `config`, as the daemon would.
+fn label_root(config: &mut Config, id: &str, label: &str) -> Result<()> {
+    let label = label.trim();
+    if label.is_empty() {
+        anyhow::bail!("the label can't be empty");
+    }
+    if label.chars().count() > 80 {
+        anyhow::bail!("the label is longer than 80 characters");
+    }
+    let root = config
+        .roots
+        .iter_mut()
+        .find(|r| r.id == id)
+        .with_context(|| format!("no shared folder has the ID {id:?}"))?;
+    root.label = label.to_string();
+    Ok(())
 }
 
 /// Pair this computer: get a code, open the approval page, wait.
@@ -464,6 +498,32 @@ mod tests {
         assert!(offline.roots[0].available);
 
         let id = offline.roots[0].id.clone();
+        run(
+            &paths,
+            &DaemonCommand::LabelRoot {
+                id: id.clone(),
+                label: " Team docs ".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(Config::load(&paths).unwrap().roots[0].label, "Team docs");
+        assert!(
+            run(
+                &paths,
+                &DaemonCommand::LabelRoot {
+                    id: id.clone(),
+                    label: "  ".into(),
+                },
+            )
+            .is_err()
+        );
+        let DaemonMsg::NotRunning {
+            offline: renamed, ..
+        } = super::offline(&paths, None)
+        else {
+            panic!("expected the offline view");
+        };
+        assert!(renamed.config_file.unwrap().ends_with("config.toml"));
         run(&paths, &DaemonCommand::RemoveRoot { id }).unwrap();
         assert!(Config::load(&paths).unwrap().roots.is_empty());
     }

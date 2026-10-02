@@ -1,12 +1,6 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                        ‖ PAUSED
-                               │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Loading…                      │  ╭──────────────────────────────────────────────────────────────╮
-                               │  │ ● Paused                                                     │
-                               │  │ Chat with Work's requests for your files are refused until   │
-                               │  │ you resume.                                                  │
-                               │  │ p resume                                                     │
-                               │  ╰──────────────────────────────────────────────────────────────╯
+ ◆ Chat with Work              │                                                          ‖ paused
+                               │
+  Loading…                     │
                                │
                                │
                                │
@@ -20,11 +14,17 @@
                                │
                                │
                                │
- ━━ ROOTS                    1 │
- ▌● Work docs                  │
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  ● paused · 10m ago
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Loading your chats…                                          │
-   paused · cww 0.1.0          │ ╰────────────────────────────────────────────────────────────────╯
- ↑↓ select   a add folder   d remove   l audit log   p resume   ? help   q quit
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ Loading your chats…                                          │
+  Settings                     │ ╰────────────────────────────────────────────────────────────────╯

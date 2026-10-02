@@ -48,6 +48,9 @@ pub struct DaemonStatus {
     pub paused: bool,
     pub connection: Link,
     pub roots: Vec<RootState>,
+    /// Where its settings and its activity log are.
+    pub config_file: Option<String>,
+    pub audit_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -106,6 +109,8 @@ pub struct Offline {
     /// Why the control channel or the config couldn't be read, if it's more
     /// than "nothing is listening".
     pub error: Option<String>,
+    pub config_file: Option<String>,
+    pub audit_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -157,18 +162,76 @@ impl Daemon {
             _ => None,
         }
     }
+
+    /// Where the settings file and the activity log are.
+    pub fn files(&self) -> (Option<&str>, Option<&str>) {
+        match self {
+            Self::Unknown => (None, None),
+            Self::Running(s) => (s.config_file.as_deref(), s.audit_file.as_deref()),
+            Self::NotRunning(o) => (o.config_file.as_deref(), o.audit_file.as_deref()),
+        }
+    }
 }
 
+/// The chats, or the settings on one of their pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Chat,
-    Log,
+    Settings(Page),
+}
+
+/// A page of the settings, as the desktop app has them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Folders,
+    Activity,
+    Account,
+    General,
+}
+
+impl Page {
+    /// In the order the settings list them.
+    pub const ALL: [Page; 4] = [Page::Folders, Page::Activity, Page::Account, Page::General];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Page::Folders => "Shared folders",
+            Page::Activity => "Activity",
+            Page::Account => "Account",
+            Page::General => "General",
+        }
+    }
+
+    pub fn about(self) -> &'static str {
+        match self {
+            Page::Folders => {
+                "Chat with Work can search and read the files in these folders, and nothing \
+                 else on this computer."
+            }
+            Page::Activity => {
+                "Every request from Chat with Work, as logged on this computer. The log never \
+                 leaves it."
+            }
+            Page::Account => "This computer's pairing with your Chat with Work account.",
+            Page::General => "The Local Agent that answers Chat with Work in the background.",
+        }
+    }
+
+    /// The page after this one, or before it, going round.
+    fn step(self, forward: bool) -> Page {
+        let at = Page::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        let len = Page::ALL.len();
+        Page::ALL[if forward {
+            (at + 1) % len
+        } else {
+            (at + len - 1) % len
+        }]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Chats,
-    Roots,
     Composer,
 }
 
@@ -181,6 +244,11 @@ pub enum Modal {
         id: String,
         label: String,
         path: String,
+    },
+    /// A new label for a shared folder.
+    RenameRoot {
+        id: String,
+        input: String,
     },
     /// The daemon refused a folder as too broad; ask before `i_know`.
     ConfirmBroad {
@@ -217,6 +285,11 @@ pub enum DaemonCommand {
     },
     RemoveRoot {
         id: String,
+    },
+    /// Show a shared folder to Chat with Work under another label.
+    LabelRoot {
+        id: String,
+        label: String,
     },
     /// Look for the daemon again now.
     Retry,
@@ -687,7 +760,14 @@ pub fn field_options(field: &super::chat::Field) -> Vec<String> {
 /// What the mouse can click or scroll, where the last frame drew it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Hit {
-    Tab(View),
+    /// A settings page in the list.
+    Page(Page),
+    /// Back to the chats, from the settings.
+    Back,
+    /// Your name, or the status indicator: the settings.
+    Settings,
+    /// The search row.
+    Search,
     NewChat,
     Chat(u64),
     /// The chat list, for the wheel.
@@ -964,7 +1044,7 @@ impl App {
             audit: Vec::new(),
             suggestions: Vec::new(),
             view: View::Chat,
-            focus: Focus::Roots,
+            focus: Focus::Chats,
             selected_root: 0,
             log_scroll: 0,
             modal: None,
@@ -1008,7 +1088,6 @@ impl App {
     /// shared, the folder exists, and the person hasn't answered yet.
     pub fn offer(&self) -> Option<&Suggestion> {
         if self.offer_dismissed
-            || self.view != View::Chat
             || matches!(self.daemon, Daemon::Unknown)
             || !self.daemon.roots().is_empty()
         {
@@ -1029,15 +1108,18 @@ impl App {
     /// Focus targets, in Tab order.
     pub fn focus_order(&self) -> Vec<Focus> {
         if self.chat.ready() {
-            vec![Focus::Chats, Focus::Composer, Focus::Roots]
+            vec![Focus::Chats, Focus::Composer]
         } else {
-            vec![Focus::Roots]
+            vec![Focus::Chats]
         }
     }
 
-    /// Whether something on screen moves, so the loop needs frames.
+    /// Whether something on screen moves, so the loop needs frames: a
+    /// folder being indexed while its page shows, the connection coming
+    /// up, an answer being written.
     pub fn animating(&self) -> bool {
-        let indexing = matches!(self.daemon, Daemon::Running(_))
+        let indexing = self.view == View::Settings(Page::Folders)
+            && matches!(self.daemon, Daemon::Running(_))
             && self
                 .daemon
                 .roots()
@@ -1049,23 +1131,32 @@ impl App {
     }
 
     /// How long the loop may sleep before the screen goes stale: a frame
-    /// while animating, otherwise until a relative time like "2s ago"
-    /// changes, and forever when nothing on screen depends on the clock.
-    pub fn next_wakeup(&self, now: OffsetDateTime) -> Option<Duration> {
-        if self.animating() {
-            return Some(FRAME);
+    /// while something moves, otherwise forever. Nothing on screen counts
+    /// time by itself.
+    pub fn next_wakeup(&self, _now: OffsetDateTime) -> Option<Duration> {
+        self.animating().then_some(FRAME)
+    }
+
+    /// The settings page that helps most right now: pairing when this
+    /// computer isn't paired, the daemon when it isn't running, else the
+    /// shared folders.
+    pub fn attention_page(&self) -> Page {
+        match &self.daemon {
+            Daemon::NotRunning(_) => Page::General,
+            _ if self.can_pair() || self.pairing.is_some() => Page::Account,
+            Daemon::Running(s) if s.paused => Page::General,
+            Daemon::Running(s) if s.connection.connection == "offline" => Page::Account,
+            _ => Page::Folders,
         }
-        if self.view != View::Chat {
-            return None;
+    }
+
+    /// Open the settings on `page`.
+    fn settings(&mut self, page: Page) {
+        if !matches!(self.view, View::Settings(_)) {
+            self.log_scroll = 0;
         }
-        let ts = parse_ts(&self.audit.last()?.ts)?;
-        let age = (now - ts).whole_milliseconds().max(0) as u64;
-        let unit = match age {
-            0..60_000 => 1_000,
-            60_000..3_600_000 => 60_000,
-            _ => return None,
-        };
-        Some(Duration::from_millis(unit - age % unit))
+        self.view = View::Settings(page);
+        self.chat.search = None;
     }
 
     fn key(&mut self, key: KeyEvent) -> Vec<Effect> {
@@ -1084,11 +1175,17 @@ impl App {
         if let Some(modal) = self.modal.take() {
             return self.modal_key(modal, key);
         }
-        if self.focus == Focus::Composer {
+        let in_chat = self.view == View::Chat;
+        if in_chat && self.focus == Focus::Composer {
             return self.composer_key(key);
         }
-        if self.focus == Focus::Chats && self.chat.search.is_some() {
+        if in_chat && self.chat.search.is_some() {
             return self.search_key(key);
+        }
+        if let View::Settings(page) = self.view
+            && let Some(effects) = self.page_key(page, key)
+        {
+            return effects;
         }
         let offer = self.offer().map(|s| (s.path.clone(), s.label.clone()));
         match key.code {
@@ -1096,20 +1193,22 @@ impl App {
                 self.quit = true;
                 return vec![Effect::Quit];
             }
-            KeyCode::Tab => self.cycle_focus(true),
-            KeyCode::BackTab => self.cycle_focus(false),
+            KeyCode::Tab if in_chat => self.cycle_focus(true),
+            KeyCode::BackTab if in_chat => self.cycle_focus(false),
+            KeyCode::Char(',') if in_chat => self.settings(self.attention_page()),
+            KeyCode::Char(',') => self.view = View::Chat,
+            KeyCode::Char('l') if self.view == View::Settings(Page::Activity) => {
+                self.view = View::Chat;
+            }
             KeyCode::Char('l') => {
-                self.view = match self.view {
-                    View::Chat => View::Log,
-                    View::Log => View::Chat,
-                };
+                self.settings(Page::Activity);
                 self.log_scroll = 0;
             }
             KeyCode::Esc if self.pairing.is_some() => {
                 self.pairing = None;
                 return vec![Effect::Daemon(DaemonCommand::CancelPairing)];
             }
-            KeyCode::Esc if self.view == View::Log => self.view = View::Chat,
+            KeyCode::Esc if !in_chat => self.view = View::Chat,
             KeyCode::Char('c') if self.can_pair() && self.pairing.is_none() => {
                 self.pairing = Some(Pairing::Starting);
                 return vec![Effect::Daemon(DaemonCommand::Pair)];
@@ -1124,7 +1223,6 @@ impl App {
                     input: self.default_folder(),
                 });
             }
-            KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete => self.confirm_remove(),
             KeyCode::Char('y') => {
                 if let Some((path, label)) = offer {
                     self.offer_dismissed = true;
@@ -1132,7 +1230,7 @@ impl App {
                 }
             }
             KeyCode::Char('n') if offer.is_some() => self.offer_dismissed = true,
-            KeyCode::Char('n') if self.chat.ready() => return self.new_chat(),
+            KeyCode::Char('n') if in_chat && self.chat.ready() => return self.new_chat(),
             KeyCode::Char('r') => {
                 if matches!(self.daemon, Daemon::NotRunning(_)) {
                     self.notice(super::theme::Signal::Idle, LOOKING);
@@ -1157,30 +1255,73 @@ impl App {
                 return effects;
             }
             KeyCode::Char('?') => self.modal = Some(Modal::Help { scroll: 0 }),
-            KeyCode::Char('/') if self.focus == Focus::Chats && self.chat.ready() => {
+            KeyCode::Char('/') if in_chat && self.chat.ready() => {
                 self.chat.search = Some(String::new());
+                self.focus = Focus::Chats;
                 self.chat.selected = usize::from(!self.chat.list.chats.is_empty());
             }
             KeyCode::Char('o') => return self.open_in_browser(),
-            KeyCode::Char('e') if self.view == View::Chat => {
-                self.chat.show_steps = !self.chat.show_steps;
-            }
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::PageUp if self.view == View::Chat => self.scroll_transcript(10),
-            KeyCode::PageDown if self.view == View::Chat => self.scroll_transcript(-10),
-            KeyCode::PageUp => self.scroll_log(10),
-            KeyCode::PageDown => self.scroll_log(-10),
-            KeyCode::Home if self.view == View::Log => self.log_scroll = self.audit.len(),
-            KeyCode::End | KeyCode::Char('G') if self.view == View::Log => self.log_scroll = 0,
-            KeyCode::End if self.view == View::Chat => self.chat.scroll = 0,
-            KeyCode::Enter if self.focus == Focus::Chats && self.chat.ready() => {
-                return self.open_selected();
-            }
-            KeyCode::Char('i') if self.chat.ready() => self.focus = Focus::Composer,
+            KeyCode::Char('e') if in_chat => self.chat.show_steps = !self.chat.show_steps,
+            KeyCode::Up | KeyCode::Char('k') if in_chat => self.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') if in_chat => self.move_selection(1),
+            KeyCode::PageUp if in_chat => self.scroll_transcript(10),
+            KeyCode::PageDown if in_chat => self.scroll_transcript(-10),
+            KeyCode::End if in_chat => self.chat.scroll = 0,
+            KeyCode::Enter if in_chat && self.chat.ready() => return self.open_selected(),
+            KeyCode::Char('i') if in_chat && self.chat.ready() => self.focus = Focus::Composer,
             _ => {}
         }
         Vec::new()
+    }
+
+    /// Keys a settings page has of its own, or `None` for the ones every
+    /// screen has.
+    fn page_key(&mut self, page: Page, key: KeyEvent) -> Option<Vec<Effect>> {
+        match (page, key.code) {
+            (_, KeyCode::Tab | KeyCode::Right) => self.settings(page.step(true)),
+            (_, KeyCode::BackTab | KeyCode::Left) => self.settings(page.step(false)),
+            (_, KeyCode::Char(c @ '1'..='9')) => {
+                let at = c as usize - '1' as usize;
+                self.settings(*Page::ALL.get(at)?);
+            }
+            (Page::Folders, KeyCode::Up | KeyCode::Char('k')) => self.move_root(-1),
+            (Page::Folders, KeyCode::Down | KeyCode::Char('j')) => self.move_root(1),
+            (Page::Folders, KeyCode::Char('r')) => self.rename_root(),
+            (Page::Folders, KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete) => {
+                self.confirm_remove()
+            }
+            (Page::Activity, KeyCode::Up | KeyCode::Char('k')) => self.scroll_log(3),
+            (Page::Activity, KeyCode::Down | KeyCode::Char('j')) => self.scroll_log(-3),
+            (Page::Activity, KeyCode::PageUp) => self.scroll_log(10),
+            (Page::Activity, KeyCode::PageDown) => self.scroll_log(-10),
+            (Page::Activity, KeyCode::Home) => self.log_scroll = self.audit.len(),
+            (Page::Activity, KeyCode::End | KeyCode::Char('G')) => self.log_scroll = 0,
+            (Page::Account, KeyCode::Char('d')) if self.daemon.server().is_some() => {
+                self.modal = Some(Modal::ConfirmLogout);
+            }
+            _ => return None,
+        }
+        Some(Vec::new())
+    }
+
+    fn move_root(&mut self, delta: isize) {
+        let len = self.daemon.roots().len();
+        if len > 0 {
+            self.selected_root = self.selected_root.saturating_add_signed(delta).min(len - 1);
+        }
+    }
+
+    /// `r` on a shared folder: type its new label.
+    fn rename_root(&mut self) {
+        match self.daemon.roots().get(self.selected_root) {
+            Some(root) => {
+                self.modal = Some(Modal::RenameRoot {
+                    id: root.id.clone(),
+                    input: root.label.clone(),
+                });
+            }
+            None => self.notice(super::theme::Signal::Idle, "Nothing is shared."),
+        }
     }
 
     /// Typing after `/`: the list narrows as you type.
@@ -1247,6 +1388,32 @@ impl App {
                     _ => {}
                 }
                 self.modal = Some(Modal::AddRoot { input });
+            }
+            Modal::RenameRoot { id, mut input } => {
+                match key.code {
+                    KeyCode::Esc => return Vec::new(),
+                    KeyCode::Enter => {
+                        let label = input.trim().to_string();
+                        let same = self
+                            .daemon
+                            .roots()
+                            .iter()
+                            .any(|r| r.id == id && r.label == label);
+                        if label.is_empty() || same {
+                            return Vec::new();
+                        }
+                        self.notice(super::theme::Signal::Idle, "Renaming…");
+                        return vec![Effect::Daemon(DaemonCommand::LabelRoot { id, label })];
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::Char('u') if ctrl => input.clear(),
+                    KeyCode::Char('w') if ctrl => delete_word(&mut input),
+                    KeyCode::Char(c) if !ctrl => input.push(c),
+                    _ => {}
+                }
+                self.modal = Some(Modal::RenameRoot { id, input });
             }
             Modal::ConfirmRemove { id, label, path } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -1372,13 +1539,7 @@ impl App {
                     return vec![Effect::Chat(ChatCommand::Cancel(chat))];
                 }
             }
-            KeyCode::Esc => {
-                self.focus = if self.chat.ready() {
-                    Focus::Chats
-                } else {
-                    Focus::Roots
-                };
-            }
+            KeyCode::Esc => self.focus = Focus::Chats,
             KeyCode::Tab => self.cycle_focus(true),
             KeyCode::BackTab => self.cycle_focus(false),
             // A new line: Shift-Enter where the terminal tells it apart,
@@ -1630,10 +1791,8 @@ impl App {
                 return self.chat_action(cmd, args);
             }
             Cmd::Steps => self.chat.show_steps = !self.chat.show_steps,
-            Cmd::Folders => {
-                self.view = View::Chat;
-                self.focus = Focus::Roots;
-            }
+            Cmd::Folders => self.settings(Page::Folders),
+            Cmd::Settings => self.settings(self.attention_page()),
             Cmd::Share if args.is_empty() => {
                 self.modal = Some(Modal::AddRoot {
                     input: self.default_folder(),
@@ -1652,7 +1811,7 @@ impl App {
             }
             Cmd::Pause | Cmd::ResumeSharing => return self.toggle_pause(),
             Cmd::Log => {
-                self.view = View::Log;
+                self.settings(Page::Activity);
                 self.log_scroll = 0;
             }
             Cmd::Status => {
@@ -2304,11 +2463,11 @@ impl App {
 
     fn paste(&mut self, text: &str) {
         match &mut self.modal {
-            Some(Modal::AddRoot { input }) => {
+            Some(Modal::AddRoot { input } | Modal::RenameRoot { input, .. }) => {
                 input.push_str(text.replace(['\r', '\n'], " ").trim())
             }
             Some(_) => {}
-            None if self.focus == Focus::Composer => {
+            None if self.view == View::Chat && self.focus == Focus::Composer => {
                 if let Some(picker) = self.chat.picker.as_mut() {
                     picker
                         .query
@@ -2322,7 +2481,7 @@ impl App {
                     self.typed();
                 }
             }
-            None if self.focus == Focus::Chats && self.chat.search.is_some() => {
+            None if self.view == View::Chat && self.chat.search.is_some() => {
                 self.chat
                     .search
                     .get_or_insert_default()
@@ -2361,13 +2520,7 @@ impl App {
                 let len = self.chat.visible().len() + 1;
                 self.chat.selected = self.chat.selected.saturating_add_signed(delta).min(len - 1);
             }
-            Some(Hit::Root(_)) => {
-                let len = self.daemon.roots().len();
-                if len > 0 {
-                    self.selected_root =
-                        self.selected_root.saturating_add_signed(delta).min(len - 1);
-                }
-            }
+            Some(Hit::Root(_)) => self.move_root(delta),
             Some(Hit::Menu(_)) => {
                 let len = self.menu().len();
                 if len > 0 {
@@ -2397,9 +2550,14 @@ impl App {
         };
         self.notice = None;
         match hit {
-            Hit::Tab(view) => {
-                self.view = view;
-                self.log_scroll = 0;
+            Hit::Page(page) => self.settings(page),
+            Hit::Back => self.view = View::Chat,
+            Hit::Settings => self.settings(self.attention_page()),
+            Hit::Search if self.chat.ready() => {
+                self.focus = Focus::Chats;
+                if self.chat.search.is_none() {
+                    self.chat.search = Some(String::new());
+                }
             }
             Hit::NewChat if self.chat.ready() => {
                 self.chat.search = None;
@@ -2410,10 +2568,7 @@ impl App {
                 self.select_chat(number);
                 return self.open_chat(number);
             }
-            Hit::Root(i) => {
-                self.focus = Focus::Roots;
-                self.selected_root = i;
-            }
+            Hit::Root(i) => self.selected_root = i,
             Hit::Composer if self.chat.ready() => self.focus = Focus::Composer,
             Hit::Menu(i) => {
                 if let Some(command) = self.menu().get(i).copied() {
@@ -2467,18 +2622,9 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.view == View::Log {
-            return self.scroll_log(-delta * 3);
-        }
         // "New chat" comes first.
-        let chats = self.chat.visible().len() + 1;
-        let (selected, len) = match self.focus {
-            Focus::Chats => (&mut self.chat.selected, chats),
-            _ => (&mut self.selected_root, self.daemon.roots().len()),
-        };
-        if len > 0 {
-            *selected = selected.saturating_add_signed(delta).min(len - 1);
-        }
+        let len = self.chat.visible().len() + 1;
+        self.chat.selected = self.chat.selected.saturating_add_signed(delta).min(len - 1);
     }
 
     fn scroll_transcript(&mut self, delta: isize) {
@@ -2614,7 +2760,7 @@ impl App {
     }
 
     fn scroll_log(&mut self, delta: isize) {
-        if self.view == View::Log {
+        if self.view == View::Settings(Page::Activity) {
             self.log_scroll = self
                 .log_scroll
                 .saturating_add_signed(delta)
@@ -2856,9 +3002,6 @@ impl App {
         match msg {
             ChatMsg::Listed(Ok(list)) => {
                 let was_ready = self.chat.ready();
-                if !was_ready && self.focus == Focus::Roots && self.modal.is_none() {
-                    self.focus = Focus::Chats;
-                }
                 self.chat.access = Access::Ready;
                 self.chat.list = list;
                 let len = self.chat.visible().len();
@@ -3253,9 +3396,7 @@ impl App {
             _ => Access::Unavailable(failure),
         };
         self.chat.search = None;
-        if self.focus != Focus::Roots {
-            self.focus = Focus::Roots;
-        }
+        self.focus = Focus::Chats;
     }
 }
 

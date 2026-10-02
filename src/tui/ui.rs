@@ -1,5 +1,12 @@
 //! Drawing the app. [`render`] is a pure function of the state, the theme
 //! and the time it is given, so snapshot tests can pin every screen.
+//!
+//! The layout follows the desktop app's chat page: on the left the name,
+//! New chat, the search and your chats by day, with your name at the foot,
+//! which opens the settings; on the right the open chat and the composer.
+//! The settings (shared folders, activity, pairing, the daemon) are pages of
+//! their own, drawn by [`super::pages`]. One status word shows at the top
+//! right only while something needs attention.
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -9,23 +16,26 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use time::OffsetDateTime;
 
 use super::app::{
-    Access, App, ChatPane, Choice, Daemon, DaemonStatus, Focus, Following, FormRow, Hit, Hits,
-    Modal, ModelList, Offline, Pairing, PickItem, PickerKind, RootState, View, field_has_choices,
-    parse_ts,
+    Access, App, ChatPane, Choice, Daemon, Focus, Following, FormRow, Hit, Hits, Modal, ModelList,
+    Pairing, PickItem, PickerKind, View, field_has_choices, parse_ts,
 };
 use super::chat::{Attachment, ChatSummary, Entry, Question};
 use super::commands::COMMANDS;
 use super::markdown::{self, Footnotes};
+use super::pages;
 use super::theme::{Signal, Theme};
 use crate::audit::{AuditEntry, Decision};
 
-const DOT: &str = "●";
-const RING: &str = "○";
+pub(super) const DOT: &str = "●";
+pub(super) const RING: &str = "○";
 const PROMPT: &str = "❯";
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// How long an audit entry counts as happening right now.
-const LIVE_SECS: i64 = 5;
+/// The brand mark beside the name, in the rainbow as the GUI's mark is.
+const MARK: &str = "◆";
+
+/// The widest a column of text gets, as the web's reading column.
+pub(super) const COLUMN: u16 = 76;
 
 pub fn render(frame: &mut Frame, app: &App, theme: &Theme, now: OffsetDateTime) {
     render_hits(frame, app, theme, now);
@@ -36,19 +46,23 @@ pub fn render_hits(frame: &mut Frame, app: &App, theme: &Theme, now: OffsetDateT
     let mut hits = Hits::default();
     let area = frame.area();
     frame.render_widget(Block::new().style(theme.base()), area);
-    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    let side_width = match body.width {
+    let side_width = match area.width {
         90.. => 32,
         64.. => 26,
         _ => 0,
     };
     let [side, main] =
-        Layout::horizontal([Constraint::Length(side_width), Constraint::Min(0)]).areas(body);
+        Layout::horizontal([Constraint::Length(side_width), Constraint::Min(0)]).areas(area);
     if side.width > 0 {
         sidebar(frame, side, app, theme, now, &mut hits);
     }
-    main_pane(frame, main, app, theme, now, &mut hits);
-    footer_line(frame, footer, app, theme);
+    match app.view {
+        View::Chat => main_pane(frame, main, app, theme, now, &mut hits),
+        View::Settings(page) => {
+            let bare = side.width == 0;
+            pages::render(frame, main, app, page, bare, theme, now, &mut hits);
+        }
+    }
     if let Some(modal) = &app.modal {
         modal_box(frame, area, modal, app, theme);
     }
@@ -71,39 +85,56 @@ fn sidebar(
         .style(theme.sunken());
     let inner = pad(block.inner(area), 1, 0);
     frame.render_widget(block, area);
-
-    let daemon = daemon_section(app, theme, inner.width);
-    let roots = app.daemon.roots().len() as u16;
-    // A blank line, the label, then two lines per folder, at most three.
-    let roots_height = if roots == 0 { 4 } else { 2 + 2 * roots.min(3) };
-    let [brand, chats_area, roots_area, daemon_area] = Layout::vertical([
+    let [brand, body, foot] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(0),
-        Constraint::Length(roots_height),
-        Constraint::Length(daemon.len() as u16),
+        Constraint::Length(2),
     ])
     .areas(inner);
-
     let name = Line::from(vec![
+        Span::styled(MARK, theme.rainbow(0.48)),
+        Span::raw(" "),
         Span::styled("Chat with Work", theme.strong()),
-        Span::styled("  LOCAL AGENT", theme.micro()),
     ]);
     frame.render_widget(Paragraph::new(name), brand);
-    chats_section(frame, chats_area, app, theme, now, hits);
-    roots_section(frame, below(roots_area, 1), app, theme, now, hits);
-    frame.render_widget(Paragraph::new(daemon), daemon_area);
+    match app.view {
+        View::Chat => chats_section(frame, body, app, theme, now, hits),
+        View::Settings(page) => pages::nav(frame, body, page, theme, hits),
+    }
+    account_line(frame, row(foot, 1), app, theme, hits);
 }
 
-/// A section's micro-label. The focused one gets the rainbow dash.
-fn label(text: &str, focused: bool, theme: &Theme) -> Vec<Span<'static>> {
-    if focused {
-        let mut spans = theme.rainbow_text("━━");
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(text.to_string(), theme.strong()));
-        spans
+/// Your name at the foot, as the desktop app has it: it opens the settings.
+fn account_line(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, hits: &mut Hits) {
+    let name = app.chat.list.user.name.trim();
+    let line = if name.is_empty() {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Settings", theme.muted()),
+        ])
     } else {
-        vec![Span::styled(text.to_string(), theme.micro())]
-    }
+        let initial: String = name
+            .chars()
+            .next()
+            .into_iter()
+            .flat_map(char::to_uppercase)
+            .collect();
+        Line::from(vec![
+            Span::styled(format!(" {initial} "), theme.bubble().patch(theme.muted())),
+            Span::raw(" "),
+            Span::styled(
+                ellipsize(name, area.width.saturating_sub(5) as usize),
+                theme.ink(),
+            ),
+        ])
+    };
+    let line = if matches!(app.view, View::Settings(_)) {
+        line.patch_style(theme.selected())
+    } else {
+        line
+    };
+    hits.add(area, Hit::Settings);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// "New chat", the search, then the chats by day, as the web's history
@@ -120,29 +151,16 @@ fn chats_section(
         return;
     }
     let pane = &app.chat;
-    let focused = app.focus == Focus::Chats;
+    let focused = app.focus == Focus::Chats && app.modal.is_none();
     let width = area.width as usize;
-    let visible = pane.visible();
-    let count = if pane.ready() && !pane.list.chats.is_empty() {
-        visible.len().to_string()
-    } else {
-        String::new()
-    };
-    let header = spread(
-        label("CHATS", focused, theme),
-        vec![Span::styled(count, theme.faint())],
-        area.width,
-    );
-    frame.render_widget(Paragraph::new(header), row(area, 0));
-    let body = below(area, 1);
     if !pane.ready() {
         let text = match &pane.access {
             Access::Loading => "Loading…".to_string(),
             Access::NeedsApproval {
                 requested: false, ..
-            } => "Need your OK · o asks".into(),
+            } => "Chats need your OK · o asks".into(),
             Access::NeedsApproval { .. } => "Waiting for your OK".into(),
-            Access::Unavailable(_) => "Not available here".into(),
+            Access::Unavailable(_) => "Chats aren't available here".into(),
             Access::Ready | Access::Unknown => match &app.daemon {
                 Daemon::NotRunning(_) => "Start the daemon to chat".into(),
                 Daemon::Running(s) if !s.paired || s.connection.connection == "revoked" => {
@@ -152,16 +170,15 @@ fn chats_section(
             },
         };
         frame.render_widget(
-            Paragraph::new(Line::styled(ellipsize(&text, width), theme.faint())),
-            body,
+            Paragraph::new(Line::styled(
+                format!(" {}", ellipsize(&text, width - 1)),
+                theme.faint(),
+            )),
+            area,
         );
         return;
     }
 
-    // Rows, what clicking each does, and which of them is the selection.
-    let mut rows: Vec<Line<'static>> = Vec::new();
-    let mut targets: Vec<Option<Hit>> = Vec::new();
-    let mut selected_row = 0;
     let marker = |selected: bool| {
         if selected && focused {
             Span::styled("▌", theme.ink())
@@ -169,6 +186,7 @@ fn chats_section(
             Span::raw(" ")
         }
     };
+    // New chat and the search stay put; the chats scroll under them.
     let new_selected = pane.selected == 0;
     let new_style = if pane.open.is_none() {
         theme.strong()
@@ -183,27 +201,47 @@ fn chats_section(
     if new_selected && focused {
         new_chat = new_chat.patch_style(theme.selected());
     }
-    rows.push(new_chat);
-    targets.push(Some(Hit::NewChat));
-    if let Some(query) = &pane.search {
-        let mut spans = vec![
-            Span::raw(" "),
-            Span::styled("/ ", theme.signal_ink(Signal::Live)),
-            Span::styled(tail(query, width.saturating_sub(4)), theme.ink()),
-        ];
-        if visible.is_empty() {
-            spans.push(Span::styled("  no match", theme.faint()));
+    frame.render_widget(Paragraph::new(new_chat), row(area, 0));
+    hits.add(row(area, 0), Hit::NewChat);
+
+    let search = match &pane.search {
+        Some(query) => {
+            let mut spans = vec![
+                Span::raw(" "),
+                Span::styled("/ ", theme.signal_ink(Signal::Live)),
+                Span::styled(tail(query, width.saturating_sub(4)), theme.ink()),
+            ];
+            if pane.visible().is_empty() {
+                spans.push(Span::styled("  no match", theme.faint()));
+            }
+            Line::from(spans)
         }
-        rows.push(Line::from(spans));
-        targets.push(None);
-    } else if pane.list.chats.is_empty() {
+        None => Line::from(vec![
+            Span::raw(" "),
+            Span::styled("/ ", theme.faint()),
+            Span::styled("Search chats", theme.faint()),
+        ]),
+    };
+    frame.render_widget(Paragraph::new(search), row(area, 1));
+    hits.add(row(area, 1), Hit::Search);
+
+    let body = below(area, 3);
+    // Rows, what clicking each does, and which of them is the selection.
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut targets: Vec<Option<Hit>> = Vec::new();
+    let mut selected_row = 0;
+    if pane.list.chats.is_empty() {
         rows.push(Line::styled(" No chats yet", theme.faint()));
         targets.push(None);
     }
     let mut group = "";
-    for (i, chat) in visible.iter().enumerate() {
+    for (i, chat) in pane.visible().iter().enumerate() {
         let this = day_group(&chat.updated_at, now, app);
         if this != group {
+            if !group.is_empty() {
+                rows.push(Line::raw(""));
+                targets.push(None);
+            }
             group = this;
             rows.push(Line::styled(format!(" {this}"), theme.micro()));
             targets.push(None);
@@ -236,6 +274,8 @@ fn chats_section(
     frame.render_widget(Paragraph::new(shown), body);
 }
 
+/// A chat in the list. One that's being answered gets the live dot, and
+/// its title shimmers while it's the open one (the only one followed).
 fn chat_row(
     chat: &ChatSummary,
     pane: &ChatPane,
@@ -247,32 +287,31 @@ fn chat_row(
 ) -> Line<'static> {
     let open = pane.open == Some(chat.number);
     let style = if open { theme.strong() } else { theme.muted() };
-    let live = chat.processing();
-    let room = width.saturating_sub(if live { 5 } else { 3 });
-    let title = ellipsize(&chat.title, room);
-    let mut spans = vec![marker, Span::raw(" "), Span::styled(title.clone(), style)];
-    if let Some(project) = &chat.project {
-        let left = room.saturating_sub(title.chars().count() + 3);
-        if left >= 4 {
-            spans.push(Span::styled(
-                format!(" · {}", ellipsize(&project.name, left)),
-                theme.faint(),
-            ));
-        }
-    }
-    let mut line = if live {
-        spread(
-            spans,
-            vec![Span::styled(spinner(now), theme.signal(Signal::Live))],
-            width as u16,
-        )
+    let dot = if chat.processing() || (open && pane.working()) {
+        Some(theme.signal(Signal::Live))
+    } else if chat.state == "error" {
+        Some(theme.signal(Signal::Attention))
     } else {
-        Line::from(spans)
+        None
     };
-    if highlighted {
-        line = line.patch_style(theme.selected());
+    let room = width.saturating_sub(if dot.is_some() { 4 } else { 2 });
+    let title = ellipsize(&chat.title, room);
+    let mut spans = vec![marker, Span::raw(" ")];
+    if let Some(dot) = dot {
+        spans.push(Span::styled(DOT, dot));
+        spans.push(Span::raw(" "));
     }
-    line
+    if open && pane.working() {
+        spans.extend(theme.shimmer_text(&title, sweep(now)));
+    } else {
+        spans.push(Span::styled(title, style));
+    }
+    let line = Line::from(spans);
+    if highlighted {
+        line.patch_style(theme.selected())
+    } else {
+        line
+    }
 }
 
 /// "TODAY", "YESTERDAY" or "EARLIER", in local time.
@@ -290,225 +329,70 @@ fn day_group(updated_at: &str, now: OffsetDateTime, app: &App) -> &'static str {
     }
 }
 
-fn roots_section(
+// --------------------------------------------------------- status and main
+
+/// The one status word, top right, while something needs attention:
+/// nothing at all while Chat with Work can reach this computer and the open
+/// chat is followed live.
+pub(super) fn attention(
+    app: &App,
+    now: OffsetDateTime,
+) -> Option<(&'static str, Signal, &'static str)> {
+    match &app.daemon {
+        Daemon::Unknown => None,
+        Daemon::NotRunning(_) => Some((RING, Signal::Negative, "daemon stopped")),
+        Daemon::Running(status) if status.paused => Some(("‖", Signal::Attention, "paused")),
+        Daemon::Running(status) => match status.connection.connection.as_str() {
+            "connected" => match app.chat.following {
+                _ if app.view != View::Chat => None,
+                Following::Offline => Some((DOT, Signal::Attention, "reconnecting")),
+                Following::Refused | Following::Unsupported => {
+                    Some((RING, Signal::Attention, "not live"))
+                }
+                _ => None,
+            },
+            "connecting" => Some((spinner(now), Signal::Attention, "connecting")),
+            "not_paired" => Some((RING, Signal::Attention, "not paired")),
+            "revoked" => Some((DOT, Signal::Negative, "revoked")),
+            _ => Some((DOT, Signal::Negative, "offline")),
+        },
+    }
+}
+
+/// A heading on the left and the status word, if any, on the right of
+/// `area`; the status word opens the settings.
+pub(super) fn heading(
     frame: &mut Frame,
     area: Rect,
+    left: Vec<Span<'static>>,
     app: &App,
     theme: &Theme,
     now: OffsetDateTime,
     hits: &mut Hits,
 ) {
-    let roots = app.daemon.roots();
-    let focused = app.focus == Focus::Roots;
-    let count = if roots.is_empty() {
-        String::new()
-    } else {
-        roots.len().to_string()
-    };
-    let header = spread(
-        label("ROOTS", focused, theme),
-        vec![Span::styled(count, theme.faint())],
-        area.width,
-    );
-    frame.render_widget(Paragraph::new(header), row(area, 0));
-    if area.height < 2 {
-        return;
-    }
-    if roots.is_empty() {
-        let text = match app.daemon {
-            Daemon::Unknown => vec![],
-            _ => vec![
-                Line::styled("Nothing shared yet", theme.muted()),
-                Line::from(vec![
-                    Span::styled("a", theme.strong()),
-                    Span::styled(" shares a folder", theme.faint()),
-                ]),
-            ],
-        };
-        frame.render_widget(Paragraph::new(text), below(area, 1));
-        return;
-    }
-    let visible = ((area.height - 1) / 2).max(1) as usize;
-    let start = app.selected_root.saturating_sub(visible - 1);
-    for (slot, (i, root)) in roots
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .enumerate()
-    {
-        let rect = Rect {
-            y: area.y + 1 + slot as u16 * 2,
-            height: 2,
-            ..area
-        };
-        let selected = focused && i == app.selected_root;
-        let (glyph, signal, state) = root_state(root, &app.daemon, now);
-        let marker = if selected {
-            Span::styled("▌", theme.ink())
-        } else {
-            Span::raw(" ")
-        };
-        let width = area.width as usize;
-        let lines = vec![
-            Line::from(vec![
-                marker,
-                Span::styled(glyph, theme.signal(signal)),
-                Span::raw(" "),
-                Span::styled(ellipsize(&root.label, width - 3), theme.ink()),
-            ]),
-            Line::from(vec![
-                Span::raw("   "),
-                Span::styled(ellipsize(&root.id, width / 2), theme.faint()),
-                Span::styled(" · ", theme.faint()),
-                Span::styled(state, theme.signal_ink(signal)),
-            ]),
-        ];
-        let mut paragraph = Paragraph::new(lines);
-        if selected {
-            paragraph = paragraph.style(theme.selected());
-        }
-        hits.add(rect.intersection(area), Hit::Root(i));
-        frame.render_widget(paragraph, rect.intersection(area));
-    }
-}
-
-/// The glyph, colour and words for a root's state.
-fn root_state(
-    root: &RootState,
-    daemon: &Daemon,
-    now: OffsetDateTime,
-) -> (&'static str, Signal, String) {
-    if !root.available {
-        return (RING, Signal::Negative, "missing".into());
-    }
-    if !matches!(daemon, Daemon::Running(_)) {
-        return (RING, Signal::Idle, "not running".into());
-    }
-    match root.index.as_str() {
-        "ready" => (DOT, Signal::Positive, files(root.indexed_files)),
-        "indexing" => (
-            spinner(now),
-            Signal::Attention,
-            format!("indexing {}", thousands(root.indexed_files)),
-        ),
-        "pending" => (spinner(now), Signal::Attention, "waiting to index".into()),
-        "error" => (DOT, Signal::Negative, "index error".into()),
-        "disabled" => (DOT, Signal::Positive, "live search".into()),
-        other => (DOT, Signal::Idle, other.replace('_', " ")),
-    }
-}
-
-fn daemon_section(app: &App, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(label("DAEMON", false, theme))];
-    match &app.daemon {
-        Daemon::Unknown => lines.push(Line::styled("Looking for it…", theme.faint())),
-        Daemon::NotRunning(offline) => daemon_offline(&mut lines, offline, theme),
-        Daemon::Running(status) => daemon_running(&mut lines, status, app, theme, width),
-    }
-    lines
-}
-
-fn daemon_offline(lines: &mut Vec<Line<'static>>, offline: &Offline, theme: &Theme) {
-    lines.push(Line::from(vec![
-        Span::styled(RING, theme.signal(Signal::Negative)),
-        Span::styled(" not running", theme.signal_ink(Signal::Negative)),
-    ]));
-    lines.push(command_line("cww daemon install", theme));
-    let paired = match &offline.server {
-        Some(server) => format!("  paired · {}", host(server)),
-        None => "  not paired".into(),
-    };
-    lines.push(Line::styled(paired, theme.faint()));
-    if offline.paused {
-        lines.push(Line::styled(
-            "  paused",
-            theme.signal_ink(Signal::Attention),
-        ));
-    }
-}
-
-fn daemon_running(
-    lines: &mut Vec<Line<'static>>,
-    status: &DaemonStatus,
-    app: &App,
-    theme: &Theme,
-    width: u16,
-) {
-    let (glyph, signal, word) = connection_state(&status.connection.connection);
-    let since = status
-        .connection
-        .since
-        .as_deref()
-        .and_then(parse_ts)
-        .map(|t| format!("since {}", clock(t, app)))
-        .unwrap_or_default();
-    lines.push(spread(
-        vec![
+    let right = match attention(app, now) {
+        Some((glyph, signal, text)) => vec![
             Span::styled(glyph, theme.signal(signal)),
-            Span::styled(format!(" {word}"), theme.signal_ink(signal)),
+            Span::styled(format!(" {text}"), theme.signal_ink(signal)),
         ],
-        vec![Span::styled(since, theme.faint())],
-        width,
-    ));
-    match status.connection.connection.as_str() {
-        "not_paired" | "revoked" => lines.push(command_line("cww login", theme)),
-        _ => {
-            let server = status.server.as_deref().map(host).unwrap_or_default();
-            let mut text = format!("  {server}");
-            if let Some(device) = &status.device_id {
-                let long = format!(" · device {device}");
-                let fits = text.chars().count() + long.chars().count() <= width as usize;
-                text.push_str(if fits { &long } else { " · #" });
-                if !fits {
-                    text.push_str(device);
-                }
-            }
-            lines.push(Line::styled(text, theme.muted()));
-            if let Some(proxy) = &status.proxy {
-                lines.push(Line::styled(
-                    format!("  via proxy {}", proxy_host(&proxy.url)),
-                    theme.muted(),
-                ));
-            }
-        }
-    }
-    let answering = if status.paused {
-        Span::styled("  paused", theme.signal_ink(Signal::Attention))
-    } else {
-        Span::styled("  answering", theme.muted())
+        None => Vec::new(),
     };
-    lines.push(Line::from(vec![
-        answering,
-        Span::styled(format!(" · cww {}", status.version), theme.faint()),
-    ]));
-}
-
-/// `host:port` of a proxy URL, without the scheme or the user name.
-fn proxy_host(url: &str) -> &str {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    rest.rsplit_once('@').map_or(rest, |(_, host)| host)
-}
-
-fn connection_state(state: &str) -> (&'static str, Signal, String) {
-    match state {
-        "connected" => (DOT, Signal::Positive, "connected".into()),
-        "connecting" => (DOT, Signal::Attention, "connecting".into()),
-        "offline" => (DOT, Signal::Negative, "offline".into()),
-        "revoked" => (DOT, Signal::Negative, "revoked".into()),
-        "not_paired" => (RING, Signal::Attention, "not paired".into()),
-        other => (RING, Signal::Idle, other.replace('_', " ")),
+    let right_width: u16 = right.iter().map(|s| s.width() as u16).sum();
+    if right_width > 0 {
+        hits.add(
+            Rect {
+                x: area.right().saturating_sub(right_width),
+                width: right_width.min(area.width),
+                ..row(area, 0)
+            },
+            Hit::Settings,
+        );
     }
+    frame.render_widget(
+        Paragraph::new(spread(left, right, area.width)),
+        row(area, 0),
+    );
 }
-
-fn command_line(command: &str, theme: &Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("  $ ", theme.faint()),
-        Span::styled(command.to_string(), theme.strong()),
-    ])
-}
-
-// ------------------------------------------------------------------- main
 
 fn main_pane(
     frame: &mut Frame,
@@ -518,110 +402,92 @@ fn main_pane(
     now: OffsetDateTime,
     hits: &mut Hits,
 ) {
-    if app.view == View::Log {
-        let [header, body] =
-            Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
-        header_bar(frame, header, app, theme, now, hits);
-        let body = pad(body, 2, 1);
-        hits.add(body, Hit::Log);
-        log_view(frame, body, app, theme);
-        return;
-    }
     // The composer grows with what's typed and the list under it, up to
     // half the pane.
     let view = composer_view(app, theme, area.width.saturating_sub(6) as usize, now);
     let most = (area.height / 2).max(3);
     let composer_height = (view.lines.len() as u16 + 2).clamp(3, most);
-    let [header, body, activity, composer] = Layout::vertical([
+    let notice = notice_lines(app, area.width.saturating_sub(4) as usize, theme);
+    let [header, body, notice_area, composer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(0),
-        Constraint::Length(2),
+        Constraint::Length(notice.len() as u16),
         Constraint::Length(composer_height),
     ])
     .areas(area);
-    header_bar(frame, header, app, theme, now, hits);
-    chat_view(frame, pad(body, 2, 1), app, theme, now, hits);
-    activity_line(frame, activity, app, theme, now);
+    let header = pad(header, 2, 0);
+    heading(
+        frame,
+        header,
+        title_spans(app, header.width, theme),
+        app,
+        theme,
+        now,
+        hits,
+    );
+    chat_view(frame, pad(body, 2, 0), app, theme, now, hits);
+    frame.render_widget(Paragraph::new(notice), pad(notice_area, 2, 0));
     composer_box(frame, pad(composer, 1, 0), app, theme, now, view, hits);
 }
 
-fn header_bar(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    theme: &Theme,
-    now: OffsetDateTime,
-    hits: &mut Hits,
-) {
-    let block = Block::new()
-        .borders(Borders::BOTTOM)
-        .border_style(theme.line());
-    let inner = pad(block.inner(area), 2, 0);
-    frame.render_widget(block, area);
-    let tab = |name: &str, view: View| {
-        if app.view == view {
-            Span::styled(name.to_string(), theme.strong())
-        } else {
-            Span::styled(name.to_string(), theme.faint())
-        }
+/// The open chat's title, and its project.
+fn title_spans(app: &App, width: u16, theme: &Theme) -> Vec<Span<'static>> {
+    let pane = &app.chat;
+    if !pane.ready() {
+        return Vec::new();
+    }
+    let (title, project) = match pane.open_summary() {
+        Some(chat) => (
+            chat.title.clone(),
+            chat.project.as_ref().map(|p| p.name.clone()),
+        ),
+        None if pane.open.is_some() => ("Loading…".into(), None),
+        None => (
+            "New chat".into(),
+            pane.project.as_ref().map(|p| p.name.clone()),
+        ),
     };
-    let tabs = vec![
-        tab("CHAT", View::Chat),
-        Span::raw("   "),
-        tab("AUDIT LOG", View::Log),
-    ];
-    hits.add(
-        Rect {
-            width: 4,
-            ..row(inner, 0)
-        },
-        Hit::Tab(View::Chat),
-    );
-    hits.add(
-        Rect {
-            x: inner.x + 7,
-            width: 9,
-            ..row(inner, 0)
+    // Room for the status word on the right.
+    let room = (width as usize).saturating_sub(18);
+    let mut spans = vec![Span::styled(ellipsize(&title, room), theme.strong())];
+    if let Some(project) = project {
+        let left = room.saturating_sub(title.chars().count() + 3);
+        if left >= 4 {
+            spans.push(Span::styled(
+                format!(" · {}", ellipsize(&project, left)),
+                theme.faint(),
+            ));
         }
-        .intersection(inner),
-        Hit::Tab(View::Log),
-    );
-    frame.render_widget(
-        Paragraph::new(spread(tabs, live_pill(app, theme, now), inner.width)),
-        inner,
-    );
+    }
+    spans
 }
 
-/// Top right: whether Chat with Work can reach this computer right now.
-fn live_pill(app: &App, theme: &Theme, now: OffsetDateTime) -> Vec<Span<'static>> {
-    let pill = |glyph: &'static str, signal: Signal, text: &str| {
-        vec![
-            Span::styled(glyph, theme.signal(signal)),
-            Span::styled(format!(" {text}"), theme.signal_ink(signal)),
-        ]
-    };
-    match &app.daemon {
-        Daemon::Unknown => pill(RING, Signal::Idle, "CHECKING"),
-        Daemon::NotRunning(_) => pill(RING, Signal::Negative, "DAEMON STOPPED"),
-        Daemon::Running(status) if status.paused => pill("‖", Signal::Attention, "PAUSED"),
-        Daemon::Running(status) => match status.connection.connection.as_str() {
-            "connected" => pill(DOT, Signal::Positive, "LIVE"),
-            "connecting" => pill(spinner(now), Signal::Attention, "CONNECTING"),
-            "not_paired" => pill(RING, Signal::Attention, "NOT PAIRED"),
-            "revoked" => pill(DOT, Signal::Negative, "REVOKED"),
-            _ => pill(DOT, Signal::Negative, "OFFLINE"),
-        },
+/// What just happened, or went wrong, above the composer until the next
+/// key.
+pub(super) fn notice_lines(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    match &app.notice {
+        Some(notice) => {
+            let mut lines = notice_line(&notice.text, notice.signal, width, theme);
+            lines.truncate(2);
+            if notice.signal == Signal::Idle
+                && let Some(first) = lines.first_mut()
+                && let Some(glyph) = first.spans.first_mut()
+            {
+                *glyph = Span::styled(RING, theme.faint());
+            }
+            lines
+        }
+        None => Vec::new(),
     }
 }
-
 /// Something that needs saying, with a signal edge.
-struct Card {
-    signal: Signal,
-    title: String,
-    lines: Vec<CardLine>,
+pub(super) struct Card {
+    pub signal: Signal,
+    pub title: String,
+    pub lines: Vec<CardLine>,
 }
 
-enum CardLine {
+pub(super) enum CardLine {
     Text(String),
     Command(String),
     Path(String),
@@ -630,12 +496,10 @@ enum CardLine {
     Keys(Vec<(&'static str, &'static str)>),
 }
 
-/// The cards the chat view leads with: the daemon's state, then the
-/// first-run offer.
-fn cards(app: &App) -> Vec<Card> {
-    let mut cards = Vec::new();
+/// A pairing under way: the code to check, and where to approve it.
+pub(super) fn pairing_card(app: &App) -> Option<Card> {
     match &app.pairing {
-        Some(Pairing::Starting) => cards.push(Card {
+        Some(Pairing::Starting) => Some(Card {
             signal: Signal::Attention,
             title: "Pairing this computer".into(),
             lines: vec![CardLine::Text("Asking Chat with Work for a code…".into())],
@@ -646,7 +510,7 @@ fn cards(app: &App) -> Vec<Card> {
             name,
             fingerprint,
             opened,
-        }) => cards.push(Card {
+        }) => Some(Card {
             signal: Signal::Attention,
             title: format!("Approve \"{name}\" on Chat with Work"),
             lines: vec![
@@ -662,8 +526,14 @@ fn cards(app: &App) -> Vec<Card> {
                 CardLine::Keys(vec![("esc", "cancel")]),
             ],
         }),
-        None => {}
+        None => None,
     }
+}
+
+/// The cards the chat view leads with: the daemon's state, then the
+/// first-run offer.
+fn cards(app: &App) -> Vec<Card> {
+    let mut cards: Vec<Card> = pairing_card(app).into_iter().collect();
     match &app.daemon {
         Daemon::Unknown => {}
         Daemon::NotRunning(offline) => {
@@ -704,58 +574,42 @@ fn cards(app: &App) -> Vec<Card> {
                 lines,
             });
         }
-        Daemon::Running(status) => {
-            match status.connection.connection.as_str() {
-                "not_paired" if app.pairing.is_none() => cards.push(Card {
-                    signal: Signal::Attention,
-                    title: "This computer isn't paired".into(),
-                    lines: vec![
-                        CardLine::Text(
-                            "Chat with Work can't search your folders until you pair it. Press \
+        Daemon::Running(status) => match status.connection.connection.as_str() {
+            "not_paired" if app.pairing.is_none() => cards.push(Card {
+                signal: Signal::Attention,
+                title: "This computer isn't paired".into(),
+                lines: vec![
+                    CardLine::Text(
+                        "Chat with Work can't search your folders until you pair it. Press \
                              c to pair it here, or run cww login in a terminal."
-                                .into(),
-                        ),
-                        CardLine::Keys(vec![("c", "pair this computer")]),
-                    ],
-                }),
-                "revoked" if app.pairing.is_none() => cards.push(Card {
-                    signal: Signal::Negative,
-                    title: "Chat with Work revoked this computer".into(),
-                    lines: vec![
-                        CardLine::Text("It won't reconnect until you pair it again.".into()),
-                        CardLine::Keys(vec![("c", "pair again")]),
-                    ],
-                }),
-                "offline" => cards.push(Card {
-                    signal: Signal::Attention,
-                    title: "Can't reach Chat with Work".into(),
-                    lines: vec![CardLine::Text(format!(
-                        "{} The daemon keeps trying on its own.",
-                        status
-                            .connection
-                            .last_error
-                            .as_deref()
-                            .map(|e| format!("Last error: {e}."))
-                            .unwrap_or_else(|| "The connection dropped.".into())
-                    ))],
-                }),
-                _ => {}
-            }
-            if status.paused {
-                cards.push(Card {
-                    signal: Signal::Attention,
-                    title: "Paused".into(),
-                    lines: vec![
-                        CardLine::Text(
-                            "Chat with Work's requests for your files are refused until you \
-                             resume."
-                                .into(),
-                        ),
-                        CardLine::Keys(vec![("p", "resume")]),
-                    ],
-                });
-            }
-        }
+                            .into(),
+                    ),
+                    CardLine::Keys(vec![("c", "pair this computer")]),
+                ],
+            }),
+            "revoked" if app.pairing.is_none() => cards.push(Card {
+                signal: Signal::Negative,
+                title: "Chat with Work revoked this computer".into(),
+                lines: vec![
+                    CardLine::Text("It won't reconnect until you pair it again.".into()),
+                    CardLine::Keys(vec![("c", "pair again")]),
+                ],
+            }),
+            "offline" => cards.push(Card {
+                signal: Signal::Attention,
+                title: "Can't reach Chat with Work".into(),
+                lines: vec![CardLine::Text(format!(
+                    "{} The daemon keeps trying on its own.",
+                    status
+                        .connection
+                        .last_error
+                        .as_deref()
+                        .map(|e| format!("Last error: {e}."))
+                        .unwrap_or_else(|| "The connection dropped.".into())
+                ))],
+            }),
+            _ => {}
+        },
     }
     if let Some(card) = chat_card(app) {
         cards.push(card);
@@ -853,7 +707,7 @@ fn chat_card(app: &App) -> Option<Card> {
     }
 }
 
-fn card_lines(card: &Card, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+pub(super) fn card_lines(card: &Card, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let (glyph, style) = match card.signal {
         Signal::Idle => (RING, theme.faint()),
         signal => (DOT, theme.signal(signal)),
@@ -889,7 +743,7 @@ fn card_lines(card: &Card, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_card(
+pub(super) fn render_card(
     frame: &mut Frame,
     area: Rect,
     card: &Card,
@@ -923,14 +777,17 @@ fn chat_view(
     hits: &mut Hits,
 ) {
     let mut y = area.y;
-    let width = area.width.min(76);
-    // Inside a conversation, only what needs doing stays on top of it.
+    let width = area.width.min(COLUMN);
+    // Inside a conversation, only a pairing under way stays on top of it;
+    // the status word says the rest.
     let in_chat =
         app.chat.ready() && (app.chat.open.is_some() || app.chat.pending_question.is_some());
-    for card in cards(app) {
-        if in_chat && matches!(card.signal, Signal::Live | Signal::Idle) {
-            continue;
-        }
+    let cards = if in_chat {
+        pairing_card(app).into_iter().collect()
+    } else {
+        cards(app)
+    };
+    for card in cards {
         let lines = card_lines(&card, width.saturating_sub(4) as usize, theme);
         let height = lines.len() as u16 + 2;
         if y + height > area.bottom() {
@@ -951,7 +808,7 @@ fn chat_view(
     }
 }
 
-/// The open chat: its title, then the transcript, newest at the bottom.
+/// The open chat's transcript, newest at the bottom.
 fn conversation(
     frame: &mut Frame,
     area: Rect,
@@ -960,73 +817,11 @@ fn conversation(
     now: OffsetDateTime,
     hits: &mut Hits,
 ) {
-    if area.height < 2 {
+    if area.height == 0 {
         return;
     }
     let pane = &app.chat;
-    let width = area.width as usize;
-    let title = match pane.open_summary() {
-        Some(chat) => chat.title.clone(),
-        None if pane.open.is_some() => "Loading…".into(),
-        None => "New chat".into(),
-    };
-    let mut meta: Vec<Span<'static>> = Vec::new();
-    let mut parts: Vec<String> = Vec::new();
-    match pane.open_summary() {
-        Some(chat) => {
-            parts.push(format!("#{}", chat.number));
-            if let Some(project) = &chat.project {
-                parts.push(project.name.clone());
-            }
-        }
-        None if pane.open.is_none() => {
-            if let Some(project) = &pane.project {
-                parts.push(project.name.clone());
-            }
-        }
-        None => {}
-    }
-    if let Some(model) = pane.model_name() {
-        parts.push(model.to_string());
-    }
-    if !parts.is_empty() {
-        meta.push(Span::styled(parts.join(" · "), theme.micro()));
-    }
-    match pane.following {
-        Following::Live if pane.working() => {
-            meta.push(Span::raw("  "));
-            meta.push(Span::styled(DOT, theme.signal(Signal::Positive)));
-            meta.push(Span::raw(" "));
-            meta.push(Span::styled("LIVE", theme.signal_ink(Signal::Positive)));
-        }
-        Following::Offline => {
-            meta.push(Span::raw("  "));
-            meta.push(Span::styled(
-                "reconnecting",
-                theme.signal_ink(Signal::Attention),
-            ));
-        }
-        Following::Refused | Following::Unsupported => {
-            meta.push(Span::raw("  "));
-            meta.push(Span::styled(
-                "not live",
-                theme.signal_ink(Signal::Attention),
-            ));
-        }
-        _ => {}
-    }
-    let meta_width: usize = meta.iter().map(Span::width).sum();
-    let heading = spread(
-        vec![Span::styled(
-            ellipsize(&title, width.saturating_sub(meta_width + 2)),
-            theme.strong(),
-        )],
-        meta,
-        area.width,
-    );
-    frame.render_widget(Paragraph::new(heading), row(area, 0));
-
-    let body = below(area, 2);
+    let body = area;
     let (mut lines, marks) = transcript(app, body.width as usize, theme, now);
     let height = body.height as usize;
     let most = lines.len().saturating_sub(height);
@@ -1052,6 +847,13 @@ fn conversation(
             .alignment(Alignment::Right);
         frame.render_widget(Paragraph::new(note), row(body, body.height - 1));
     }
+}
+
+pub(super) fn command_line(command: &str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  $ ", theme.faint()),
+        Span::styled(command.to_string(), theme.strong()),
+    ])
 }
 
 /// A whole web link a line shows, to open with a click.
@@ -1607,7 +1409,12 @@ fn answer_lines(
     lines.push(Line::raw(""));
 }
 
-fn notice_line(text: &str, signal: Signal, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+pub(super) fn notice_line(
+    text: &str,
+    signal: Signal,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     wrap(text, width.saturating_sub(2))
         .into_iter()
         .enumerate()
@@ -1620,46 +1427,6 @@ fn notice_line(text: &str, signal: Signal, width: usize, theme: &Theme) -> Vec<L
             ])
         })
         .collect()
-}
-
-fn activity_line(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, now: OffsetDateTime) {
-    let block = Block::new()
-        .borders(Borders::TOP)
-        .border_style(theme.line());
-    let inner = pad(block.inner(area), 2, 0);
-    frame.render_widget(block, area);
-    let Some(entry) = app.audit.last() else {
-        let line = Line::from(vec![
-            Span::styled("ACTIVITY  ", theme.micro()),
-            Span::styled(
-                "Nothing yet. Requests from Chat with Work show up here.",
-                theme.faint(),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line), inner);
-        return;
-    };
-    let at = parse_ts(&entry.ts);
-    let live = at.is_some_and(|t| (now - t).whole_seconds() < LIVE_SECS);
-    let mut spans = if live {
-        vec![
-            Span::styled("LIVE", theme.signal_ink(Signal::Positive)),
-            Span::raw("      "),
-        ]
-    } else {
-        vec![Span::styled("ACTIVITY  ", theme.micro())]
-    };
-    let signal = entry_signal(entry);
-    spans.push(Span::styled(DOT, theme.signal(signal)));
-    spans.push(Span::raw(" "));
-    spans.extend(summary(entry, theme));
-    if let Some(at) = at {
-        spans.push(Span::styled(
-            format!(" · {}", relative(at, now, app)),
-            theme.faint(),
-        ));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 /// What the composer box holds: the prompt line or what's typed, the
@@ -1754,15 +1521,23 @@ fn composer_view(app: &App, theme: &Theme, width: usize, now: OffsetDateTime) ->
             } else if pane.working() {
                 "Writing…  esc stops".into()
             } else if pane.open.is_some() {
-                "Reply…".into()
+                "Reply to Chat with Work".into()
             } else {
                 "Ask anything…".into()
             };
-            view.lines.push(Line::from(vec![
+            let mut spans = vec![
                 prompt(),
                 Span::raw(" "),
                 Span::styled(ellipsize(&text, room), theme.faint()),
-            ]));
+            ];
+            // The one hint, as the desktop app's composer has its own.
+            let hint = "/ for commands";
+            let used = text.chars().count() + 2;
+            if !pane.working() && focused && used + hint.len() + 4 <= width {
+                spans.push(Span::raw(" ".repeat(width - used - hint.len())));
+                spans.push(Span::styled(hint, theme.faint()));
+            }
+            view.lines.push(Line::from(spans));
             view.cursor = focused.then_some((2, 0));
         }
         (access, _) => {
@@ -1984,6 +1759,18 @@ fn composer_box(
         0.0
     };
     rainbow_border(frame.buffer_mut(), area, theme, usable, phase);
+    // The model, on the bottom edge, where the desktop app shows it.
+    if let Some(model) = pane.model_name().filter(|_| usable && area.height >= 3) {
+        let label = format!(
+            " {} ",
+            ellipsize(model, (area.width as usize).saturating_sub(8))
+        );
+        let width = label.chars().count() as u16;
+        if width + 4 <= area.width {
+            let at = Rect::new(area.right() - 2 - width, area.bottom() - 1, width, 1);
+            frame.render_widget(Paragraph::new(Line::styled(label, theme.faint())), at);
+        }
+    }
     hits.add(area, Hit::Composer);
     for (at, hit) in view.rows {
         if at < inner.height {
@@ -2039,7 +1826,7 @@ fn rainbow_border(buf: &mut Buffer, area: Rect, theme: &Theme, bright: bool, pha
 
 // -------------------------------------------------------------- audit log
 
-fn log_view(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+pub(super) fn log_view(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if area.height == 0 {
         return;
     }
@@ -2178,32 +1965,6 @@ fn entry_signal(entry: &AuditEntry) -> Signal {
     }
 }
 
-/// `search "budget" → 3 hits`, or `connected · https://...`.
-fn summary(entry: &AuditEntry, theme: &Theme) -> Vec<Span<'static>> {
-    if entry.event != "tool" {
-        let mut spans = vec![Span::styled(entry.event.replace('_', " "), theme.ink())];
-        if let Some(detail) = &entry.detail {
-            spans.push(Span::styled(format!(" · {detail}"), theme.muted()));
-        }
-        return spans;
-    }
-    let mut spans = vec![Span::styled(
-        entry.tool.clone().unwrap_or_else(|| "?".into()),
-        theme.ink(),
-    )];
-    let target = target(entry);
-    if !target.is_empty() {
-        spans.push(Span::styled(format!(" {target}"), theme.muted()));
-    }
-    let (outcome, signal) = outcome(entry);
-    spans.push(Span::styled(" → ", theme.faint()));
-    spans.push(Span::styled(outcome, theme.signal_ink(signal)));
-    if let Some(ms) = entry.duration_ms {
-        spans.push(Span::styled(format!(" · {}", duration(ms)), theme.faint()));
-    }
-    spans
-}
-
 /// `0.4 ms`, `12 ms`, `1.2 s`.
 fn duration(ms: f64) -> String {
     if ms < 10.0 {
@@ -2249,155 +2010,22 @@ fn outcome(entry: &AuditEntry) -> (String, Signal) {
     }
 }
 
-// ----------------------------------------------------------------- footer
+// ----------------------------------------------------------------- modals
 
-fn footer_line(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let area = pad(area, 1, 0);
-    if let Some(notice) = &app.notice {
-        let glyph = match notice.signal {
-            Signal::Idle => RING,
-            _ => DOT,
-        };
-        let line = Line::from(vec![
-            Span::styled(glyph, theme.signal(notice.signal)),
-            Span::raw(" "),
-            Span::styled(notice.text.clone(), theme.signal_ink(notice.signal)),
-        ]);
-        frame.render_widget(Paragraph::new(line), area);
-        return;
+/// The keys an open dialog takes.
+fn modal_hints(modal: &Modal) -> Vec<(&'static str, &'static str)> {
+    match modal {
+        Modal::AddRoot { .. } => vec![("enter", "share"), ("esc", "cancel")],
+        Modal::RenameRoot { .. } => vec![("enter", "rename"), ("esc", "cancel")],
+        Modal::ConfirmRemove { .. } => vec![("y", "stop sharing"), ("n", "keep it")],
+        Modal::ConfirmBroad { .. } => vec![("y", "share anyway"), ("n", "cancel")],
+        Modal::ConfirmDelete { .. } => vec![("y", "delete it"), ("n", "keep it")],
+        Modal::ConfirmLogout => vec![("y", "disconnect"), ("n", "keep it")],
+        Modal::Help { .. } => vec![("↑↓", "scroll"), ("any other key", "close")],
     }
-    frame.render_widget(Paragraph::new(key_hints(&hints(app), theme)), area);
 }
 
-/// The keys that do something right now.
-fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
-    match &app.modal {
-        Some(Modal::AddRoot { .. }) => return vec![("enter", "share"), ("esc", "cancel")],
-        Some(Modal::ConfirmRemove { .. }) => return vec![("y", "stop sharing"), ("n", "keep it")],
-        Some(Modal::ConfirmBroad { .. }) => return vec![("y", "share anyway"), ("n", "cancel")],
-        Some(Modal::ConfirmDelete { .. }) => return vec![("y", "delete it"), ("n", "keep it")],
-        Some(Modal::ConfirmLogout) => return vec![("y", "forget it"), ("n", "keep it")],
-        Some(Modal::Help { .. }) => return vec![("↑↓", "scroll"), ("any other key", "close")],
-        None => {}
-    }
-    if app.focus == Focus::Composer {
-        let pane = &app.chat;
-        if pane.picker.is_some() {
-            return vec![
-                ("type", "to filter"),
-                ("↑↓", "select"),
-                ("enter", "pick"),
-                ("esc", "close"),
-            ];
-        }
-        if !app.menu().is_empty() {
-            return vec![
-                ("↑↓", "select"),
-                ("tab", "complete"),
-                ("enter", "run"),
-                ("esc", "close"),
-            ];
-        }
-        if pane.form.editing.is_some() || pane.reason {
-            return vec![("enter", "keep it"), ("esc", "cancel")];
-        }
-        if pane.pending_decision().is_some() && pane.input.is_empty() {
-            let mut keys = vec![("↑↓", "choose"), ("enter", "confirm"), ("y", "approve")];
-            if pane
-                .pending_decision()
-                .is_some_and(|a| a.allow_for_rest_of_chat)
-            {
-                keys.push(("a", "always in this chat"));
-            }
-            keys.extend([("n", "deny"), ("esc", "back")]);
-            return keys;
-        }
-        if pane.pending_question().is_some() && pane.input.is_empty() {
-            return vec![
-                ("↑↓", "choose"),
-                ("← →", "change"),
-                ("enter", "confirm"),
-                ("esc", "back"),
-            ];
-        }
-        let esc = if pane.working() {
-            ("esc", "stop")
-        } else {
-            ("esc", "back")
-        };
-        return vec![
-            ("enter", "send"),
-            ("/", "commands"),
-            ("shift-enter", "new line"),
-            ("↑", "history"),
-            esc,
-            ("tab", "focus"),
-            ("ctrl-c", "clear"),
-        ];
-    }
-    if app.focus == Focus::Chats && app.chat.search.is_some() {
-        return vec![
-            ("type", "to search"),
-            ("↑↓", "select"),
-            ("enter", "open"),
-            ("esc", "stop searching"),
-        ];
-    }
-    if app.focus == Focus::Chats && app.view == View::Chat {
-        let mut keys = vec![
-            ("↑↓", "select"),
-            ("enter", "open"),
-            ("n", "new chat"),
-            ("/", "search"),
-            ("tab", "focus"),
-            ("e", "steps"),
-        ];
-        if app.chat.open.is_some() || app.chat.selected_chat().is_some() {
-            keys.push(("o", "open in browser"));
-        }
-        keys.extend([("l", "audit log"), ("?", "help"), ("q", "quit")]);
-        return keys;
-    }
-    let mut keys = Vec::new();
-    if app.pairing.is_some() {
-        keys.push(("esc", "cancel pairing"));
-    } else if app.can_pair() {
-        keys.push(("c", "pair"));
-    }
-    if matches!(app.daemon, Daemon::NotRunning(_)) {
-        keys.push(("s", "start daemon"));
-    }
-    if app.focus_order().len() > 1 {
-        keys.push(("tab", "focus"));
-    }
-    if app.view == View::Log {
-        keys.extend([("↑↓", "scroll"), ("l", "chat")]);
-    } else {
-        if !app.daemon.roots().is_empty() {
-            keys.push(("↑↓", "select"));
-        }
-        keys.push(("a", "add folder"));
-        if !app.daemon.roots().is_empty() {
-            keys.push(("d", "remove"));
-        }
-        keys.push(("l", "audit log"));
-    }
-    match app.daemon.paused() {
-        Some(true) => keys.push(("p", "resume")),
-        Some(false) => keys.push(("p", "pause")),
-        None => {}
-    }
-    if matches!(app.daemon, Daemon::NotRunning(_)) {
-        keys.push(("r", "retry"));
-    }
-    if matches!(app.chat.access, Access::NeedsApproval { .. }) {
-        keys.push(("o", "allow chats"));
-    }
-    keys.extend([("?", "help"), ("q", "quit")]);
-    keys
-}
-
-fn key_hints(keys: &[(&'static str, &'static str)], theme: &Theme) -> Line<'static> {
+pub(super) fn key_hints(keys: &[(&'static str, &'static str)], theme: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, (key, what)) in keys.iter().enumerate() {
         if i > 0 {
@@ -2408,8 +2036,6 @@ fn key_hints(keys: &[(&'static str, &'static str)], theme: &Theme) -> Line<'stat
     }
     Line::from(spans)
 }
-
-// ----------------------------------------------------------------- modals
 
 fn modal_box(frame: &mut Frame, area: Rect, modal: &Modal, app: &App, theme: &Theme) {
     let width = area.width.saturating_sub(4).min(68);
@@ -2437,6 +2063,33 @@ fn modal_box(frame: &mut Frame, area: Rect, modal: &Modal, app: &App, theme: &Th
                 .map(|l| Line::styled(l, theme.faint())),
             );
             ("SHARE A FOLDER", lines)
+        }
+        Modal::RenameRoot { id, input } => {
+            let spans = vec![
+                Span::styled(PROMPT, theme.rainbow(0.48)),
+                Span::raw(" "),
+                Span::styled(tail(input, text_width.saturating_sub(3)), theme.ink()),
+            ];
+            let mut lines = vec![
+                Line::styled(
+                    "The name Chat with Work sees this folder by:",
+                    theme.muted(),
+                ),
+                Line::raw(""),
+                Line::from(spans),
+                Line::raw(""),
+            ];
+            lines.extend(
+                wrap(
+                    &format!(
+                        "Its files keep their paths under {id}:, so links to them keep working."
+                    ),
+                    text_width,
+                )
+                .into_iter()
+                .map(|l| Line::styled(l, theme.faint())),
+            );
+            ("RENAME A FOLDER", lines)
         }
         Modal::ConfirmRemove { label, path, .. } => {
             let mut lines = vec![Line::styled(
@@ -2491,22 +2144,19 @@ fn modal_box(frame: &mut Frame, area: Rect, modal: &Modal, app: &App, theme: &Th
             ("DELETE CHAT", lines)
         }
         Modal::ConfirmLogout => {
-            let mut lines = vec![Line::styled(
-                "Forget this computer's pairing?",
-                theme.strong(),
-            )];
+            let mut lines = vec![Line::styled("Disconnect this computer?", theme.strong())];
             lines.push(Line::raw(""));
             lines.extend(
                 wrap(
-                    "Chat with Work can no longer reach your folders, and chats stop here, \
-                     until you pair again. Revoke the computer in Chat with Work as well, under \
-                     Settings, Computers.",
+                    "This forgets its pairing: Chat with Work can no longer reach your folders, \
+                     and chats stop here, until you pair again. Remove it in Chat with Work as \
+                     well, under Settings, Computers.",
                     text_width,
                 )
                 .into_iter()
                 .map(|l| Line::styled(l, theme.muted())),
             );
-            ("LOG OUT", lines)
+            ("DISCONNECT", lines)
         }
         Modal::Help { scroll } => {
             let all = help_lines(app, theme);
@@ -2521,7 +2171,7 @@ fn modal_box(frame: &mut Frame, area: Rect, modal: &Modal, app: &App, theme: &Th
     };
     let mut lines = lines;
     lines.push(Line::raw(""));
-    lines.push(key_hints(&hints(app), theme));
+    lines.push(key_hints(&modal_hints(modal), theme));
     let height = (lines.len() as u16 + 2).min(area.height);
     let rect = Rect::new(
         area.x + (area.width - width) / 2,
@@ -2538,7 +2188,7 @@ fn modal_box(frame: &mut Frame, area: Rect, modal: &Modal, app: &App, theme: &Th
     let inner = pad(block.inner(rect), 1, 0);
     frame.render_widget(block, rect);
     frame.render_widget(Paragraph::new(lines), inner);
-    if let Modal::AddRoot { input } = modal {
+    if let Modal::AddRoot { input } | Modal::RenameRoot { input, .. } = modal {
         let x = inner.x + 2 + tail(input, text_width.saturating_sub(3)).chars().count() as u16;
         frame.set_cursor_position(Position::new(
             x.min(inner.right().saturating_sub(1)),
@@ -2548,18 +2198,10 @@ fn modal_box(frame: &mut Frame, area: Rect, modal: &Modal, app: &App, theme: &Th
 }
 
 fn help_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
-    let mut keys: Vec<(&str, &str)> = vec![
-        ("↑ ↓  j k", "select a folder; scroll the audit log"),
-        ("a", "share a folder"),
-        ("d  x  del", "stop sharing the selected folder"),
-        ("p", "pause or resume answering Chat with Work"),
-        ("l", "switch between chat and the audit log"),
-        ("pgup pgdn", "page through the audit log"),
-        ("r", "look for the daemon again"),
-    ];
+    let mut keys: Vec<(&str, &str)> = Vec::new();
     if app.chat.ready() {
         keys.extend([
-            ("tab", "move between chats, the composer and folders"),
+            ("tab", "move between the chats and the composer"),
             ("↑ ↓  j k", "select a chat"),
             ("enter", "open a chat; send a message"),
             ("n", "new chat"),
@@ -2573,6 +2215,7 @@ fn help_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
             ("ctrl-a ctrl-e", "start and end of the line"),
             ("ctrl-u ctrl-k", "delete to the start or end of the line"),
             ("esc", "stop an answer; back to the chats"),
+            ("pgup pgdn", "scroll the chat"),
             ("e", "show every tool step"),
             ("o", "open the chat in the browser"),
         ]);
@@ -2580,6 +2223,28 @@ fn help_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
         keys.push(("o", "ask to use your chats here"));
     }
     keys.extend([
+        (
+            ",",
+            "settings: shared folders, activity, account, the daemon",
+        ),
+        ("tab ← →", "in settings: the next or previous page"),
+        (
+            "↑ ↓  j k",
+            "in settings: select a folder, scroll the activity",
+        ),
+        ("a", "share a folder"),
+        (
+            "r",
+            "rename the folder (Shared folders); look for the daemon again",
+        ),
+        (
+            "d",
+            "stop sharing the folder (Shared folders); disconnect (Account)",
+        ),
+        ("l", "the activity log"),
+        ("p", "pause or resume answering Chat with Work"),
+        ("c", "pair this computer, when it isn't"),
+        ("s", "start the daemon, when it isn't running"),
         ("?", "this help"),
         ("ctrl-l", "draw the screen again"),
         ("ctrl-c", "clear what's typed; twice quits"),
@@ -2626,13 +2291,13 @@ fn help_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
 
 // ---------------------------------------------------------------- helpers
 
-fn pad(area: Rect, x: u16, y: u16) -> Rect {
+pub(super) fn pad(area: Rect, x: u16, y: u16) -> Rect {
     let x = x.min(area.width / 2);
     let y = y.min(area.height / 2);
     Rect::new(area.x + x, area.y + y, area.width - 2 * x, area.height - y)
 }
 
-fn row(area: Rect, offset: u16) -> Rect {
+pub(super) fn row(area: Rect, offset: u16) -> Rect {
     Rect::new(
         area.x,
         area.y + offset.min(area.height),
@@ -2641,13 +2306,17 @@ fn row(area: Rect, offset: u16) -> Rect {
     )
 }
 
-fn below(area: Rect, offset: u16) -> Rect {
+pub(super) fn below(area: Rect, offset: u16) -> Rect {
     let offset = offset.min(area.height);
     Rect::new(area.x, area.y + offset, area.width, area.height - offset)
 }
 
 /// `left` and `right` on one line, pushed apart.
-fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: u16) -> Line<'static> {
+pub(super) fn spread(
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    width: u16,
+) -> Line<'static> {
     let used: usize = left.iter().chain(&right).map(Span::width).sum();
     let gap = (width as usize).saturating_sub(used).max(1);
     let mut spans = left;
@@ -2656,7 +2325,7 @@ fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: u16) -> Li
     Line::from(spans)
 }
 
-fn ellipsize(text: &str, max: usize) -> String {
+pub(super) fn ellipsize(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
@@ -2666,7 +2335,7 @@ fn ellipsize(text: &str, max: usize) -> String {
 }
 
 /// Keep the end of a path, which says the most.
-fn ellipsize_start(text: &str, max: usize) -> String {
+pub(super) fn ellipsize_start(text: &str, max: usize) -> String {
     let count = text.chars().count();
     if count <= max {
         return text.to_string();
@@ -2677,7 +2346,7 @@ fn ellipsize_start(text: &str, max: usize) -> String {
 }
 
 /// The end of what's being typed, so the cursor stays in view.
-fn tail(text: &str, max: usize) -> String {
+pub(super) fn tail(text: &str, max: usize) -> String {
     let count = text.chars().count();
     text.chars().skip(count.saturating_sub(max)).collect()
 }
@@ -2718,7 +2387,7 @@ pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// How far along its two-second sweep the shimmer is.
-fn sweep(now: OffsetDateTime) -> f32 {
+pub(super) fn sweep(now: OffsetDateTime) -> f32 {
     (now.unix_timestamp_nanos().rem_euclid(2_000_000_000)) as f32 / 2_000_000_000.0
 }
 
@@ -2729,45 +2398,33 @@ fn working_mark(theme: &Theme, now: OffsetDateTime) -> Span<'static> {
     Span::styled(spinner(now), theme.rainbow(1.0 - (2.0 * t - 1.0).abs()))
 }
 
-fn spinner(now: OffsetDateTime) -> &'static str {
+pub(super) fn spinner(now: OffsetDateTime) -> &'static str {
     let frame = (now.unix_timestamp_nanos() / 120_000_000).rem_euclid(SPINNER.len() as i128);
     SPINNER[frame as usize]
 }
 
-fn local(at: OffsetDateTime, app: &App) -> OffsetDateTime {
+pub(super) fn local(at: OffsetDateTime, app: &App) -> OffsetDateTime {
     at.to_offset(app.utc_offset)
 }
 
-fn clock(at: OffsetDateTime, app: &App) -> String {
+pub(super) fn clock(at: OffsetDateTime, app: &App) -> String {
     let t = local(at, app);
     format!("{:02}:{:02}", t.hour(), t.minute())
 }
 
-fn clock_secs(at: OffsetDateTime, app: &App) -> String {
+pub(super) fn clock_secs(at: OffsetDateTime, app: &App) -> String {
     let t = local(at, app);
     format!("{:02}:{:02}:{:02}", t.hour(), t.minute(), t.second())
 }
 
-/// "2s ago", "5m ago", then the time of day. `App::next_wakeup` redraws
-/// exactly when this text changes.
-fn relative(at: OffsetDateTime, now: OffsetDateTime, app: &App) -> String {
-    let secs = (now - at).whole_seconds().max(0);
-    match secs {
-        0 => "just now".into(),
-        1..60 => format!("{secs}s ago"),
-        60..3600 => format!("{}m ago", secs / 60),
-        _ => format!("at {}", clock(at, app)),
-    }
-}
-
-fn host(url: &str) -> String {
+pub(super) fn host(url: &str) -> String {
     url.split_once("://")
         .map_or(url, |(_, rest)| rest)
         .trim_end_matches('/')
         .to_string()
 }
 
-fn thousands(n: u64) -> String {
+pub(super) fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
@@ -2779,7 +2436,7 @@ fn thousands(n: u64) -> String {
     out
 }
 
-fn files(n: u64) -> String {
+pub(super) fn files(n: u64) -> String {
     if n == 1 {
         "1 file".into()
     } else {
@@ -2787,7 +2444,7 @@ fn files(n: u64) -> String {
     }
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub(super) fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("1 {one}")
     } else {

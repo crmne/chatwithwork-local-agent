@@ -1,12 +1,12 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
-                               │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Loading…                      │
+ ◆ Chat with Work              │  Shared folders
                                │
-                               │
-                               │
-                               │
-                               │
+  ← Chats                  esc │  Chat with Work can search and read the files in these folders,
+                               │  and nothing else on this computer.
+  SETTINGS                     │
+ ▌ Shared folders              │  ▌● Work docs                               Indexed · 1,532 files
+   Activity                    │     /home/carmine/Work docs · work-docs:
+   Account                     │
+   General                     │  ↑↓ select   a share a folder   r rename   d stop sharing
                                │
                 ╭ STOP SHARING ────────────────────────────────────────────────────╮
                 │ Stop sharing Work docs?                                          │
@@ -20,11 +20,11 @@
                                │
                                │
                                │
- ━━ ROOTS                    1 │
- ▌● Work docs                  │
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Loading your chats…                                          │
-   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- y stop sharing   n keep it
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+  Settings                     │

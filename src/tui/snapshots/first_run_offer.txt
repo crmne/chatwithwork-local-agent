@@ -1,7 +1,6 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
-                               │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Loading…                      │  ╭──────────────────────────────────────────────────────────────╮
+ ◆ Chat with Work              │
+                               │
+  Loading…                     │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● Share your Documents folder?                               │
                                │  │ Nothing is shared yet. Chat with Work can search your        │
                                │  │ Documents folder:                                            │
@@ -20,11 +19,12 @@
                                │
                                │
                                │
- ━━ ROOTS                      │
- Nothing shared yet            │
- a shares a folder             │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Loading your chats…                                          │
-   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- a add folder   l audit log   p pause   ? help   q quit
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ Loading your chats…                                          │
+  Settings                     │ ╰────────────────────────────────────────────────────────────────╯

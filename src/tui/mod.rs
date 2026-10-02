@@ -5,9 +5,8 @@
 //! subscription, see [`daemon`]), and chats (worker threads that ask the
 //! daemon, and one that follows the open chat live). The loop blocks on that
 //! channel and redraws only when something arrives. It sets a timeout only
-//! while something on screen moves (a spinner, an answer being written) or a
-//! relative time like "2s ago" is about to change, so an idle TUI uses no
-//! CPU.
+//! while something on screen moves (a spinner, an answer being written), so
+//! an idle TUI uses no CPU.
 
 pub mod app;
 pub mod chat;
@@ -16,6 +15,7 @@ pub mod composer;
 mod daemon;
 mod history;
 pub mod markdown;
+mod pages;
 pub mod theme;
 pub mod ui;
 

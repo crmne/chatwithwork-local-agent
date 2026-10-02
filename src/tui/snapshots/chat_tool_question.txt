@@ -1,16 +1,18 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
-                               │────────────────────────────────────────────────────────────────────
- CHATS                       5 │
-  + New chat                   │  Q3 budget                                                    #42
-  TODAY                        │
-   Q3 budget                   │  The Q3 budget is €40k, signed off by Ada on 12 September.
-   Launch plan for Falcon      │
+ ◆ Chat with Work              │  Q3 budget
+                               │
+  + New chat                   │                    What did we budget for Q3, and who signed it
+  / Search chats               │                    off?
+                               │
+  TODAY                        │  ▸ Searched Drive and Carmine's MacBook · 2 searches, read 1 file
+   Q3 budget                   │
+   Launch plan for Falcon      │  The Q3 budget is €40k, signed off by Ada on 12 September.
+                               │
   YESTERDAY                    │  • Marketing: €18k
    Onboarding checklist        │  • Engineering: €22k
-  EARLIER                      │
-   Vendor contracts            │  Details are in the plan[1].
-   Hiring plan                 │
-                               │  SOURCES
+                               │
+  EARLIER                      │  Details are in the plan[1].
+   Vendor contracts            │
+   Hiring plan                 │  SOURCES
                                │  [1] Q3 plan.pdf  https://drive.google.com/file/d/q3
                                │
                                │  ● Notion asks
@@ -20,11 +22,9 @@
                                │    Include drafts  no
                                │    Send
                                │    Decline
- ROOTS                       1 │    Only Notion sees your answer. Never enter a password here;
-  ● Work docs                  │    sign in on the service's own page instead.
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ 30                                                           │
-   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- enter keep it   esc cancel
+                               │    Only Notion sees your answer. Never enter a password here;
+                               │    sign in on the service's own page instead.
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ 30                                                           │
+  C  Carmine                   │ ╰────────────────────────────────────────────────────────────────╯

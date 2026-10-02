@@ -98,6 +98,8 @@ fn status(connection: &str, roots: Vec<RootState>) -> DaemonStatus {
             last_error: None,
         },
         roots,
+        config_file: Some("/srv/cww/config.toml".into()),
+        audit_file: Some("/srv/cww/audit.jsonl".into()),
     }
 }
 
@@ -198,6 +200,8 @@ fn snapshot_daemon_not_running() {
             paused: false,
             roots: vec![work],
             error: None,
+            config_file: None,
+            audit_file: None,
         }),
         audit: history()[..2].to_vec(),
         suggestion: Some(documents()),
@@ -250,7 +254,160 @@ fn snapshot_connected_with_roots() {
         ),
     );
     app.update(Msg::Daemon(DaemonMsg::AuditHistory(history())));
+    app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list()))));
+    app.update(char(','));
+    assert_eq!(app.view, View::Settings(Page::Folders));
     assert_snapshot("connected_with_roots", &app);
+}
+
+#[test]
+fn snapshot_settings_account_and_general() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(char(','));
+    app.update(char('3'));
+    assert_snapshot("settings_account", &app);
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.view, View::Settings(Page::General));
+    assert_snapshot("settings_general", &app);
+}
+
+#[test]
+fn settings_go_page_to_page_and_back() {
+    let mut app = app();
+    chats_ready(&mut app);
+    for (key_code, page) in [
+        (KeyCode::Char(','), Page::Folders),
+        (KeyCode::Tab, Page::Activity),
+        (KeyCode::Right, Page::Account),
+        (KeyCode::BackTab, Page::Activity),
+        (KeyCode::Left, Page::Folders),
+        (KeyCode::BackTab, Page::General),
+        (KeyCode::Char('2'), Page::Activity),
+    ] {
+        app.update(key(key_code));
+        assert_eq!(app.view, View::Settings(page), "{key_code:?}");
+    }
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.view, View::Chat);
+    app.update(char(','));
+    app.update(char(','));
+    assert_eq!(app.view, View::Chat, "a comma goes back too");
+
+    // Where something needs you, the settings open there.
+    running(&mut app, status("revoked", vec![]));
+    app.update(char(','));
+    assert_eq!(app.view, View::Settings(Page::Account));
+    app.update(key(KeyCode::Esc));
+    app.update(Msg::Daemon(DaemonMsg::NotRunning {
+        offline: Box::new(Offline::default()),
+        audit: vec![],
+        suggestion: None,
+    }));
+    app.update(char(','));
+    assert_eq!(app.view, View::Settings(Page::General));
+    app.update(key(KeyCode::Esc));
+    app.focus = Focus::Composer;
+    type_text(&mut app, "/settings");
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.view, View::Settings(Page::General));
+}
+
+#[test]
+fn a_folder_is_renamed_from_its_page() {
+    let mut app = app();
+    running(
+        &mut app,
+        status(
+            "connected",
+            vec![
+                root("a", "A", "ready", 1),
+                root("work-docs", "Work docs", "ready", 3),
+            ],
+        ),
+    );
+    app.update(char('r'));
+    assert_eq!(app.modal, None, "r looks for the daemon in the chats");
+    app.update(char(','));
+    app.update(key(KeyCode::Down));
+    app.update(char('r'));
+    assert_eq!(
+        app.modal,
+        Some(Modal::RenameRoot {
+            id: "work-docs".into(),
+            input: "Work docs".into()
+        })
+    );
+    app.update(ctrl('u'));
+    type_text(&mut app, "Team docs");
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Daemon(DaemonCommand::LabelRoot {
+            id: "work-docs".into(),
+            label: "Team docs".into()
+        })]
+    );
+    // An unchanged or empty name sends nothing.
+    app.update(char('r'));
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
+    app.update(char('r'));
+    app.update(ctrl('u'));
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
+}
+
+#[test]
+fn one_status_word_and_only_when_something_needs_you() {
+    let mut app = app();
+    budget_open(&mut app, every_action());
+    let screen = render_to_string(&app, 100, 30);
+    for gone in [
+        "LIVE",
+        "connected",
+        "ACTIVITY",
+        "enter send",
+        "tab focus",
+        "AUDIT LOG",
+    ] {
+        assert!(!screen.contains(gone), "{gone}: {screen}");
+    }
+    let mut s = status(
+        "connected",
+        vec![root("work-docs", "Work docs", "ready", 1532)],
+    );
+    s.paused = true;
+    running(&mut app, s);
+    let screen = render_to_string(&app, 100, 30);
+    assert_eq!(screen.matches("paused").count(), 1, "{screen}");
+    // It opens the settings where pausing is.
+    let (x, y) = find(&app, "paused");
+    click(&mut app, x, y);
+    assert_eq!(app.view, View::Settings(Page::General));
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("p resume sharing"), "{screen}");
+    for (connection, word) in [
+        ("offline", "offline"),
+        ("revoked", "revoked"),
+        ("not_paired", "not paired"),
+        ("connecting", "connecting"),
+    ] {
+        running(&mut app, status(connection, vec![]));
+        let screen = render_to_string(&app, 100, 30);
+        assert!(screen.lines().next().unwrap().contains(word), "{screen}");
+    }
+}
+
+#[test]
+fn the_account_page_disconnects_after_asking() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(char(','));
+    app.update(char('3'));
+    app.update(char('d'));
+    assert_eq!(app.modal, Some(Modal::ConfirmLogout));
+    assert_eq!(
+        app.update(char('y')),
+        vec![Effect::Daemon(DaemonCommand::Logout)]
+    );
 }
 
 #[test]
@@ -265,8 +422,11 @@ fn shows_the_proxy_without_credentials() {
         source: "config".into(),
     });
     running(&mut app, s);
+    app.update(char(','));
+    app.update(char('3'));
+    assert_eq!(app.view, View::Settings(Page::Account));
     let screen = render_to_string(&app, 100, 30);
-    assert!(screen.contains("via proxy proxy.corp:3128"), "{screen}");
+    assert!(screen.contains("proxy.corp:3128"), "{screen}");
     assert!(!screen.contains("alice"), "{screen}");
 }
 
@@ -348,6 +508,7 @@ fn snapshot_remove_folder_dialog() {
             vec![root("work-docs", "Work docs", "ready", 1532)],
         ),
     );
+    app.update(char(','));
     app.update(char('d'));
     assert_snapshot("remove_folder_dialog", &app);
 }
@@ -373,11 +534,17 @@ fn renders_at_any_size_without_panicking() {
     );
     a.update(Msg::Daemon(DaemonMsg::AuditHistory(history())));
     apps.push(a.clone());
+    for page in Page::ALL {
+        a.view = View::Settings(page);
+        apps.push(a.clone());
+    }
+    a.view = View::Settings(Page::Folders);
     a.update(char('d'));
     apps.push(a.clone());
     a.modal = Some(Modal::Help { scroll: 0 });
     apps.push(a.clone());
     a.modal = None;
+    a.view = View::Chat;
     a.update(char('l'));
     apps.push(a);
     let mut offer = app();
@@ -572,6 +739,8 @@ fn removing_a_folder_needs_confirmation() {
             vec![root("a", "A", "ready", 1), root("b", "B", "ready", 1)],
         ),
     );
+    app.update(char(','));
+    assert_eq!(app.view, View::Settings(Page::Folders));
     app.update(key(KeyCode::Down));
     app.update(char('d'));
     assert!(matches!(app.modal, Some(Modal::ConfirmRemove { ref id, .. }) if id == "b"));
@@ -596,6 +765,7 @@ fn selection_stays_in_range_when_roots_go_away() {
             vec![root("a", "A", "ready", 1), root("b", "B", "ready", 1)],
         ),
     );
+    app.update(char(','));
     app.update(key(KeyCode::Down));
     app.update(key(KeyCode::Down));
     assert_eq!(app.selected_root, 1);
@@ -643,7 +813,7 @@ fn the_log_view_scrolls_and_follows() {
     let mut app = app();
     app.update(Msg::Daemon(DaemonMsg::AuditHistory(history())));
     app.update(char('l'));
-    assert_eq!(app.view, View::Log);
+    assert_eq!(app.view, View::Settings(Page::Activity));
     app.update(key(KeyCode::PageUp));
     let first = history().len() - 1;
     assert_eq!(app.log_scroll, first, "at most to the first entry");
@@ -704,9 +874,9 @@ fn locked_composer_takes_no_input() {
     let mut app = app();
     running(&mut app, status("connected", vec![]));
     app.update(key(KeyCode::Tab));
-    assert_eq!(app.focus, Focus::Roots, "nothing else to focus");
+    assert_eq!(app.focus, Focus::Chats, "nothing else to focus");
     app.update(char('i'));
-    assert_eq!(app.focus, Focus::Roots);
+    assert_eq!(app.focus, Focus::Chats);
     assert!(app.start().is_empty(), "no chat calls");
 }
 
@@ -718,28 +888,24 @@ fn redraws_only_when_something_changes() {
         &mut app,
         status("connected", vec![root("a", "A", "indexing", 1)]),
     );
-    assert_eq!(app.next_wakeup(NOW), Some(FRAME), "spinner");
+    assert_eq!(app.next_wakeup(NOW), None, "the folders aren't on screen");
+    app.update(char(','));
+    assert_eq!(app.next_wakeup(NOW), Some(FRAME), "their spinner is");
     running(
         &mut app,
         status("connected", vec![root("a", "A", "ready", 1)]),
     );
     assert_eq!(app.next_wakeup(NOW), None);
+    running(&mut app, status("connecting", vec![]));
+    assert_eq!(app.next_wakeup(NOW), Some(FRAME), "connecting spins");
+    running(&mut app, status("connected", vec![]));
 
-    // "2s ago" ticks every second, "5m ago" every minute, then it stops.
+    // Activity coming in changes nothing that counts time.
     let recent = event("2026-09-25T08:19:58.250Z", "connected", None);
     app.update(Msg::Daemon(DaemonMsg::Audit(Box::new(recent))));
-    assert_eq!(
-        app.next_wakeup(NOW),
-        Some(std::time::Duration::from_millis(250))
-    );
-    let later = NOW + time::Duration::minutes(5);
-    assert_eq!(
-        app.next_wakeup(later),
-        Some(std::time::Duration::from_millis(58_250))
-    );
-    assert_eq!(app.next_wakeup(NOW + time::Duration::hours(2)), None);
-    app.update(char('l'));
-    assert_eq!(app.next_wakeup(NOW), None, "the log shows clock times");
+    assert_eq!(app.next_wakeup(NOW), None);
+    app.update(key(KeyCode::Esc));
+    assert_eq!(app.next_wakeup(NOW), None);
 }
 
 #[test]
@@ -1062,7 +1228,7 @@ fn chats_taken_back_show_at_once_and_come_back_live() {
         requested: false,
     }))));
     assert!(matches!(app.chat.access, Access::NeedsApproval { .. }));
-    assert_eq!(app.focus, Focus::Roots, "nothing to type into");
+    assert_eq!(app.focus, Focus::Chats, "nothing to type into");
 
     // Allowed again: the open chat is read and followed again.
     assert_eq!(
@@ -1224,10 +1390,7 @@ fn chats_load_once_a_running_daemon_is_paired() {
     app.update(Msg::Chat(ChatMsg::Listed(Ok(chat_list()))));
     assert!(app.chat.ready());
     assert_eq!(app.focus, Focus::Chats);
-    assert_eq!(
-        app.focus_order(),
-        vec![Focus::Chats, Focus::Composer, Focus::Roots]
-    );
+    assert_eq!(app.focus_order(), vec![Focus::Chats, Focus::Composer]);
 
     // The daemon going away forgets that chats worked.
     app.update(Msg::Daemon(DaemonMsg::Lost));
@@ -1670,18 +1833,24 @@ fn commands_run_from_the_composer() {
     app.update(char('i'));
     type_text(&mut app, "/log");
     app.update(key(KeyCode::Enter));
-    assert_eq!(app.view, View::Log);
+    assert_eq!(app.view, View::Settings(Page::Activity));
     app.update(key(KeyCode::Esc));
+    assert_eq!(app.view, View::Chat);
     app.focus = Focus::Composer;
     type_text(&mut app, "/folders");
     app.update(key(KeyCode::Enter));
-    assert_eq!(app.focus, Focus::Roots);
+    assert_eq!(app.view, View::Settings(Page::Folders));
+    app.update(key(KeyCode::Esc));
     app.focus = Focus::Composer;
     type_text(&mut app, "/help");
     app.update(key(KeyCode::Enter));
     assert_eq!(app.modal, Some(Modal::Help { scroll: 0 }));
     let screen = render_to_string(&app, 100, 30);
-    assert!(screen.contains("shift-drag"), "{screen}");
+    assert!(screen.contains("select a chat"), "{screen}");
+    let mut end = app.clone();
+    end.modal = Some(Modal::Help { scroll: 500 });
+    let screen = render_to_string(&end, 100, 30);
+    assert!(screen.contains("/exit"), "{screen}");
     app.update(key(KeyCode::Down));
     assert_eq!(app.modal, Some(Modal::Help { scroll: 1 }), "it scrolls");
     app.update(char('x'));
@@ -1807,7 +1976,7 @@ fn snapshot_chat_model_picker() {
     assert_eq!(app.chat.picker, None);
     assert_eq!(app.chat.model_name(), Some("GPT-6 Sol"));
     let screen = render_to_string(&app, 100, 30);
-    assert!(screen.contains("#42 · GPT-6 Sol"), "{screen}");
+    assert!(screen.contains(" GPT-6 Sol "), "{screen}");
 
     // The next question asks with it; a refusal goes back to the chat's own.
     type_text(&mut app, "And Q4?");
@@ -2308,25 +2477,29 @@ fn the_mouse_selects_opens_and_scrolls() {
             Effect::Chat(ChatCommand::Follow(Some(27)))
         ]
     );
-    // The audit log tab, and back.
-    let (x, y) = find(&app, "AUDIT LOG");
-    click(&mut app, x + 1, y);
-    assert_eq!(app.view, View::Log);
-    let (x, y) = find(&app, "CHAT");
+    // Your name opens the settings; a page, a folder, and back.
+    let (x, y) = find(&app, "Carmine");
     click(&mut app, x, y);
-    assert_eq!(app.view, View::Chat);
-    // A folder.
+    assert_eq!(app.view, View::Settings(Page::Folders));
+    let (x, y) = find(&app, "Activity");
+    click(&mut app, x, y);
+    assert_eq!(app.view, View::Settings(Page::Activity));
+    let (x, y) = find(&app, "Shared folders");
+    click(&mut app, x, y);
     let (x, y) = find(&app, "Work docs");
     click(&mut app, x, y);
-    assert_eq!(app.focus, Focus::Roots);
+    assert_eq!(app.selected_root, 0);
+    let (x, y) = find(&app, "Chats");
+    click(&mut app, x, y);
+    assert_eq!(app.view, View::Chat);
     // The composer, then a row of the slash list.
-    let (x, y) = find(&app, "Reply…");
+    let (x, y) = find(&app, "Reply to Chat with Work");
     click(&mut app, x, y);
     assert_eq!(app.focus, Focus::Composer);
     type_text(&mut app, "/lo");
     let (x, y) = find(&app, "/log");
     click(&mut app, x, y);
-    assert_eq!(app.view, View::Log);
+    assert_eq!(app.view, View::Settings(Page::Activity));
 
     // The wheel scrolls the conversation, and links open.
     let mut app = self::app();

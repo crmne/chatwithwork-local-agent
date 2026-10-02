@@ -1,7 +1,6 @@
- Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
-                               │────────────────────────────────────────────────────────────────────
- CHATS                         │
- Waiting for your OK           │  ╭──────────────────────────────────────────────────────────────╮
+ ◆ Chat with Work              │
+                               │
+  Waiting for your OK          │  ╭──────────────────────────────────────────────────────────────╮
                                │  │ ● Waiting for your OK                                        │
                                │  │ Allow chats for this computer in Chat with Work, under       │
                                │  │ Settings, Computers:                                         │
@@ -20,11 +19,12 @@
                                │
                                │
                                │
- ━━ ROOTS                    1 │
- ▌● Work docs                  │
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Waiting for your OK in Chat with Work                        │
-   answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- ↑↓ select   a add folder   d remove   l audit log   p pause   o allow chats   ? help   q quit
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │ ╭────────────────────────────────────────────────────────────────╮
+                               │ │ ❯ Waiting for your OK in Chat with Work                        │
+  Settings                     │ ╰────────────────────────────────────────────────────────────────╯

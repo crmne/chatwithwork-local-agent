@@ -1,14 +1,14 @@
- ◆ Chat with Work              │  Shared folders
+ ◆ Chat with Work              │  General
                                │
-  ← Chats                  esc │  Chat with Work can search and read the files in these folders,
-                               │  and nothing else on this computer.
-  SETTINGS                     │
- ▌ Shared folders              │  ▌● Work docs                               Indexed · 1,532 files
-   Activity                    │     /home/carmine/Work docs · work-docs:
-   Account                     │   ⠋ Projects                                       Indexing · 214
-   General                     │     /home/carmine/Projects · projects:
+  ← Chats                  esc │  The Local Agent that answers Chat with Work in the background.
                                │
-                               │  ↑↓ select   a share a folder   r rename   d stop sharing
+  SETTINGS                     │  Local Agent     ● Running · cww 0.1.0
+   Shared folders              │  Sharing         Answering Chat with Work
+   Activity                    │  Configuration   /srv/cww/config.toml
+   Account                     │  Activity log    /srv/cww/audit.jsonl
+ ▌ General                     │
+                               │  p pause sharing   r look again
+                               │
                                │
                                │
                                │

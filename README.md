@@ -125,24 +125,26 @@ The CLI, the terminal UI and the settings app talk to the daemon over a local so
 cww        # or cww tui
 ```
 
-Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the left: your chats by day, your shared folders with their index state, and the daemon's connection. On the right: the open chat with a composer under it, the latest request from Chat with Work as it happens, and the full audit log, colour-coded by decision.
+Run in a terminal, `cww` opens a terminal UI laid out like the desktop app's chat page. On the left: New chat, the search, and your chats by day, with your name at the foot. On the right: the open chat and the composer, with the model on its edge. Your name, `,` or `/settings` open the settings, with the same pages as the desktop app: Shared folders (with their index state), Activity (every request from Chat with Work, colour-coded by decision), Account (the pairing, the connection and whether chats are allowed here) and General (the daemon, pausing, and where its files are). Nothing else stays on screen: a single word at the top right says when something needs you (the daemon stopped, offline, connecting, paused, not paired, revoked, or the open chat not live), and clicking it opens the page that helps.
 
 | Key | Does |
 |---|---|
-| `c` | Pair this computer: shows the code, opens the approval page in your browser, and waits |
-| `s` | Start the daemon in the background (`cww daemon install`) when it isn't running |
-| `a` | Share a folder (prefilled with your Documents folder if it isn't shared) |
-| `d`, `x`, `Delete` | Stop sharing the selected folder, after asking |
-| `↑` `↓`, `j` `k` | Select a folder, or scroll the audit log |
-| `p` | Pause or resume answering Chat with Work |
-| `Tab` | Move between the chats, the composer and the folders |
+| `Tab` | Move between the chats and the composer |
 | `↑` `↓`, `j` `k`, `Enter` | Select and open a chat |
 | `n` | New chat |
 | `/` | Search chats |
 | `e` | Show every tool step under its activity line |
 | `o` | Open the chat in the browser, or ask to use your chats here |
-| `l` | Switch between the chat view and the audit log (`PgUp`, `PgDn`, `End` to follow) |
-| `r` | Look for the daemon again |
+| `,` | Open the settings, or go back to the chats |
+| `Tab`, `←` `→`, `1` to `4` | In the settings: the next, previous or numbered page |
+| `l` | The activity log (`PgUp`, `PgDn`, `End` to follow) |
+| `a` | Share a folder (prefilled with your Documents folder if it isn't shared) |
+| `r` | In Shared folders, rename the selected folder; elsewhere, look for the daemon again |
+| `d`, `x`, `Delete` | In Shared folders, stop sharing the selected folder, after asking; in Account, disconnect this computer |
+| `p` | Pause or resume answering Chat with Work |
+| `c` | Pair this computer: shows the code, opens the approval page in your browser, and waits |
+| `s` | Start the daemon in the background (`cww daemon install`) when it isn't running |
+| `Esc` | Back to the chats |
 | `?` | All the keys and commands |
 | `q` | Quit |
 | `Ctrl-C` | Clear what's typed; with nothing to clear, twice in a row quits |
@@ -174,15 +176,16 @@ Typing `/` lists the commands and narrows them as you type; `↑` `↓` select, 
 | `/retry`, `/branch`, `/rename [title]`, `/delete` | Answer the last question again, continue the chat in a new one, rename it, or delete it (after asking), where Chat with Work allows it |
 | `/share-chat`, `/unshare-chat` | Make a public link to the chat and copy it, or stop sharing it |
 | `/steps` | Show or hide every tool step |
-| `/folders`, `/share [path]`, `/unshare [folder]` | Go to your shared folders, share one, or stop sharing one (after asking) |
+| `/settings` | Open the settings |
+| `/folders`, `/share [path]`, `/unshare [folder]` | Show your shared folders, share one, or stop sharing one (after asking) |
 | `/pause`, `/resume-sharing` | Refuse Chat with Work's requests for now, or answer them again |
-| `/log`, `/status` | Show the audit log, or say how this computer is connected |
-| `/login`, `/logout` | Pair this computer, or forget its pairing (after asking) |
+| `/log`, `/status` | Show the activity log, or say how this computer is connected |
+| `/login`, `/logout` | Pair this computer, or disconnect it by forgetting its pairing (after asking) |
 | `/help`, `/exit` (`/quit`) | All the keys and commands; quit |
 
 When an answer stops at a change that needs your approval (posting to Slack, creating an issue), the chat shows what it will do and asks: `↑` `↓` and `Enter`, or `y` to approve, `a` to approve it for the rest of the chat where that's allowed, `n` to deny, or deny and say what to do instead. When a connected service asks you something while its tool runs, the chat shows its question as a small form: `↑` `↓` move between the fields, `←` `→` go through a field's choices, `Enter` types a value, then Send or Decline; a service that needs you to open a page offers to open it in the browser. In a project chat, it says whose answer the chat waits for.
 
-The mouse works too: click a chat, a folder, a tab, the composer, a command, a picker's row, an answer to an approval, or a link in an answer; the wheel scrolls the chat, the lists and the audit log. While the TUI has the mouse, hold `Shift` (or your terminal's own modifier, such as `Option` in iTerm2) and drag to select text, or set `[tui] mouse = false` in `config.toml` to leave the mouse to the terminal.
+The mouse works too: click a chat, the search, your name, a settings page, a folder, the composer, a command, a picker's row, an answer to an approval, or a link in an answer; the wheel scrolls the chat, the lists and the activity log. While the TUI has the mouse, hold `Shift` (or your terminal's own modifier, such as `Option` in iTerm2) and drag to select text, or set `[tui] mouse = false` in `config.toml` to leave the mouse to the terminal.
 
 Questions you ask, and the commands you run, are kept in `~/.local/state/cww/history` (only readable by you, the newest 500) so `↑` recalls them in the next run. Files you attach are read by `cww` itself, not the sandboxed daemon, and uploaded through the daemon only when you attach them; the clipboard gets text through your terminal (OSC 52), so it also works over SSH where the terminal allows it.
 
