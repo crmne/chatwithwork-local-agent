@@ -24,7 +24,7 @@
                                │    Decline
                                │    Only Notion sees your answer. Never enter a password here;
                                │    sign in on the service's own page instead.
-  PROJECTS                     │
+  PROJECTS                all  │
    Falcon                      │ ╭────────────────────────────────────────────────────────────────╮
                                │ │ ❯ 30                                                           │
   C  Carmine                   │ ╰────────────────────────────────────────────────────────────────╯

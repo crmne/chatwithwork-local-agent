@@ -85,10 +85,16 @@ fn sidebar(
         .style(theme.sunken());
     let inner = pad(block.inner(area), 1, 0);
     frame.render_widget(block, area);
+    let low = app
+        .chat
+        .list
+        .credits
+        .as_ref()
+        .filter(|c| c.running_low && app.chat.ready());
     let [brand, body, foot] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(0),
-        Constraint::Length(2),
+        Constraint::Length(if low.is_some() { 3 } else { 2 }),
     ])
     .areas(inner);
     let name = Line::from(vec![
@@ -102,6 +108,26 @@ fn sidebar(
         View::Settings(page) => pages::nav(frame, body, page, theme, hits),
     }
     account_line(frame, row(foot, 1), app, theme, hits);
+    // The meter under the name, as the web shows it when credits run low.
+    if let Some(credits) = low {
+        let text = format!(" {}", credits_left(credits));
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                ellipsize(&text, foot.width as usize),
+                theme.signal_ink(Signal::Attention),
+            )),
+            row(foot, 2),
+        );
+    }
+}
+
+/// "1,250 of 5,000 credits left".
+pub(super) fn credits_left(credits: &super::chat::Credits) -> String {
+    format!(
+        "{} of {} credits left",
+        thousands(credits.left),
+        thousands(credits.capacity)
+    )
 }
 
 /// Your name at the foot, as the desktop app has it: it opens the settings.
@@ -252,7 +278,11 @@ fn chats_section(
     }
     let mut group = "";
     for (i, chat) in pane.visible().iter().enumerate() {
-        let this = day_group(&chat.updated_at, now, app);
+        let this = if pane.pinned(chat) {
+            "PINNED"
+        } else {
+            day_group(&chat.updated_at, now, app)
+        };
         if this != group {
             if !group.is_empty() {
                 rows.push(Line::raw(""));
@@ -301,19 +331,27 @@ fn projects_section(
     hits: &mut Hits,
 ) {
     let pane = &app.chat;
-    frame.render_widget(
-        Paragraph::new(Line::styled(" PROJECTS", theme.micro())),
-        row(area, 1),
-    );
+    let mut label = vec![Span::styled(" PROJECTS", theme.micro())];
+    if pane.list.links.projects.is_some() {
+        label = spread(label, vec![Span::styled("all ", theme.faint())], area.width).spans;
+        hits.add(
+            Rect {
+                x: area.right().saturating_sub(4),
+                width: 4.min(area.width),
+                ..row(area, 1)
+            },
+            Hit::AllProjects,
+        );
+    }
+    frame.render_widget(Paragraph::new(Line::from(label)), row(area, 1));
     let rows = below(area, 2);
-    let first = pane.side_items().len() - pane.list.projects.len();
+    let projects = pane.projects();
+    let first = pane.side_items().len() - projects.len();
     let height = rows.height as usize;
     let selected = pane.selected.checked_sub(first);
     let start = selected.map_or(0, |s| (s + 1).saturating_sub(height));
     let width = area.width as usize;
-    for (slot, (i, project)) in pane
-        .list
-        .projects
+    for (slot, (i, project)) in projects
         .iter()
         .enumerate()
         .skip(start)

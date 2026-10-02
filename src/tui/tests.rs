@@ -999,6 +999,7 @@ fn chat_list() -> ChatList {
     launch.project = Some(Project {
         id: 3,
         name: "Falcon".into(),
+        ..Project::default()
     });
     launch.mine = false;
     ChatList {
@@ -1012,6 +1013,7 @@ fn chat_list() -> ChatList {
         projects: vec![Project {
             id: 3,
             name: "Falcon".into(),
+            ..Project::default()
         }],
         account: Named {
             name: "Plenty".into(),
@@ -1020,6 +1022,27 @@ fn chat_list() -> ChatList {
             name: "Carmine".into(),
         },
         locked_reason: None,
+        credits: Some(super::chat::Credits {
+            left: 1250,
+            capacity: 5000,
+            running_low: false,
+        }),
+        links: super::chat::Links {
+            projects: Some("https://chatwithwork.com/482139075/projects".into()),
+            settings: ["Account", "Usage", "Connectors"]
+                .iter()
+                .map(|label| super::chat::SettingsLink {
+                    tab: label.to_lowercase(),
+                    label: label.to_string(),
+                    url: format!(
+                        "https://chatwithwork.com/482139075/settings?tab={}",
+                        label.to_lowercase()
+                    ),
+                    ..super::chat::SettingsLink::default()
+                })
+                .collect(),
+            ..super::chat::Links::default()
+        },
         ..ChatList::default()
     }
 }
@@ -2712,10 +2735,12 @@ fn the_list_stays_current_over_the_daemons_socket() {
         Project {
             id: 3,
             name: "Falcon".into(),
+            ..Project::default()
         },
         Project {
             id: 9,
             name: "Hiring".into(),
+            ..Project::default()
         },
     ]))));
     assert_eq!(app.chat.list.projects.len(), 2);
@@ -2764,4 +2789,79 @@ fn an_older_daemon_or_server_keeps_reading_the_list() {
         result: Ok(summary(60, "Hi", "2026-09-25T08:20:00Z")),
     }));
     assert!(effects.contains(&Effect::Chat(ChatCommand::List)));
+}
+
+#[test]
+fn snapshot_pinned_chats_and_projects_come_first() {
+    let mut app = app();
+    running(
+        &mut app,
+        status(
+            "connected",
+            vec![root("work-docs", "Work docs", "ready", 1532)],
+        ),
+    );
+    let mut list = chat_list();
+    list.projects.insert(
+        0,
+        Project {
+            id: 1,
+            name: "HQ".into(),
+            hq: true,
+            ..Project::default()
+        },
+    );
+    list.pins.chats = vec![31, 38];
+    list.pins.projects = vec![3];
+    list.credits.as_mut().unwrap().left = 400;
+    list.credits.as_mut().unwrap().running_low = true;
+    app.update(Msg::Chat(ChatMsg::Listed(Ok(list))));
+    let order: Vec<u64> = app.chat.visible().iter().map(|c| c.number).collect();
+    assert_eq!(
+        order,
+        [31, 38, 42, 40, 27],
+        "pinned in pin order, then newest"
+    );
+    let projects: Vec<u64> = app.chat.projects().iter().map(|p| p.id).collect();
+    assert_eq!(projects, [3, 1]);
+    assert_snapshot("chat_pinned", &app);
+
+    // The projects' page on the web, from the sidebar.
+    let (x, y) = find(&app, "all");
+    assert_eq!(
+        click(&mut app, x, y),
+        vec![Effect::Chat(ChatCommand::OpenUrl(
+            "https://chatwithwork.com/482139075/projects".into()
+        ))]
+    );
+}
+
+#[test]
+fn the_webs_settings_open_from_the_account_page() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(char(','));
+    app.update(char('3'));
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("1,250 of 5,000 credits left"), "{screen}");
+    assert!(screen.contains("Organization    Plenty"), "{screen}");
+    app.update(key(KeyCode::Down));
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Chat(ChatCommand::OpenUrl(
+            "https://chatwithwork.com/482139075/settings?tab=usage".into()
+        ))]
+    );
+    let (x, y) = find(&app, "Connectors");
+    assert_eq!(
+        click(&mut app, x, y),
+        vec![Effect::Chat(ChatCommand::OpenUrl(
+            "https://chatwithwork.com/482139075/settings?tab=connectors".into()
+        ))]
+    );
+    // Only pages of the paired server open.
+    app.chat.list.links.settings[0].url = "https://evil.example/settings".into();
+    app.update(key(KeyCode::Up));
+    app.update(key(KeyCode::Up));
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
 }

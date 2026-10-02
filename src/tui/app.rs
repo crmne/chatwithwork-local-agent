@@ -805,6 +805,10 @@ pub enum Hit {
     Root(usize),
     /// A project in the sidebar: its chats, and a new chat in it.
     Project(u64),
+    /// A page of the web's settings, by its place in the list's links.
+    Web(usize),
+    /// The web's page of every project.
+    AllProjects,
     Composer,
     /// A row of the slash command list.
     Menu(usize),
@@ -844,8 +848,31 @@ impl ChatPane {
         self.access == Access::Ready
     }
 
-    /// The chats the search and the project picked leave, newest first.
+    /// The chats the search and the project picked leave: the pinned ones
+    /// first, in pin order, as the web keeps them apart, then the rest
+    /// newest first.
     pub fn visible(&self) -> Vec<&ChatSummary> {
+        let mut chats = self.matching();
+        let pins = &self.list.pins.chats;
+        let pinned = |c: &ChatSummary| pins.iter().position(|n| *n == c.number);
+        chats.sort_by_key(|c| pinned(c).unwrap_or(usize::MAX));
+        chats
+    }
+
+    pub fn pinned(&self, chat: &ChatSummary) -> bool {
+        self.list.pins.chats.contains(&chat.number)
+    }
+
+    /// The projects, pinned ones first, as the sidebar lists them.
+    pub fn projects(&self) -> Vec<&Project> {
+        let mut projects: Vec<&Project> = self.list.projects.iter().collect();
+        let pins = &self.list.pins.projects;
+        projects.sort_by_key(|p| pins.iter().position(|id| *id == p.id).unwrap_or(usize::MAX));
+        projects
+    }
+
+    /// The chats the search and the project picked leave, newest first.
+    fn matching(&self) -> Vec<&ChatSummary> {
         let query = self
             .search
             .as_deref()
@@ -878,7 +905,7 @@ impl ChatPane {
         let mut items = vec![SideItem::NewChat];
         items.extend(self.visible().iter().map(|c| SideItem::Chat(c.number)));
         if self.search.is_none() {
-            items.extend(self.list.projects.iter().map(|p| SideItem::Project(p.id)));
+            items.extend(self.projects().iter().map(|p| SideItem::Project(p.id)));
         }
         items
     }
@@ -1134,6 +1161,8 @@ pub struct App {
     pub selected_root: usize,
     /// Log lines scrolled up from the newest.
     pub log_scroll: usize,
+    /// The selected page of the web's settings, on the Account page.
+    pub selected_link: usize,
     pub modal: Option<Modal>,
     pub notice: Option<Notice>,
     pub pairing: Option<Pairing>,
@@ -1159,6 +1188,7 @@ impl App {
             focus: Focus::Chats,
             selected_root: 0,
             log_scroll: 0,
+            selected_link: 0,
             modal: None,
             notice: None,
             pairing: None,
@@ -1416,6 +1446,14 @@ impl App {
             (Page::Account, KeyCode::Char('d')) if self.daemon.server().is_some() => {
                 self.modal = Some(Modal::ConfirmLogout);
             }
+            (Page::Account, KeyCode::Up | KeyCode::Char('k')) => {
+                self.selected_link = self.selected_link.saturating_sub(1);
+            }
+            (Page::Account, KeyCode::Down | KeyCode::Char('j')) => {
+                let len = self.chat.list.links.settings.len();
+                self.selected_link = (self.selected_link + 1).min(len.saturating_sub(1));
+            }
+            (Page::Account, KeyCode::Enter) => return Some(self.open_web(self.selected_link)),
             _ => return None,
         }
         Some(Vec::new())
@@ -2689,6 +2727,11 @@ impl App {
                 self.chat.search = None;
                 return self.pick_filter(id);
             }
+            Hit::Web(i) => {
+                self.selected_link = i;
+                return self.open_web(i);
+            }
+            Hit::AllProjects => return self.open_page(self.chat.list.links.projects.clone()),
             Hit::Root(i) => self.selected_root = i,
             Hit::Composer if self.chat.ready() => self.focus = Focus::Composer,
             Hit::Menu(i) => {
@@ -2889,6 +2932,26 @@ impl App {
                 .map(|c| c.url.clone()),
             _ => None,
         };
+        match url.filter(|url| self.on_server(url)) {
+            Some(url) => vec![Effect::Chat(ChatCommand::OpenUrl(url))],
+            None => Vec::new(),
+        }
+    }
+
+    /// A page of the web's settings, in the browser.
+    fn open_web(&mut self, index: usize) -> Vec<Effect> {
+        let url = self
+            .chat
+            .list
+            .links
+            .settings
+            .get(index)
+            .map(|l| l.url.clone());
+        self.open_page(url)
+    }
+
+    /// A page of the paired server, in the browser; any other is ignored.
+    fn open_page(&self, url: Option<String>) -> Vec<Effect> {
         match url.filter(|url| self.on_server(url)) {
             Some(url) => vec![Effect::Chat(ChatCommand::OpenUrl(url))],
             None => Vec::new(),

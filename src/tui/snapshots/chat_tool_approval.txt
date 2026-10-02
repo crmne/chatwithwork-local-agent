@@ -24,7 +24,7 @@
                                │    3. Deny
                                │    4. Deny, and say what to do instead
                                │
-  PROJECTS                     │
+  PROJECTS                all  │
    Falcon                      │ ╭────────────────────────────────────────────────────────────────╮
                                │ │ ❯ Approve or deny above: ↑ ↓ and enter, or y and n             │
   C  Carmine                   │ ╰────────────────────────────────────────────────────────────────╯

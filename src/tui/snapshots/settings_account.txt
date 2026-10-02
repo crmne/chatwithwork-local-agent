@@ -6,16 +6,16 @@
    Shared folders              │  Connection      ● Online since 08:14
    Activity                    │  Device ID       42
  ▌ Account                     │  Chats here      Allowed
-   General                     │
+   General                     │  Organization    Plenty
+                               │  Credits         1,250 of 5,000 credits left
+                               │
                                │  d disconnect this computer
                                │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
-                               │
+                               │  ON THE WEB
+                               │  ▌Account         chatwithwork.com/…/settings?tab=account
+                               │   Usage           chatwithwork.com/…/settings?tab=usage
+                               │   Connectors      chatwithwork.com/…/settings?tab=connectors
+                               │  ↑↓ select   enter open in the browser
                                │
                                │
                                │

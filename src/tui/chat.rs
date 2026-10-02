@@ -18,6 +18,16 @@ use crate::control::{Client, Closer, ControlRequest};
 pub struct Project {
     pub id: u64,
     pub name: String,
+    /// The Phosphor icon the web shows for it: `buildings` for HQ,
+    /// `users-three` for All-Access, `folder-simple` for invite-only. Only
+    /// in the list's `projects`, not on a chat's `project`.
+    pub icon: Option<String>,
+    /// The organization's HQ project.
+    pub hq: bool,
+    /// Everyone in the organization is in it.
+    pub all_access: bool,
+    /// Its page on the web.
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -157,6 +167,43 @@ pub struct ChatList {
     pub credits: Option<Credits>,
     /// Why a new question can't be asked right now, as the composer says it.
     pub locked_reason: Option<String>,
+    /// What the person pinned on the web, in pin order. Not streamed: as
+    /// current as the last read.
+    pub pins: Pins,
+    /// The web's pages the sidebar and the settings open in the browser.
+    pub links: Links,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Pins {
+    /// Project ids.
+    pub projects: Vec<u64>,
+    /// Chat numbers.
+    pub chats: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Links {
+    pub new_chat: Option<String>,
+    pub chats: Option<String>,
+    pub projects: Option<String>,
+    /// The tabs of Settings on the web, in its order, only those the
+    /// person's role opens.
+    pub settings: Vec<SettingsLink>,
+}
+
+/// A tab of Settings on the web.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SettingsLink {
+    /// `account`, `people`, `usage`, `models`, `connectors`, ...
+    pub tab: String,
+    pub label: String,
+    /// A Phosphor icon name.
+    pub icon: Option<String>,
+    pub url: String,
 }
 
 /// The meter under the person's name: the organization's balance.
@@ -1066,6 +1113,49 @@ mod tests {
     }
 
     #[test]
+    fn parses_what_the_web_shows_around_the_list() {
+        let list: ChatList = parse(json!({
+            "account": { "name": "Plenty UG", "logo": null },
+            "user": { "name": "Carmine Paolino", "avatar": null },
+            "credits": { "left": 1250, "capacity": 5000, "running_low": false },
+            "locked_reason": null,
+            "chats": [{ "number": 42, "title": "Q3 budget", "state": "idle", "project": { "id": 7, "name": "Launch" } }],
+            "projects": [
+                { "id": 3, "name": "HQ", "icon": "buildings", "hq": true, "all_access": false, "url": "https://x/projects/1" },
+                { "id": 7, "name": "Launch", "icon": "folder-simple", "hq": false, "all_access": false, "url": "https://x/projects/4" }
+            ],
+            "pins": { "projects": [7], "chats": [42, 17] },
+            "links": {
+                "new_chat": "https://x/chats/new",
+                "chats": "https://x/chats",
+                "projects": "https://x/projects",
+                "settings": [
+                    { "tab": "account", "label": "Account", "icon": "user-circle", "url": "https://x/settings?tab=account" },
+                    { "tab": "usage", "label": "Usage", "icon": "chart-bar", "url": "https://x/settings?tab=usage" }
+                ]
+            }
+        }))
+        .unwrap();
+        assert_eq!(list.user.name, "Carmine Paolino");
+        assert_eq!(list.credits.as_ref().unwrap().capacity, 5000);
+        assert!(list.projects[0].hq);
+        assert_eq!(list.projects[1].icon.as_deref(), Some("folder-simple"));
+        assert_eq!(list.chats[0].project.as_ref().unwrap().icon, None);
+        assert_eq!(list.pins.chats, [42, 17]);
+        assert_eq!(list.pins.projects, [7]);
+        assert_eq!(list.links.settings[1].label, "Usage");
+        assert_eq!(list.links.projects.as_deref(), Some("https://x/projects"));
+
+        // An older server's list has none of it.
+        let old: ChatList =
+            parse(json!({ "chats": [], "projects": [{ "id": 1, "name": "P" }] })).unwrap();
+        assert_eq!(
+            (old.credits, old.pins, old.links),
+            (None, Pins::default(), Links::default())
+        );
+    }
+
+    #[test]
     fn reads_the_lists_live_changes() {
         let read =
             |update: Value| ListLive::from_event(&json!({ "event": "chats", "update": update }));
@@ -1087,6 +1177,8 @@ mod tests {
             Some(ListLive::Projects(vec![Project {
                 id: 7,
                 name: "Launch".into(),
+                icon: Some("folder-simple".into()),
+                ..Project::default()
             }]))
         );
         let Some(ListLive::Account(account)) = read(json!({

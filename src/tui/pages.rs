@@ -12,9 +12,9 @@ use time::OffsetDateTime;
 use super::app::{Access, App, Daemon, Hit, Hits, Page, RootState, parse_ts};
 use super::theme::{Signal, Theme};
 use super::ui::{
-    COLUMN, Card, CardLine, DOT, RING, below, card_lines, clock, command_line, ellipsize,
-    ellipsize_start, files, heading, host, key_hints, log_view, notice_lines, pad, pairing_card,
-    render_card, row, spinner, spread, thousands, wrap,
+    COLUMN, Card, CardLine, DOT, RING, below, card_lines, clock, command_line, credits_left,
+    ellipsize, ellipsize_start, files, heading, host, key_hints, log_view, notice_lines, pad,
+    pairing_card, render_card, row, spinner, spread, thousands, wrap,
 };
 
 /// The width of a row's label, as in `Device ID      42`.
@@ -113,7 +113,7 @@ pub fn render(
             hits.add(body, Hit::Log);
             log_view(frame, body, app, theme);
         }
-        Page::Account => account(frame, body, app, theme),
+        Page::Account => account(frame, body, app, theme, hits),
         Page::General => general(frame, body, app, theme),
     }
 }
@@ -292,7 +292,7 @@ fn root_state(
 
 // ----------------------------------------------------------------- account
 
-fn account(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn account(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, hits: &mut Hits) {
     if let Some(card) = pairing_card(app) {
         cards(frame, area, vec![card], theme);
         return;
@@ -412,6 +412,31 @@ fn account(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         )],
         theme,
     ));
+    let list = &app.chat.list;
+    if app.chat.ready() {
+        if !list.account.name.is_empty() {
+            lines.push(field(
+                "Organization",
+                vec![Span::styled(list.account.name.clone(), theme.ink())],
+                theme,
+            ));
+        }
+        if let Some(credits) = &list.credits {
+            let signal = if credits.running_low {
+                Signal::Attention
+            } else {
+                Signal::Idle
+            };
+            lines.push(field(
+                "Credits",
+                vec![Span::styled(
+                    credits_left(credits),
+                    theme.signal_ink(signal),
+                )],
+                theme,
+            ));
+        }
+    }
     lines.push(Line::raw(""));
     if revoked {
         lines.extend(
@@ -433,7 +458,55 @@ fn account(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
     keys.push(("d", "disconnect this computer"));
     lines.push(key_hints(&keys, theme));
+    // The web's own settings, to open in the browser.
+    let links = &list.links.settings;
+    if app.chat.ready() && !links.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("ON THE WEB", theme.micro()));
+        let first = lines.len() as u16;
+        let selected = app.selected_link.min(links.len() - 1);
+        for (i, link) in links.iter().enumerate() {
+            let here = i == selected;
+            let mut line = Line::from(vec![
+                if here {
+                    Span::styled("▌", theme.ink())
+                } else {
+                    Span::raw(" ")
+                },
+                Span::styled(format!("{:<LABEL$}", link.label), theme.ink()),
+                Span::styled(host_path(&link.url), theme.faint()),
+            ]);
+            if here {
+                line = line.patch_style(theme.selected());
+            }
+            lines.push(line);
+            let at = first + i as u16;
+            if at < area.height {
+                hits.add(
+                    Rect::new(area.x, area.y + at, area.width.min(COLUMN), 1),
+                    Hit::Web(i),
+                );
+            }
+        }
+        lines.push(key_hints(
+            &[("↑↓", "select"), ("enter", "open in the browser")],
+            theme,
+        ));
+    }
     draw(frame, area, lines);
+}
+
+/// `chatwithwork.com/…/settings?tab=usage`, shorter: the path after the
+/// organization.
+fn host_path(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    match rest.split_once('/') {
+        Some((host, path)) => {
+            let path = path.split_once('/').map_or(path, |(_, p)| p);
+            format!("{host}/…/{path}")
+        }
+        None => rest.to_string(),
+    }
 }
 
 /// `host:port` of a proxy URL, without the scheme or the user name.

@@ -24,7 +24,7 @@
                                │
                                │ ╭────────────────────────────────────────────────────────────────╮
                                │ │ ❯ Model:                                                       │
-  PROJECTS                     │ │ ▌Gemini 3.8 Flash  current · About 3 credits per answer        │
+  PROJECTS                all  │ │ ▌Gemini 3.8 Flash  current · About 3 credits per answer        │
    Falcon                      │ │  GPT-6 Sol · About 12 credits per answer                       │
                                │ │  Claude Opus · You're out of credits. Add credits in Settings… │
   C  Carmine                   │ ╰───────────────────────────────────────────── Gemini 3.8 Flash ─╯

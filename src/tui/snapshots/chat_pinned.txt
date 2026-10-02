@@ -1,17 +1,17 @@
  ◆ Chat with Work              │  New chat
                                │
-  + New chat                   │  Ask anything.
+ ▌+ New chat                   │  Ask anything.
   / Search chats               │  Chat with Work searches your shared folders and the services you
                                │  connected, and the chat stays in Chat with Work on the web too.
+  PINNED                       │
+   Vendor contracts            │
+   Onboarding checklist        │
+                               │
   TODAY                        │
    Q3 budget                   │
    Launch plan for Falcon      │
                                │
-  YESTERDAY                    │
-   Onboarding checklist        │
-                               │
   EARLIER                      │
-   Vendor contracts            │
    Hiring plan                 │
                                │
                                │
@@ -21,10 +21,10 @@
                                │
                                │
                                │
+                               │
+  PROJECTS                all  │
+   Falcon                      │
+   HQ                          │
                                │ ╭────────────────────────────────────────────────────────────────╮
-                               │ │ ❯ one                                                          │
-                               │ │   two                                                          │
-  PROJECTS                all  │ │   three                                                        │
-   Falcon                      │ │   four                                                         │
-                               │ │   five                                                         │
-  C  Carmine                   │ ╰────────────────────────────────────────────────────────────────╯
+  C  Carmine                   │ │ ❯ Ask anything…                                                │
+  400 of 5,000 credits left    │ ╰────────────────────────────────────────────────────────────────╯

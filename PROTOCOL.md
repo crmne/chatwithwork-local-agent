@@ -520,7 +520,7 @@ These are enforced by the daemon whatever the server does. The defaults can be c
 
 | Request | Answers |
 |---|---|
-| `GET /local_agent/chats` | `chats` (newest first: `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`, `model`, `can`), `projects`, `account`, `user`, `locked_reason` |
+| `GET /local_agent/chats` | `chats` (newest first: `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`, `model`, `can`), `projects` (`id`, `name`, `icon`, `hq`, `all_access`, `url`), `account`, `user`, `credits` (`left`, `capacity`, `running_low`), `locked_reason`, `pins` (`projects`, `chats`), `links` (`new_chat`, `chats`, `projects`, `settings`: `tab`, `label`, `icon`, `url`) |
 | `GET /local_agent/chats/<number>` | `chat`, `locked_reason`, `entries` (`user` with `attachments`, `activity` with title, details, `pending`, steps with file names and `waiting`, `assistant` with Markdown and `sources`, `notice`), `approvals`, and `questions` |
 | `GET /local_agent/models` | `{"default_model_id", "models": [{"id","name","provider","description","rate","selectable","reason"}]}` |
 | `POST /local_agent/chats` `{"content":…}` | `201 {"chat":…}`: a new chat with its first question |
