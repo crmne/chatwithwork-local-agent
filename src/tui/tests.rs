@@ -872,11 +872,13 @@ fn budget_transcript(state: &str) -> Transcript {
                         summary: "Searched Drive for “q3 budget”".into(),
                         pending: false,
                         files: vec!["Q3 plan.pdf".into(), "Budget 2026.xlsx".into()],
+                        app: None,
                     },
                     Step {
                         summary: "Read plans/q3.md".into(),
                         pending: false,
                         files: vec![],
+                        app: None,
                     },
                 ],
             },
@@ -952,6 +954,7 @@ fn snapshot_chat_streaming() {
             summary: "Searching for “q4 budget”…".into(),
             pending: true,
             files: vec![],
+            app: None,
         }],
     });
     app.update(Msg::Chat(ChatMsg::Shown {

@@ -74,6 +74,19 @@ pub struct Step {
     pub pending: bool,
     /// Names of the files it found, for the owner's own steps.
     pub files: Vec<String>,
+    /// The tool's own view (an MCP App), when the step has one. The
+    /// server doesn't send this yet; the desktop app keeps a place for it.
+    pub app: Option<StepApp>,
+}
+
+/// A tool's view (MCP Apps): the service it belongs to and the `ui://`
+/// resource to show.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct StepApp {
+    /// "Slack", as the step's service is named.
+    pub service: String,
+    pub uri: String,
 }
 
 /// One thing in a conversation, as the web shows it.

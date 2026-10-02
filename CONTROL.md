@@ -250,7 +250,7 @@ The server's list, as it sent it: `chats` (newest first, each with `number`, `ti
 {"cmd": "chat", "chat": "42"}
 ```
 
-One chat: `chat`, `locked_reason`, and `entries`, each with a `kind`: `user`, `activity` (a title such as "Searched Drive and Slack", `details`, `pending`, and `steps` with file names), `assistant` (Markdown `content` and `sources`), or `notice` (a failure or running out of credits). Chat numbers are digits only.
+One chat: `chat`, `locked_reason`, and `entries`, each with a `kind`: `user`, `activity` (a title such as "Searched Drive and Slack", `details`, `pending`, and `steps` with file names and, reserved for a tool's own view, an optional `app` with `service` and `uri` that the server doesn't send yet), `assistant` (Markdown `content` and `sources`), or `notice` (a failure or running out of credits). Chat numbers are digits only.
 
 ```json
 {"cmd": "chat_send", "text": "And Q4?", "chat": "42"}
