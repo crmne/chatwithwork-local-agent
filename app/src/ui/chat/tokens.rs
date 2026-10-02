@@ -116,6 +116,50 @@ impl Palette {
         self.blue
     }
 
+    pub fn negative_ink(&self) -> Color32 {
+        self.orange_ink
+    }
+
+    pub fn positive(&self) -> Color32 {
+        self.green
+    }
+
+    /// `--attention-wash`: a decision waiting for someone, as a card.
+    pub fn attention_wash(&self) -> Color32 {
+        mix(
+            self.attention,
+            self.surface,
+            if self.dark { 0.14 } else { 0.16 },
+        )
+    }
+
+    /// `--attention-edge`: that card's ring.
+    pub fn attention_edge(&self) -> Color32 {
+        mix(self.attention, self.line, 0.42)
+    }
+
+    /// `--attention-paper`: what will be written, set inside the card.
+    pub fn attention_paper(&self) -> Color32 {
+        mix(
+            self.attention,
+            if self.dark {
+                self.canvas_sunken
+            } else {
+                self.surface
+            },
+            0.03,
+        )
+    }
+
+    /// The modal backdrop: `light-dark(rgb(10 13 20 / 32%), rgb(0 0 0 / 62%))`.
+    pub fn backdrop(&self) -> Color32 {
+        if self.dark {
+            Color32::from_black_alpha(158)
+        } else {
+            Color32::from_rgba_unmultiplied(10, 13, 20, 82)
+        }
+    }
+
     /// `color-mix(in oklab, var(--ink) N%, transparent)`, the hover wash.
     pub fn ink_wash(&self, percent: f32) -> Color32 {
         alpha(self.ink, percent / 100.0)

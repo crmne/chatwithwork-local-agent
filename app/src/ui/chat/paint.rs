@@ -118,6 +118,17 @@ pub fn glow(
     if opacity <= 0.0 {
         return;
     }
+    painter.add(glow_shape(rect, radius, blur, opacity, color));
+}
+
+/// [`glow`] as a shape, to place under something drawn first.
+pub fn glow_shape(
+    rect: Rect,
+    radius: f32,
+    blur: f32,
+    opacity: f32,
+    color: impl Fn(Pos2) -> Color32,
+) -> Shape {
     // CSS blur(r) is a Gaussian with a standard deviation of r.
     let sigma = blur.max(1.0);
     let coverage = |d: f32| 0.5 * erfc(d / (sigma * std::f32::consts::SQRT_2));
@@ -162,7 +173,23 @@ pub fn glow(
     for k in 0..n {
         mesh.add_triangle(base, k as u32, ((k + 1) % n) as u32);
     }
-    painter.add(Shape::mesh(mesh));
+    Shape::mesh(mesh)
+}
+
+/// A CSS `box-shadow` without inset, as a shape.
+pub fn drop_shadow_shape(
+    rect: Rect,
+    radius: f32,
+    offset: Vec2,
+    blur: f32,
+    spread: f32,
+    color: Color32,
+) -> Shape {
+    let rect = rect.translate(offset).expand(spread);
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return Shape::Noop;
+    }
+    glow_shape(rect, (radius + spread).max(0.0), blur / 2.0, 1.0, |_| color)
 }
 
 /// The complementary error function, to within a few thousandths.

@@ -7,6 +7,7 @@ use egui::{Color32, Id, Key, Rect, Sense, Ui, pos2, vec2};
 use cww::tui::chat::ChatSummary;
 
 use super::composer::ctrl_key;
+use super::controls::{self, FieldLook};
 use super::icons::{Icon, Images};
 use super::paint;
 use super::state::ChatState;
@@ -15,13 +16,17 @@ use super::widgets;
 
 pub const SEARCH_ID: &str = "chat-search";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     NewChat,
     Open(u64),
     /// The header's button: collapse when docked, close as a drawer.
     Toggle,
     Settings,
+    /// Rename a chat, from its row's menu.
+    Rename(u64, String),
+    /// Delete a chat, once confirmed.
+    Delete(u64),
 }
 
 /// When a chat last moved, as the sidebar groups chats.
@@ -320,11 +325,12 @@ impl Sidebar<'_> {
         }
     }
 
-    fn list(&self, ui: &mut Ui, rect: Rect, state: &ChatState) -> Option<Event> {
+    fn list(&self, ui: &mut Ui, rect: Rect, state: &mut ChatState) -> Option<Event> {
         let p = self.palette;
         let mut event = None;
         let today = jiff::Zoned::now().date();
-        let visible: Vec<&ChatSummary> = state.visible();
+        let visible: Vec<ChatSummary> = state.visible().into_iter().cloned().collect();
+        let mut menu_anchor = None;
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(rect)
@@ -360,8 +366,48 @@ impl Sidebar<'_> {
                         pos2(row.left() + 8.0, row.top()),
                         pos2(row.right() - 8.0, row.bottom() - 1.0),
                     );
-                    if self.row(ui, row, chat, state.open == Some(chat.number)) {
+                    let selected = state.open == Some(chat.number);
+                    if let Some((number, title)) =
+                        state.renaming.as_mut().filter(|(n, _)| *n == chat.number)
+                    {
+                        let number = *number;
+                        if selected {
+                            let radius = tokens::RADIUS_CONTROL - 2.0;
+                            ui.painter().rect_filled(row, radius, p.surface);
+                            ui.painter().rect_stroke(
+                                row.shrink(0.5),
+                                radius,
+                                egui::Stroke::new(1.0, p.line),
+                                egui::StrokeKind::Middle,
+                            );
+                        }
+                        match self.rename(ui, row, number, title) {
+                            Some(true) => {
+                                let title = title.trim().to_string();
+                                state.renaming = None;
+                                if !title.is_empty() && title != chat.title {
+                                    event = Some(Event::Rename(number, title));
+                                }
+                            }
+                            Some(false) => state.renaming = None,
+                            None => {}
+                        }
+                        continue;
+                    }
+                    let (chosen, menu) =
+                        self.row(ui, row, chat, selected, state.menu == Some(chat.number));
+                    if chosen {
                         event = Some(Event::Open(chat.number));
+                    }
+                    if menu {
+                        if state.menu == Some(chat.number) {
+                            state.menu = None;
+                        } else {
+                            state.menu = Some(chat.number);
+                        }
+                    }
+                    if state.menu == Some(chat.number) {
+                        menu_anchor = Some((chat.clone(), self.menu_button_rect(row)));
                     }
                 }
                 if visible.is_empty() && !state.search.trim().is_empty() {
@@ -380,6 +426,12 @@ impl Sidebar<'_> {
                 }
                 ui.add_space(8.0);
             });
+        // The open row's menu: Rename and Delete, where the chat allows them.
+        if let Some((chat, anchor)) = menu_anchor
+            && let Some(e) = self.row_menu(ui, &chat, anchor, state)
+        {
+            event = Some(e);
+        }
         // `.sidebar__fade` once the list scrolls.
         let scrolled = output.state.offset.y > 0.5;
         let fade =
@@ -400,8 +452,24 @@ impl Sidebar<'_> {
         event
     }
 
-    /// One chat; true when it was chosen.
-    fn row(&self, ui: &mut Ui, rect: Rect, chat: &ChatSummary, selected: bool) -> bool {
+    /// Where a row's menu button sits: 24 square, 4 in from the right.
+    fn menu_button_rect(&self, row: Rect) -> Rect {
+        Rect::from_center_size(
+            pos2(row.right() - 4.0 - 12.0, row.center().y),
+            vec2(24.0, 24.0),
+        )
+    }
+
+    /// One chat: true when it was chosen, and whether its menu button was
+    /// clicked.
+    fn row(
+        &self,
+        ui: &mut Ui,
+        rect: Rect,
+        chat: &ChatSummary,
+        selected: bool,
+        menu_open: bool,
+    ) -> (bool, bool) {
         let p = self.palette;
         let id = Id::new(("chat-row", chat.number));
         let response = ui.interact(rect, id, Sense::click());
@@ -444,9 +512,15 @@ impl Sidebar<'_> {
         } else {
             tokens::lerp_rgb(p.ink_muted, p.ink, t)
         };
+        let has_menu = chat.can(|c| c.rename || c.delete);
+        let text_right = if has_menu {
+            rect.right() - 4.0 - 24.0 - 4.0
+        } else {
+            rect.right() - 4.0
+        };
         let galley = paint::layout(
             painter,
-            paint::line_job(title, scale::SMALL, color, rect.right() - 4.0 - x),
+            paint::line_job(title, scale::SMALL, color, text_right - x),
         );
         let pos = pos2(x, cy - galley.size().y / 2.0);
         if chat.processing() {
@@ -460,7 +534,161 @@ impl Sidebar<'_> {
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        response.clicked()
+        // `Chat options`: three dots, shown on hover, on focus, or open.
+        let mut menu_clicked = false;
+        if has_menu {
+            let button = self.menu_button_rect(rect);
+            let button_id = id.with("options");
+            let near = ui.rect_contains_pointer(rect);
+            let focused = ui.memory(|m| m.has_focus(button_id));
+            let shown = widgets::hover(
+                ui,
+                button_id.with("shown"),
+                near || menu_open || focused,
+                tokens::INSTANT,
+            );
+            let mut faded = ui.new_child(egui::UiBuilder::new().max_rect(button));
+            faded.set_opacity(shown);
+            let clicked = widgets::IconButton {
+                icon: Icon::DotsThree,
+                icon_size: 20.0,
+                label: "Chat options",
+                tooltip: None,
+                color: p.ink_muted,
+                hover_color: p.ink_muted,
+                wash: 7.0,
+                radius: tokens::RADIUS_CONTROL,
+                enabled: true,
+            }
+            .show(&mut faded, button_id, button, self.images, p)
+            .clicked();
+            menu_clicked = clicked;
+        }
+        (response.clicked() && !menu_clicked, menu_clicked)
+    }
+
+    /// `.sidebar__rename`: the title in a field and a check to save it.
+    /// `Some(true)` saves, `Some(false)` cancels.
+    fn rename(&self, ui: &mut Ui, row: Rect, number: u64, title: &mut String) -> Option<bool> {
+        let p = self.palette;
+        let id = Id::new(("chat-rename", number));
+        let field = Rect::from_min_max(
+            pos2(row.left() + 4.0, row.center().y - 15.0),
+            pos2(row.right() - 4.0 - 24.0 - 4.0 - 4.0, row.center().y + 15.0),
+        );
+        let first = !ui.memory(|m| m.has_focus(id))
+            && ui.data(|d| d.get_temp::<bool>(id.with("started")).is_none());
+        let response = controls::text_field(
+            ui,
+            id,
+            field,
+            title,
+            "",
+            scale::SMALL,
+            8.0,
+            FieldLook::new(p),
+            p,
+            "Chat title",
+        );
+        if first {
+            response.request_focus();
+            ui.data_mut(|d| d.insert_temp(id.with("started"), true));
+        }
+        let button = Rect::from_center_size(
+            pos2(row.right() - 4.0 - 4.0 - 12.0, row.center().y),
+            vec2(24.0, 24.0),
+        );
+        let save = widgets::IconButton {
+            icon: Icon::Check,
+            icon_size: 16.0,
+            label: "Save title",
+            tooltip: None,
+            color: p.ink,
+            hover_color: p.ink,
+            wash: 7.0,
+            radius: tokens::RADIUS_CONTROL,
+            enabled: true,
+        }
+        .show(ui, id.with("save"), button, self.images, p)
+        .clicked();
+        let (enter, escape) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+        let done = if save || (response.lost_focus() && enter) {
+            Some(true)
+        } else if escape {
+            Some(false)
+        } else {
+            None
+        };
+        if done.is_some() {
+            ui.data_mut(|d| d.remove::<bool>(id.with("started")));
+        }
+        done
+    }
+
+    /// The row's menu (`.dropdown-content.menu.w-44`), below its button.
+    fn row_menu(
+        &self,
+        ui: &mut Ui,
+        chat: &ChatSummary,
+        anchor: Rect,
+        state: &mut ChatState,
+    ) -> Option<Event> {
+        let p = self.palette;
+        let mut items: Vec<(Icon, &str, bool)> = Vec::new();
+        if chat.can(|c| c.rename) {
+            items.push((Icon::PencilSimple, "Rename", false));
+        }
+        if chat.can(|c| c.delete) {
+            items.push((Icon::Trash, "Delete", true));
+        }
+        let item_h = 33.8;
+        let height = items.len() as f32 * item_h + (items.len().saturating_sub(1)) as f32 + 8.0;
+        let rect = Rect::from_min_size(
+            pos2(anchor.right() - 176.0, anchor.bottom() + 8.0),
+            vec2(176.0, height),
+        );
+        let mut event = None;
+        let mut close = false;
+        egui::Area::new(Id::new(("chat-row-menu", chat.number)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ui.ctx(), |ui| {
+                controls::menu_panel(ui.painter(), rect, p);
+                for (n, (icon, label, negative)) in items.iter().enumerate() {
+                    let row = Rect::from_min_size(
+                        pos2(rect.left() + 8.0, rect.top() + n as f32 * (item_h + 1.0)),
+                        vec2(160.0, item_h),
+                    );
+                    let id = Id::new(("chat-row-menu-item", chat.number, n));
+                    if controls::menu_item(
+                        ui,
+                        id,
+                        row,
+                        Some(*icon),
+                        label,
+                        *negative,
+                        false,
+                        p,
+                        self.images,
+                    )
+                    .clicked()
+                    {
+                        close = true;
+                        if *negative {
+                            event = Some(Event::Delete(chat.number));
+                        } else {
+                            state.renaming = Some((chat.number, chat.title.clone()));
+                        }
+                    }
+                }
+            });
+        if close
+            || controls::pressed_outside(ui, &[rect, anchor])
+            || ui.input(|i| i.key_pressed(Key::Escape))
+        {
+            state.menu = None;
+        }
+        event
     }
 }
 

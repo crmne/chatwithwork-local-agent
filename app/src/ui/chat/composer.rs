@@ -1,14 +1,21 @@
 //! The composer (`composer.css`): a surface with a 2-point rainbow edge in
 //! a soft rainbow glow, the field, and a bar with the paperclip and send,
 //! which turns into stop with a turning rainbow ring while an answer is
-//! written. Locked, it dims and says why, with the way out.
+//! written. Locked, it dims and says why, with the way out. Files picked
+//! for the question show as chips in the field, as Lexxy draws them
+//! (`lexxy.css`), and the model picker sits beside send
+//! (`chats/_model_picker`).
 
 use egui::text::{CCursor, CCursorRange};
 use egui::{Color32, Id, Key, Rect, Sense, Ui, pos2, vec2};
 
+use cww::tui::chat::Model;
+
+use super::controls;
 use super::icons::{Icon, Images};
 use super::paint;
-use super::tokens::{self, Palette, scale};
+use super::state::Attached;
+use super::tokens::{self, Palette, Type, scale};
 use super::widgets;
 
 pub const ID: &str = "chat-composer";
@@ -28,19 +35,86 @@ pub struct Composer<'a> {
     /// Whether what's typed can go now.
     pub can_send: bool,
     pub time: f64,
+    /// Files picked for the question.
+    pub attachments: Vec<Attached>,
+    /// The models to pick from, when the server offers the choice.
+    pub models: Vec<Model>,
+    /// The model the next question goes to: its ID and name.
+    pub model: Option<(String, String)>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Send,
     Stop,
     /// The locked composer's way out.
     Action,
-    /// The paperclip: attachments are added in the browser.
+    /// The paperclip: pick files.
     Attach,
+    /// Take a file off the question.
+    Detach(u64),
+    /// A model picked in the picker, by ID.
+    PickModel(String),
+}
+
+/// The chips' column, as Lexxy's `.attachment`: at most 320 wide, 56 high,
+/// 6 apart and 6 from the text.
+const CHIP_HEIGHT: f32 = 56.0;
+const CHIP_WIDTH: f32 = 320.0;
+
+/// The size of a file, as Lexxy writes it: "47.08 KB".
+pub fn human_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 B".into();
+    }
+    let sizes = ["B", "KB", "MB", "GB", "TB"];
+    let i = ((bytes as f64).ln() / 1024f64.ln()).floor() as usize;
+    let i = i.min(sizes.len() - 1);
+    format!("{:.2} {}", bytes as f64 / 1024f64.powi(i as i32), sizes[i])
+}
+
+/// A file's icon and its tint, for a content type: Phosphor's file icons,
+/// tinted as the web's mime images are colored.
+pub fn file_icon(content_type: &str, p: &Palette) -> (Icon, Color32) {
+    let t = content_type;
+    if t == "application/pdf" {
+        (Icon::FilePdf, p.orange)
+    } else if t.contains("spreadsheet") || t.contains("excel") || t == "text/csv" {
+        (Icon::FileXls, p.green)
+    } else if t.contains("presentation") || t.contains("powerpoint") {
+        (Icon::FilePpt, p.orange)
+    } else if t.contains("word") || t.contains("document") || t.contains("rtf") {
+        (Icon::FileDoc, p.blue)
+    } else if t.starts_with("image/") {
+        (Icon::FileImage, p.violet)
+    } else if t.starts_with("audio/") {
+        (Icon::FileAudio, p.violet)
+    } else if t.starts_with("video/") {
+        (Icon::FileVideo, p.violet)
+    } else if t.contains("json")
+        || t.contains("xml")
+        || t.contains("html")
+        || t.contains("javascript")
+    {
+        (Icon::FileCode, p.ink_muted)
+    } else if t.starts_with("text/") {
+        (Icon::FileTxt, p.ink_muted)
+    } else {
+        (Icon::File, p.ink_muted)
+    }
 }
 
 impl Composer<'_> {
+    /// The height of the chips above the text, with their spacing.
+    fn chips_height(&self) -> f32 {
+        let n = self.attachments.len() as f32;
+        if n == 0.0 {
+            0.0
+        } else {
+            6.0 + n * CHIP_HEIGHT + (n - 1.0) * 6.0 + 6.0
+        }
+    }
+
     /// The composer's height at `width` for what's typed.
     pub fn height(&self, ui: &Ui, input: &str, width: f32) -> f32 {
         let text_width = width - 16.0 - 24.0;
@@ -56,7 +130,7 @@ impl Composer<'_> {
         let lock = self
             .locked
             .map_or(0.0, |reason| self.lock_height(ui, reason, width));
-        8.0 + 10.0 + lines + 10.0 + lock + 48.0
+        8.0 + 10.0 + self.chips_height() + lines + 10.0 + lock + 48.0
     }
 
     fn lock_height(&self, ui: &Ui, reason: &str, width: f32) -> f32 {
@@ -112,10 +186,22 @@ impl Composer<'_> {
             egui::Stroke::new(1.0, p.shadow_inset),
         );
 
-        // The field.
+        // The files, then the field.
+        let chips_top = rect.top() + 8.0 + 10.0;
+        if let Some(key) = self.chips(
+            ui,
+            rect.left() + 8.0 + 12.0,
+            chips_top,
+            rect.width() - 40.0,
+            images,
+            p,
+        ) {
+            event = Some(Event::Detach(key));
+        }
+        let field_top = chips_top + self.chips_height();
         let field = Rect::from_min_max(
-            rect.min + vec2(8.0 + 12.0, 8.0 + 10.0),
-            pos2(rect.right() - 8.0 - 12.0, rect.top() + 8.0 + 10.0),
+            pos2(rect.left() + 8.0 + 12.0, field_top),
+            pos2(rect.right() - 8.0 - 12.0, field_top),
         );
         let lines_height = {
             let text = if input.is_empty() {
@@ -196,7 +282,7 @@ impl Composer<'_> {
         );
 
         // Why it's locked, and the way out.
-        let mut bar_top = rect.top() + 8.0 + 10.0 + lines_height + 10.0;
+        let mut bar_top = field_top + lines_height + 10.0;
         if let Some(reason) = self.locked {
             let galley = paint::layout(ui.painter(), self.lock_job(reason, p, rect.width()));
             let text_pos = pos2(rect.left() + 20.0 + 16.0 + 8.0, bar_top + 4.0);
@@ -271,24 +357,15 @@ impl Composer<'_> {
             pos2(rect.left() + 10.0 + control / 2.0, bar_center),
             vec2(control, control),
         );
-        let attach = widgets::IconButton {
-            icon: Icon::Paperclip,
-            icon_size: 16.0,
-            label: "Attach files",
-            tooltip: Some(if locked {
-                "Attach files"
-            } else {
-                "Attach files in the browser"
-            }),
-            color: p.ink,
-            hover_color: p.ink,
-            wash: 7.0,
-            radius: control_radius,
-            enabled: !locked,
-        }
-        .show(ui, id.with("attach"), attach_rect, images, p);
-        if attach.clicked() {
-            event = Some(Event::Attach);
+        if let Some(e) = self.paperclip(
+            ui,
+            id.with("attach"),
+            attach_rect,
+            control_radius,
+            images,
+            p,
+        ) {
+            event = Some(e);
         }
 
         let send_rect = Rect::from_center_size(
@@ -297,6 +374,16 @@ impl Composer<'_> {
         );
         if let Some(e) = self.send_button(ui, id.with("send"), send_rect, control_radius, images, p)
         {
+            event = Some(e);
+        }
+        if let Some(e) = self.picker(
+            ui,
+            id.with("model"),
+            send_rect.left() - 6.0,
+            bar_center,
+            images,
+            p,
+        ) {
             event = Some(e);
         }
 
@@ -328,6 +415,456 @@ impl Composer<'_> {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
         }
         event
+    }
+
+    /// `.chat-prompt__attach`: inked with a ring while files are attached,
+    /// with a turning spinner while they upload.
+    fn paperclip(
+        &self,
+        ui: &mut Ui,
+        id: Id,
+        rect: Rect,
+        radius: f32,
+        images: &Images,
+        p: &Palette,
+    ) -> Option<Event> {
+        let locked = self.locked.is_some();
+        let present = !self.attachments.is_empty();
+        let uploading = self.attachments.iter().any(|a| a.signed_id.is_none());
+        if present {
+            ui.painter().rect_stroke(
+                rect.shrink(0.5),
+                radius,
+                egui::Stroke::new(1.0, p.line_strong),
+                egui::StrokeKind::Middle,
+            );
+        }
+        let response = widgets::IconButton {
+            icon: Icon::Paperclip,
+            icon_size: 16.0,
+            label: if uploading {
+                "Attach files (uploading)"
+            } else {
+                "Attach files"
+            },
+            tooltip: Some("Attach files"),
+            color: p.ink,
+            hover_color: p.ink,
+            wash: 7.0,
+            radius,
+            enabled: !locked,
+        }
+        .show(ui, id, rect, images, p);
+        if uploading {
+            // `.chat-prompt__spinner`: a 2-wide `line` circle 1 inside the
+            // button's outer edge, its top quarter `live`, turning every 0.8 s.
+            let center = rect.center();
+            let r = (rect.width() + 6.2) / 2.0 - 1.0;
+            ui.painter()
+                .circle_stroke(center, r, egui::Stroke::new(2.0, p.line));
+            let start = (self.time / 0.8).fract() as f32 * std::f32::consts::TAU
+                - std::f32::consts::FRAC_PI_2
+                - std::f32::consts::FRAC_PI_4;
+            let points: Vec<egui::Pos2> = (0..=12)
+                .map(|i| {
+                    let a = start + std::f32::consts::FRAC_PI_2 * i as f32 / 12.0;
+                    center + r * vec2(a.cos(), a.sin())
+                })
+                .collect();
+            ui.painter()
+                .add(egui::Shape::line(points, egui::Stroke::new(2.0, p.live())));
+        }
+        response.clicked().then_some(Event::Attach)
+    }
+
+    /// The files picked, as Lexxy's chips: a file icon, the name and size,
+    /// a thin live bar while it uploads, and a way to take it off.
+    fn chips(
+        &self,
+        ui: &mut Ui,
+        left: f32,
+        top: f32,
+        width: f32,
+        images: &Images,
+        p: &Palette,
+    ) -> Option<u64> {
+        let mut removed = None;
+        let width = width.min(CHIP_WIDTH);
+        let mut y = top + 6.0;
+        for attached in &self.attachments {
+            let rect = Rect::from_min_size(pos2(left, y), vec2(width, CHIP_HEIGHT));
+            y += CHIP_HEIGHT + 6.0;
+            let id = Id::new(("chat-chip", attached.key));
+            let hovered = ui.rect_contains_pointer(rect);
+            let painter = ui.painter().clone();
+            painter.rect_filled(rect, tokens::RADIUS_CONTROL, p.canvas_sunken);
+            painter.rect_stroke(
+                rect.shrink(0.5),
+                tokens::RADIUS_CONTROL,
+                egui::Stroke::new(1.0, p.line),
+                egui::StrokeKind::Middle,
+            );
+            let (icon, tint) = file_icon(&attached.content_type, p);
+            images.icon_at(
+                &painter,
+                pos2(rect.left() + 11.0 + 18.0, rect.center().y),
+                34.0,
+                icon,
+                tint,
+            );
+            let uploading = attached.signed_id.is_none();
+            let caption_left = rect.left() + 11.0 + 36.0 + 10.0;
+            let caption_max = rect.right() - 11.0 - caption_left - 28.0;
+            let name_ty = scale::SMALLER.weight(550.0);
+            let natural = paint::layout(
+                &painter,
+                paint::job(&attached.name, name_ty, p.ink, f32::INFINITY),
+            )
+            .size()
+            .x;
+            let caption_w = if uploading {
+                natural.min(caption_max * 0.6)
+            } else {
+                caption_max
+            };
+            let name = paint::layout(
+                &painter,
+                paint::line_job(&attached.name, name_ty, p.ink, caption_w),
+            );
+            let size = paint::layout(
+                &painter,
+                paint::job(
+                    &human_size(attached.size),
+                    Type::mono(11.0, 16.5),
+                    p.ink_faint,
+                    f32::INFINITY,
+                ),
+            );
+            let caption_top = rect.center().y - (19.5 + 2.0 + 16.5) / 2.0;
+            painter.galley(pos2(caption_left, caption_top), name, p.ink);
+            painter.galley(
+                pos2(caption_left, caption_top + 19.5 + 2.0),
+                size,
+                p.ink_faint,
+            );
+            let label = if uploading {
+                format!("{}, uploading", attached.name)
+            } else {
+                format!("{}, {}", attached.name, human_size(attached.size))
+            };
+            widgets::label(ui, rect, &label);
+            if uploading {
+                // The size of the upload isn't reported as it goes, so the
+                // bar runs without saying how far.
+                let bar_left = caption_left + caption_w + 10.0;
+                let bar = Rect::from_min_max(
+                    pos2(bar_left, rect.center().y - 1.5),
+                    pos2(rect.right() - 11.0 - 28.0, rect.center().y + 1.5),
+                );
+                painter.rect_filled(bar, 3.0, p.line);
+                let phase = (self.time / 1.4).fract() as f32;
+                let seg = bar.width() * 0.4;
+                let x0 = bar.left() - seg + (bar.width() + seg) * phase;
+                let fill = Rect::from_min_max(
+                    pos2(x0.max(bar.left()), bar.top()),
+                    pos2((x0 + seg).min(bar.right()), bar.bottom()),
+                );
+                if fill.width() > 0.0 {
+                    painter.rect_filled(fill, 3.0, p.live());
+                }
+            }
+            // Lexxy's remove button, on hover.
+            let shown = widgets::hover(ui, id.with("remove"), hovered, tokens::FAST);
+            let button = Rect::from_center_size(
+                pos2(rect.right() - 6.0 - 12.0, rect.center().y),
+                vec2(24.0, 24.0),
+            );
+            let mut faded = ui.new_child(egui::UiBuilder::new().max_rect(button));
+            faded.set_opacity(shown.max(0.0));
+            let remove_label = format!("Remove {}", attached.name);
+            let response = widgets::IconButton {
+                icon: Icon::X,
+                icon_size: 14.0,
+                label: &remove_label,
+                tooltip: None,
+                color: p.ink_muted,
+                hover_color: p.ink,
+                wash: 7.0,
+                radius: tokens::RADIUS_TAG,
+                enabled: true,
+            }
+            .show(&mut faded, id.with("x"), button, images, p);
+            if response.clicked() {
+                removed = Some(attached.key);
+            }
+        }
+        removed
+    }
+
+    /// `.model-picker`: the model's mark and name and a caret, opening the
+    /// list of models above it. `right` is where it ends.
+    fn picker(
+        &self,
+        ui: &mut Ui,
+        id: Id,
+        right: f32,
+        center_y: f32,
+        images: &Images,
+        p: &Palette,
+    ) -> Option<Event> {
+        let (model_id, name) = self.model.clone()?;
+        if self.models.is_empty() {
+            return None;
+        }
+        let locked = self.locked.is_some();
+        let ty = scale::SMALLER;
+        let label = paint::layout(
+            ui.painter(),
+            paint::line_job(
+                &name,
+                ty,
+                p.ink_muted,
+                240.0 - 8.0 - 16.0 - 7.0 - 7.0 - 12.0 - 7.0,
+            ),
+        );
+        let width = 8.0 + 16.0 + 7.0 + label.size().x + 7.0 + 12.0 + 7.0;
+        let rect = Rect::from_min_size(pos2(right - width, center_y - 16.0), vec2(width, 32.0));
+        let open_id = id.with("open");
+        let mut open = ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false)) && !locked;
+        let response = ui.interact(
+            rect,
+            id,
+            if locked {
+                Sense::hover()
+            } else {
+                Sense::click()
+            },
+        );
+        let label_text = format!("Model: {name}");
+        response.widget_info(|| {
+            let mut info =
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, !locked, &label_text);
+            info.selected = Some(open);
+            info
+        });
+        let t = widgets::hover(
+            ui,
+            id,
+            (response.hovered() || open) && !locked,
+            tokens::FAST,
+        );
+        let opacity = if locked { 0.6 } else { 1.0 };
+        let painter = ui.painter().clone();
+        if t > 0.0 {
+            painter.rect_filled(rect, 16.0, p.ink_wash(6.0 * t));
+        }
+        let color = tokens::lerp_rgb(p.ink_muted, p.ink, t).gamma_multiply(opacity);
+        model_mark(
+            &painter,
+            pos2(rect.left() + 8.0 + 8.0, rect.center().y),
+            16.0,
+            &name,
+            p,
+            opacity,
+        );
+        painter.galley(
+            pos2(
+                rect.left() + 8.0 + 16.0 + 7.0,
+                rect.center().y - label.size().y / 2.0,
+            ),
+            label,
+            color,
+        );
+        images.icon_at(
+            &painter,
+            pos2(rect.right() - 7.0 - 6.0, rect.center().y),
+            12.0,
+            Icon::CaretUpDown,
+            p.ink_faint.gamma_multiply(opacity),
+        );
+        let rate = self
+            .models
+            .iter()
+            .find(|m| m.id == model_id)
+            .and_then(|m| m.rate.clone())
+            .unwrap_or_else(|| "Model to use".into());
+        if !open {
+            widgets::tooltip(ui, &response, &rate, p, true);
+        }
+        if response.has_focus() {
+            widgets::focus_ring(ui, rect, 16.0, p);
+        }
+        if !locked && response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            open = !open;
+        }
+        let mut event = None;
+        if open {
+            let (picked, menu) = self.model_menu(ui, id, rect, &model_id, images, p);
+            if let Some(picked) = picked {
+                event = Some(Event::PickModel(picked));
+                open = false;
+            } else if (controls::pressed_outside(ui, &[menu, rect]) && !response.clicked())
+                || ui.input(|i| i.key_pressed(Key::Escape))
+            {
+                open = false;
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(open_id, open));
+        event
+    }
+
+    /// `.model-picker__menu`: every model, with its description and rate,
+    /// the one in use ticked. Returns the one picked, and the menu's rect.
+    fn model_menu(
+        &self,
+        ui: &mut Ui,
+        id: Id,
+        anchor: Rect,
+        current: &str,
+        images: &Images,
+        p: &Palette,
+    ) -> (Option<String>, Rect) {
+        let screen = ui.ctx().content_rect();
+        let width = 336.0f32.min(screen.width() - 32.0);
+        let text_w = width - 10.0 - 24.0 - 20.0 - 12.0 - 16.0 - 12.0;
+        let painter = ui.painter().clone();
+        // Each option: 10 + name 21 + (2 + description) + 2 + rate 16.8 + 10.
+        let rows: Vec<RowGalleys> = self
+            .models
+            .iter()
+            .map(|m| {
+                let desc = m.description.as_deref().filter(|d| !d.is_empty()).map(|d| {
+                    paint::layout(
+                        &painter,
+                        paint::job(d, Type::sans(12.0, 16.8), p.ink_muted, text_w),
+                    )
+                });
+                // What a question costs, or why it can't be asked now.
+                let note = if m.selectable {
+                    m.rate.as_deref()
+                } else {
+                    m.reason.as_deref().or(m.rate.as_deref())
+                };
+                let note = note.map(|n| {
+                    paint::layout(&painter, paint::job(n, scale::MICRO, p.ink_faint, text_w))
+                });
+                let h = 10.0
+                    + 21.0
+                    + desc.as_ref().map_or(0.0, |g| 2.0 + g.size().y)
+                    + note.as_ref().map_or(0.0, |g| 2.0 + g.size().y)
+                    + 10.0;
+                (h, desc, note)
+            })
+            .collect();
+        let content: f32 = rows.iter().map(|(h, ..)| h).sum();
+        let height = (5.0 + content + 5.0).min(384.0f32.min(screen.height() * 0.6));
+        let rect = Rect::from_min_size(
+            pos2(
+                (anchor.right() - width).max(screen.left() + 16.0),
+                anchor.top() - 8.0 - height,
+            ),
+            vec2(width, height),
+        );
+        let mut picked = None;
+        egui::Area::new(id.with("menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ui.ctx(), |ui| {
+                controls::menu_panel(ui.painter(), rect, p);
+                let inner = rect.shrink(5.0);
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+                child.set_clip_rect(inner);
+                egui::ScrollArea::vertical()
+                    .id_salt(id.with("menu-scroll"))
+                    .max_height(inner.height())
+                    .show(&mut child, |ui| {
+                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                        for (model, (h, desc, note)) in self.models.iter().zip(&rows) {
+                            let (row, response) =
+                                ui.allocate_exact_size(vec2(inner.width(), *h), Sense::click());
+                            let active = model.id == current;
+                            let name = model.name.clone();
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    true,
+                                    active,
+                                    &name,
+                                )
+                            });
+                            let t = widgets::hover(
+                                ui,
+                                Id::new(("model-option", &model.id)),
+                                response.hovered(),
+                                tokens::INSTANT,
+                            );
+                            let radius = tokens::RADIUS_CONTROL - 2.0;
+                            if active {
+                                ui.painter().rect_filled(row, radius, p.surface_selected);
+                            } else if t > 0.0 {
+                                ui.painter().rect_filled(row, radius, p.ink_wash(6.0 * t));
+                            }
+                            // One that can't be asked now is dimmed.
+                            let mut faded = ui.painter().clone();
+                            faded.multiply_opacity(if model.selectable { 1.0 } else { 0.55 });
+                            let painter = &faded;
+                            let dim = 1.0;
+                            model_mark(
+                                painter,
+                                pos2(row.left() + 12.0 + 10.0, row.top() + 11.0 + 10.0),
+                                20.0,
+                                &model.name,
+                                p,
+                                dim,
+                            );
+                            let x = row.left() + 12.0 + 20.0 + 12.0;
+                            let mut y = row.top() + 10.0;
+                            let name_galley = paint::layout(
+                                painter,
+                                paint::line_job(
+                                    &model.name,
+                                    scale::SMALL.weight(550.0),
+                                    p.ink,
+                                    text_w,
+                                ),
+                            );
+                            painter.galley(pos2(x, y), name_galley, p.ink.gamma_multiply(dim));
+                            y += 21.0;
+                            if let Some(desc) = desc {
+                                y += 2.0;
+                                painter.galley(
+                                    pos2(x, y),
+                                    desc.clone(),
+                                    p.ink_muted.gamma_multiply(dim),
+                                );
+                                y += desc.size().y;
+                            }
+                            if let Some(note) = note {
+                                y += 2.0;
+                                painter.galley(pos2(x, y), note.clone(), p.ink_faint);
+                            }
+                            if active {
+                                images.icon_at(
+                                    painter,
+                                    pos2(row.right() - 12.0 - 8.0, row.top() + 10.0 + 8.0),
+                                    16.0,
+                                    Icon::Check,
+                                    p.ink,
+                                );
+                            }
+                            if response.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if response.clicked() {
+                                picked = Some(model.id.clone());
+                            }
+                        }
+                    });
+            });
+        (picked, rect)
     }
 
     fn send_button(
@@ -420,6 +957,47 @@ impl Composer<'_> {
         }
         None
     }
+}
+
+/// A model option's height and its description and note, laid out.
+type RowGalleys = (
+    f32,
+    Option<std::sync::Arc<egui::Galley>>,
+    Option<std::sync::Arc<egui::Galley>>,
+);
+
+/// A model's mark: a round chip with its name's first letter, where the
+/// web shows its maker's logo.
+fn model_mark(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    size: f32,
+    name: &str,
+    p: &Palette,
+    opacity: f32,
+) {
+    let r = size / 2.0;
+    painter.circle_filled(center, r, p.surface.gamma_multiply(opacity));
+    painter.circle_stroke(
+        center,
+        r - 0.5,
+        egui::Stroke::new(1.0, p.line_strong.gamma_multiply(opacity)),
+    );
+    let initial: String = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default();
+    let ty = Type::sans(size * 0.55, size * 0.7).weight(600.0);
+    let galley = paint::layout(
+        painter,
+        paint::job(&initial, ty, p.ink_muted, f32::INFINITY),
+    );
+    painter.galley(
+        center - galley.size() / 2.0,
+        galley,
+        p.ink_muted.gamma_multiply(opacity),
+    );
 }
 
 /// `filter: saturate(amount)`.

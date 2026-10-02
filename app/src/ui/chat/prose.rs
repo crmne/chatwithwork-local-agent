@@ -226,7 +226,10 @@ impl Prose<'_> {
         let width = ui.available_width();
         let (job, runs) = self.inline_job(ui.painter(), inlines, ty, color, width);
         let galley = ui.painter().layout_job(job);
-        let (rect, response) = ui.allocate_exact_size(vec2(width, galley.size().y), Sense::hover());
+        // Selectable with the mouse, as text on a web page is: drag to
+        // select (across paragraphs too), and copy with the shortcut.
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(width, galley.size().y), selectable_sense());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Label,
@@ -234,8 +237,18 @@ impl Prose<'_> {
                 super::markdown::plain(inlines),
             )
         });
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
         let clicked = self.decorate(ui, rect.min, &galley, &runs);
-        ui.painter().galley(rect.min, Arc::clone(&galley), color);
+        egui::text_selection::LabelSelectionState::label_text_selection(
+            ui,
+            &response,
+            rect.min,
+            Arc::clone(&galley),
+            color,
+            Stroke::NONE,
+        );
         if caret {
             self.caret(ui.painter(), rect.min, &galley, ty);
         }
@@ -729,6 +742,12 @@ enum RunKind {
 /// Blank room `width` wide that never breaks: two non-breaking spaces,
 /// pulled together or pushed apart by the letter spacing egui puts between
 /// them (it puts none before a section's first glyph).
+/// How selectable text senses the pointer: clicks and drags, but no
+/// keyboard focus, as egui's selectable labels do.
+pub fn selectable_sense() -> Sense {
+    Sense::click_and_drag() - Sense::FOCUSABLE
+}
+
 fn spacer(painter: &Painter, job: &mut LayoutJob, ty: Type, width: f32) {
     let font = ty.font_id();
     let space = painter

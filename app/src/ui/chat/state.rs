@@ -4,8 +4,14 @@
 //! by `runner.rs`.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use cww::tui::chat::{AccessRequest, ChatList, ChatSummary, Entry, Failure, Live, Transcript};
+use serde_json::Value;
+
+use cww::tui::chat::{
+    AccessRequest, Ask, ChatList, ChatSummary, Entry, Failure, Field, Live, Models, Question,
+    Shared, Transcript, Uploaded,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -16,11 +22,25 @@ pub enum Command {
     /// Follow one chat live, or stop following.
     Follow(Option<u64>),
     /// Ask in a chat, or in a new one.
-    Send {
-        chat: Option<u64>,
-        text: String,
-    },
+    Send(Ask),
     Cancel(u64),
+    /// Read the models the composer's picker offers.
+    Models,
+    /// Upload a file picked for the next question.
+    Upload {
+        key: u64,
+        path: PathBuf,
+    },
+    /// Settle a step the answer stopped at.
+    Decide {
+        chat: u64,
+        decision: Decision,
+    },
+    /// Retry, branch, rename, delete, share or stop sharing a chat.
+    Act {
+        chat: u64,
+        action: ChatAction,
+    },
     /// Ask the owner to allow chats, then check back until they answer.
     RequestAccess,
     /// Check back until the owner answers a request made earlier.
@@ -40,6 +60,20 @@ pub enum Msg {
     },
     Cancelled(Result<(), Failure>),
     Access(Result<AccessRequest, Failure>),
+    Models(Result<Models, Failure>),
+    Uploaded {
+        key: u64,
+        result: Result<Uploaded, Failure>,
+    },
+    Decided {
+        chat: u64,
+        result: Result<ChatSummary, Failure>,
+    },
+    Acted {
+        chat: u64,
+        action: ChatAction,
+        result: Result<Acted, Failure>,
+    },
     Live {
         chat: u64,
         live: Live,
@@ -82,6 +116,121 @@ pub enum Following {
     Unsupported,
 }
 
+/// A decision on a step the answer stopped at, as the web's cards make it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    Approve {
+        tool_call: u64,
+        for_rest_of_chat: bool,
+    },
+    Deny {
+        tool_call: u64,
+        reason: Option<String>,
+    },
+    /// The form's values, or `None` for a page that was visited.
+    Answer {
+        tool_call: u64,
+        input: Option<Value>,
+    },
+    Decline {
+        tool_call: u64,
+    },
+}
+
+impl Decision {
+    pub fn tool_call(&self) -> u64 {
+        match self {
+            Decision::Approve { tool_call, .. }
+            | Decision::Deny { tool_call, .. }
+            | Decision::Answer { tool_call, .. }
+            | Decision::Decline { tool_call } => *tool_call,
+        }
+    }
+}
+
+/// What can be done to a chat, where its `can` allows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    /// Answer `message` (a question or an answer) again.
+    Retry(u64),
+    /// A new chat with the conversation up to `message`.
+    Branch(u64),
+    Rename(String),
+    Delete,
+    Share,
+    Unshare,
+}
+
+/// What a chat action answered with.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Acted {
+    Chat(ChatSummary),
+    Shared(Shared),
+    Deleted,
+}
+
+/// The models to pick from, as far as they're known.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ModelList {
+    #[default]
+    Unknown,
+    Loading,
+    Ready(Models),
+    /// The server or the daemon can't offer the choice: chats keep theirs.
+    Unavailable,
+}
+
+/// A model picked in the composer, for one chat (or the next new one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub chat: Option<u64>,
+    pub id: String,
+}
+
+/// A file picked for the next question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    /// This page's own key for it.
+    pub key: u64,
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+    pub content_type: String,
+    /// Its `signed_id` once it's uploaded.
+    pub signed_id: Option<String>,
+}
+
+/// A dialog over the page, as the web opens one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dialog {
+    /// "Retry this question?" or "Retry this answer?".
+    Retry { chat: u64, message: u64, user: bool },
+    /// The chat's share dialog: private, or its public link.
+    Share { chat: u64, copied: bool },
+    /// "Are you sure?" before deleting a chat.
+    Delete { chat: u64 },
+    /// "That file can't be attached".
+    Unsupported { name: String },
+}
+
+/// One field of a question's form, as it's filled in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldValue {
+    Text(String),
+    Check(bool),
+    /// For an `array` field: which of its choices are ticked.
+    Picks(Vec<bool>),
+}
+
+/// What's filled in on an approval card.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovalInput {
+    /// "Deny with a reason" is open.
+    pub reason_open: bool,
+    pub reason: String,
+    pub for_rest_of_chat: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatState {
     pub access: Access,
@@ -108,6 +257,23 @@ pub struct ChatState {
     pub error: Option<String>,
     /// A failure to show over the composer: a question that didn't go.
     pub notice: Option<String>,
+    pub models: ModelList,
+    /// The model picked in the composer, if another than the chat's.
+    pub model: Option<ModelChoice>,
+    /// Files picked for the next question.
+    pub attachments: Vec<Attached>,
+    next_key: u64,
+    pub dialog: Option<Dialog>,
+    /// The chat whose row menu is open in the sidebar.
+    pub menu: Option<u64>,
+    /// The chat being renamed in the sidebar, and its title so far.
+    pub renaming: Option<(u64, String)>,
+    /// A decision on this tool call is on its way.
+    pub deciding: Option<u64>,
+    /// A chat action under way, by chat.
+    pub acting: Option<(u64, ChatAction)>,
+    /// Text to put on the clipboard: a public link just made.
+    pub clipboard: Option<String>,
     /// The daemon is running and paired, so chats can be asked for.
     paired: bool,
 }
@@ -131,6 +297,16 @@ impl Default for ChatState {
             stopping: false,
             error: None,
             notice: None,
+            models: ModelList::Unknown,
+            model: None,
+            attachments: Vec::new(),
+            next_key: 1,
+            dialog: None,
+            menu: None,
+            renaming: None,
+            deciding: None,
+            acting: None,
+            clipboard: None,
             paired: false,
         }
     }
@@ -247,6 +423,7 @@ impl ChatState {
         self.loading = true;
         self.stale = false;
         self.following = Following::Starting;
+        self.leave_chat();
         vec![Command::Open(number), Command::Follow(Some(number))]
     }
 
@@ -264,11 +441,20 @@ impl ChatState {
         self.stale = false;
         self.stopping = false;
         self.following = Following::No;
+        self.leave_chat();
         if followed {
             vec![Command::Follow(None)]
         } else {
             Vec::new()
         }
+    }
+
+    /// What belongs to the chat that was open goes with it, as a page
+    /// change does on the web.
+    fn leave_chat(&mut self) {
+        self.attachments.clear();
+        self.dialog = None;
+        self.deciding = None;
     }
 
     /// Whether what's typed can be sent now, or why not.
@@ -279,14 +465,16 @@ impl ChatState {
             Err("Wait for the answer, or stop it")
         } else if self.locked_reason().is_some() {
             Err("Locked")
-        } else if self.input.trim().is_empty() {
+        } else if self.uploading() {
+            Err("Wait for the files to upload")
+        } else if self.input.trim().is_empty() && self.attachments.is_empty() {
             Err("Type a question")
         } else {
             Ok(())
         }
     }
 
-    /// Send what's typed.
+    /// Send what's typed, with the model picked and the files attached.
     pub fn send(&mut self) -> Vec<Command> {
         if self.can_send().is_err() {
             return Vec::new();
@@ -297,10 +485,126 @@ impl ChatState {
         self.notice = None;
         self.sending = true;
         self.pending_question = Some(text.clone());
-        vec![Command::Send {
+        let attachments = std::mem::take(&mut self.attachments)
+            .into_iter()
+            .filter_map(|a| a.signed_id)
+            .collect();
+        vec![Command::Send(Ask {
             chat: self.open,
             text,
-        }]
+            project: None,
+            model: self.model_for_question(),
+            attachments,
+        })]
+    }
+
+    /// Files are still on their way up.
+    pub fn uploading(&self) -> bool {
+        self.attachments.iter().any(|a| a.signed_id.is_none())
+    }
+
+    /// The model picked for the next question here, if any.
+    fn model_for_question(&self) -> Option<String> {
+        self.model
+            .as_ref()
+            .filter(|choice| choice.chat == self.open)
+            .map(|choice| choice.id.clone())
+    }
+
+    /// The model the composer's picker shows: the one picked here, else the
+    /// chat's own, else (for a new chat) the default. Its ID and name.
+    pub fn current_model(&self) -> Option<(String, String)> {
+        let models = match &self.models {
+            ModelList::Ready(models) => Some(models),
+            _ => None,
+        };
+        let named = |id: &str| {
+            models
+                .and_then(|m| m.get(id))
+                .map(|m| (m.id.clone(), m.name.clone()))
+        };
+        if let Some(choice) = self.model.as_ref().filter(|c| c.chat == self.open) {
+            return named(&choice.id);
+        }
+        match self.open {
+            Some(_) => self
+                .open_summary()
+                .and_then(|c| c.model.as_ref())
+                .map(|m| named(&m.id).unwrap_or((m.id.clone(), m.name.clone()))),
+            None => models
+                .and_then(|m| m.default_model_id.as_deref())
+                .and_then(named),
+        }
+    }
+
+    /// Pick a model for the next question here. One that can't be used now
+    /// says why instead.
+    pub fn pick_model(&mut self, id: &str) {
+        let ModelList::Ready(models) = &self.models else {
+            return;
+        };
+        let Some(model) = models.get(id) else { return };
+        if !model.selectable {
+            self.notice = Some(
+                model
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| format!("{} can't be used right now.", model.name)),
+            );
+            return;
+        }
+        self.notice = None;
+        self.model = Some(ModelChoice {
+            chat: self.open,
+            id: model.id.clone(),
+        });
+    }
+
+    /// Attach files for the next question: each is checked as the web's
+    /// composer checks it, then uploaded.
+    pub fn attach(&mut self, paths: Vec<PathBuf>) -> Vec<Command> {
+        let mut commands = Vec::new();
+        if !self.ready() || self.locked_reason().is_some() {
+            return commands;
+        }
+        for path in paths {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            if self.attachments.iter().any(|a| a.path == path) {
+                continue;
+            }
+            if !accepts(&name) {
+                self.dialog = Some(Dialog::Unsupported { name });
+                continue;
+            }
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if size > cww::tui::chat::MAX_UPLOAD_BYTES {
+                self.notice = Some(format!(
+                    "{name} is larger than {} MB",
+                    cww::tui::chat::MAX_UPLOAD_BYTES / (1024 * 1024)
+                ));
+                continue;
+            }
+            let key = self.next_key;
+            self.next_key += 1;
+            self.attachments.push(Attached {
+                key,
+                path: path.clone(),
+                content_type: cww::tui::chat::content_type(&name).into(),
+                name,
+                size,
+                signed_id: None,
+            });
+            commands.push(Command::Upload { key, path });
+        }
+        commands
+    }
+
+    /// Take a file back off the next question.
+    pub fn detach(&mut self, key: u64) {
+        self.attachments.retain(|a| a.key != key);
     }
 
     /// Stop the answer being written.
@@ -312,6 +616,58 @@ impl ChatState {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Settle a step the open chat stopped at.
+    pub fn decide(&mut self, decision: Decision) -> Vec<Command> {
+        let Some(chat) = self.open else {
+            return Vec::new();
+        };
+        if self.deciding.is_some() {
+            return Vec::new();
+        }
+        self.deciding = Some(decision.tool_call());
+        self.notice = None;
+        vec![Command::Decide { chat, decision }]
+    }
+
+    /// Retry, branch, rename, delete, share or stop sharing `chat`.
+    pub fn act(&mut self, chat: u64, action: ChatAction) -> Vec<Command> {
+        if self.acting.is_some() {
+            return Vec::new();
+        }
+        self.notice = None;
+        self.acting = Some((chat, action.clone()));
+        vec![Command::Act { chat, action }]
+    }
+
+    /// A chat as the server last answered with it, in the list and the
+    /// open transcript.
+    fn update_summary(&mut self, summary: ChatSummary) {
+        if let Some(listed) = self
+            .list
+            .chats
+            .iter_mut()
+            .find(|c| c.number == summary.number)
+        {
+            *listed = summary.clone();
+        }
+        if let Some(transcript) = self
+            .transcript
+            .as_mut()
+            .filter(|t| t.chat.number == summary.number)
+        {
+            transcript.chat = summary;
+        }
+    }
+
+    /// A chat's summary, as last read or listed.
+    pub fn summary(&self, number: u64) -> Option<&ChatSummary> {
+        self.transcript
+            .as_ref()
+            .map(|t| &t.chat)
+            .filter(|c| c.number == number)
+            .or_else(|| self.list.chats.iter().find(|c| c.number == number))
     }
 
     /// Ask the owner to let this computer use their chats.
@@ -349,6 +705,19 @@ impl ChatState {
                 let was_ready = self.ready();
                 self.access = Access::Ready;
                 self.list = list;
+                if self.models == ModelList::Unknown {
+                    self.models = ModelList::Loading;
+                    let mut commands = vec![Command::Models];
+                    if let Some(open) = self.open
+                        && !was_ready
+                        && self.following != Following::Starting
+                    {
+                        self.following = Following::Starting;
+                        commands.push(Command::Follow(Some(open)));
+                        commands.extend(self.refresh(open));
+                    }
+                    return commands;
+                }
                 // Chats are back (allowed again, say): follow the open one
                 // again, unless that's already under way.
                 if let Some(open) = self.open
@@ -402,7 +771,11 @@ impl ChatState {
                         self.list.chats.insert(0, summary);
                         let mut commands = vec![Command::List];
                         if chat.is_none() && self.open.is_none() {
-                            // The first question made the chat: follow it.
+                            // The first question made the chat: follow it,
+                            // and the model picked for it goes with it.
+                            if let Some(choice) = self.model.as_mut().filter(|c| c.chat.is_none()) {
+                                choice.chat = Some(number);
+                            }
                             self.open = Some(number);
                             self.following = Following::Starting;
                             self.loading = true;
@@ -420,6 +793,10 @@ impl ChatState {
                         {
                             self.input = question;
                         }
+                        // A model that can't be used: back to the chat's own.
+                        if failure.code == "model_unavailable" {
+                            self.model = None;
+                        }
                         if is_access_failure(&failure) {
                             self.failure(failure);
                         } else {
@@ -427,6 +804,51 @@ impl ChatState {
                         }
                     }
                 }
+            }
+            Msg::Models(Ok(models)) => self.models = ModelList::Ready(models),
+            // Chats go on with their models; only the choice is missing.
+            Msg::Models(Err(_)) => self.models = ModelList::Unavailable,
+            Msg::Uploaded { key, result } => {
+                let at = self.attachments.iter().position(|a| a.key == key);
+                match (at, result) {
+                    (Some(at), Ok(uploaded)) => {
+                        let attached = &mut self.attachments[at];
+                        attached.name = uploaded.filename;
+                        attached.size = uploaded.byte_size;
+                        attached.content_type = uploaded.content_type;
+                        attached.signed_id = Some(uploaded.signed_id);
+                    }
+                    (Some(at), Err(failure)) => {
+                        self.attachments.remove(at);
+                        self.notice = Some(failure.message);
+                    }
+                    // Taken off while it uploaded.
+                    (None, _) => {}
+                }
+            }
+            Msg::Decided { chat, result } => {
+                let decided = self.deciding.take();
+                match result {
+                    Ok(summary) => {
+                        let _ = decided;
+                        self.update_summary(summary);
+                        return self.refresh(chat);
+                    }
+                    Err(failure) => {
+                        self.notice = Some(failure.message);
+                        if failure.code == "already_decided" || failure.code == "not_found" {
+                            return self.refresh(chat);
+                        }
+                    }
+                }
+            }
+            Msg::Acted {
+                chat,
+                action,
+                result,
+            } => {
+                self.acting = None;
+                return self.acted(chat, action, result);
             }
             Msg::Cancelled(Ok(())) => {}
             Msg::Cancelled(Err(failure)) => {
@@ -482,6 +904,64 @@ impl ChatState {
         Vec::new()
     }
 
+    /// A chat action finished.
+    fn acted(
+        &mut self,
+        chat: u64,
+        action: ChatAction,
+        result: Result<Acted, Failure>,
+    ) -> Vec<Command> {
+        let acted = match result {
+            Ok(acted) => acted,
+            Err(failure) => {
+                self.notice = Some(failure.message);
+                return Vec::new();
+            }
+        };
+        match (action, acted) {
+            (ChatAction::Branch(_), Acted::Chat(branch)) => {
+                let number = branch.number;
+                self.list.chats.retain(|c| c.number != number);
+                self.list.chats.insert(0, branch);
+                let mut commands = self.open_chat(number);
+                commands.push(Command::List);
+                commands
+            }
+            (ChatAction::Delete, _) => {
+                self.list.chats.retain(|c| c.number != chat);
+                if self.dialog == Some(Dialog::Delete { chat }) {
+                    self.dialog = None;
+                }
+                if self.open == Some(chat) {
+                    return self.new_chat();
+                }
+                Vec::new()
+            }
+            (_, Acted::Shared(shared)) => {
+                // The link goes on the clipboard as it's made.
+                self.clipboard = Some(shared.url.clone());
+                self.update_summary(shared.chat);
+                if let Some(Dialog::Share { chat: c, copied }) = &mut self.dialog
+                    && *c == chat
+                {
+                    *copied = true;
+                }
+                Vec::new()
+            }
+            (action, Acted::Chat(summary)) => {
+                if let ChatAction::Rename(_) = action {
+                    self.renaming = None;
+                }
+                if let ChatAction::Retry(_) = action {
+                    self.streamed.clear();
+                }
+                self.update_summary(summary);
+                self.refresh(chat)
+            }
+            (_, Acted::Deleted) => Vec::new(),
+        }
+    }
+
     /// A chat read back: it replaces what streamed in, once it has it.
     fn take_transcript(&mut self, transcript: Transcript) {
         for entry in &transcript.entries {
@@ -535,6 +1015,164 @@ fn is_access_failure(failure: &Failure) -> bool {
     )
 }
 
+/// The values a question's form sends, by field name, typed as the fields
+/// ask; empty optional fields are left out.
+pub fn form_input(question: &Question, values: Option<&Vec<FieldValue>>) -> Value {
+    let values = values.cloned().unwrap_or_else(|| default_form(question));
+    let mut input = serde_json::Map::new();
+    for (field, value) in question.fields.iter().zip(values) {
+        let json = match value {
+            FieldValue::Check(on) => Value::Bool(on),
+            FieldValue::Picks(picks) => field
+                .choices
+                .iter()
+                .flatten()
+                .zip(picks)
+                .filter(|(_, on)| *on)
+                .map(|(c, _)| Value::String(c.clone()))
+                .collect(),
+            FieldValue::Text(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                // Numbers go as typed: the server reads them as a form does.
+                Value::String(text.to_string())
+            }
+        };
+        input.insert(field.name.clone(), json);
+    }
+    Value::Object(input)
+}
+
+/// A form's fields as the web's form starts them: the server's defaults.
+pub fn default_form(question: &Question) -> Vec<FieldValue> {
+    question.fields.iter().map(default_value).collect()
+}
+
+fn default_value(field: &Field) -> FieldValue {
+    match field.kind.as_str() {
+        "boolean" => FieldValue::Check(field.default == Some(Value::Bool(true))),
+        "array" if field.choices.is_some() => {
+            let defaults: Vec<String> = match &field.default {
+                Some(Value::Array(values)) => values
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+                Some(Value::String(one)) => vec![one.clone()],
+                _ => Vec::new(),
+            };
+            FieldValue::Picks(
+                field
+                    .choices
+                    .iter()
+                    .flatten()
+                    .map(|c| defaults.contains(c))
+                    .collect(),
+            )
+        }
+        _ => FieldValue::Text(match &field.default {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Null) | None => String::new(),
+            Some(other) => other.to_string(),
+        }),
+    }
+}
+
+/// Whether the composer takes a file with this name, as the web's
+/// `attachments` controller checks it (`Message::AttachmentPolicy`): never
+/// SVG or Flash, otherwise documents, images, audio, video, text and code.
+pub fn accepts(name: &str) -> bool {
+    const BLOCKED: [&str; 3] = [".svg", ".svgz", ".swf"];
+    const SUPPORTED: &[&str] = &[
+        ".aac",
+        ".aif",
+        ".aiff",
+        ".avi",
+        ".bash",
+        ".bmp",
+        ".c",
+        ".cc",
+        ".cjs",
+        ".cpp",
+        ".css",
+        ".csv",
+        ".cxx",
+        ".doc",
+        ".docx",
+        ".dot",
+        ".flac",
+        ".gif",
+        ".go",
+        ".h",
+        ".heic",
+        ".heif",
+        ".hpp",
+        ".htm",
+        ".html",
+        ".java",
+        ".jpeg",
+        ".jpg",
+        ".js",
+        ".json",
+        ".jsx",
+        ".key",
+        ".m4a",
+        ".markdown",
+        ".md",
+        ".mkv",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".numbers",
+        ".odp",
+        ".ods",
+        ".odt",
+        ".ogg",
+        ".pages",
+        ".pdf",
+        ".php",
+        ".pl",
+        ".png",
+        ".pot",
+        ".pps",
+        ".ppt",
+        ".pptx",
+        ".py",
+        ".rb",
+        ".rs",
+        ".rtf",
+        ".sh",
+        ".sql",
+        ".tcl",
+        ".tex",
+        ".tif",
+        ".tiff",
+        ".toml",
+        ".ts",
+        ".tsx",
+        ".txt",
+        ".wav",
+        ".webm",
+        ".webp",
+        ".xls",
+        ".xlsx",
+        ".xml",
+        ".yaml",
+        ".yml",
+        ".zsh",
+    ];
+    let lower = name.to_lowercase();
+    let extension = lower.rfind('.').map_or("", |i| &lower[i..]);
+    if extension.is_empty() || BLOCKED.contains(&extension) {
+        return false;
+    }
+    SUPPORTED.contains(&extension)
+        || cww::tui::chat::content_type(name) != "application/octet-stream"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,10 +1189,11 @@ mod tests {
     fn ready() -> ChatState {
         let mut state = ChatState::default();
         assert_eq!(state.set_paired(true), vec![Command::List]);
-        state.update(Msg::Listed(Ok(ChatList {
+        let commands = state.update(Msg::Listed(Ok(ChatList {
             chats: vec![summary(2, "idle"), summary(1, "idle")],
             ..ChatList::default()
         })));
+        assert_eq!(commands, vec![Command::Models], "the picker's models, once");
         assert!(state.ready());
         state
     }
@@ -565,10 +1204,10 @@ mod tests {
         state.input = "  Q3?  ".into();
         assert_eq!(
             state.send(),
-            vec![Command::Send {
-                chat: None,
-                text: "Q3?".into()
-            }]
+            vec![Command::Send(Ask {
+                text: "Q3?".into(),
+                ..Ask::default()
+            })]
         );
         assert!(state.working() && state.input.is_empty());
         // Nothing more goes while it's on its way.
@@ -712,5 +1351,190 @@ mod tests {
         assert_eq!(state.visible().len(), 1);
         state.search = "chat".into();
         assert_eq!(state.visible().len(), 2);
+    }
+
+    fn models() -> Models {
+        serde_json::from_value(serde_json::json!({
+            "default_model_id": 1,
+            "models": [
+                { "id": 1, "name": "Flash", "provider": "vertexai" },
+                { "id": 2, "name": "Sol", "provider": "azure", "selectable": false,
+                  "reason": "You're out of credits." },
+                { "id": 3, "name": "Large", "provider": "hetzner" },
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_model_picked_goes_with_the_question_and_stays_with_the_chat() {
+        let mut state = ready();
+        state.update(Msg::Models(Ok(models())));
+        assert_eq!(state.current_model(), Some(("1".into(), "Flash".into())));
+        // One that can't be used says why, and isn't picked.
+        state.pick_model("2");
+        assert_eq!(state.notice.as_deref(), Some("You're out of credits."));
+        assert_eq!(state.current_model().unwrap().0, "1");
+        state.pick_model("3");
+        state.input = "Hi".into();
+        let [Command::Send(ask)] = &state.send()[..] else {
+            panic!("one send")
+        };
+        assert_eq!(ask.model.as_deref(), Some("3"));
+        state.update(Msg::Sent {
+            chat: None,
+            result: Ok(summary(3, "processing")),
+        });
+        assert_eq!(state.current_model().unwrap().1, "Large");
+        // Another chat shows its own.
+        state.open_chat(2);
+        assert_eq!(state.current_model(), None);
+    }
+
+    #[test]
+    fn files_upload_before_the_question_goes_with_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("Q3 plan.pdf");
+        std::fs::write(&pdf, b"%PDF").unwrap();
+        let svg = dir.path().join("logo.svg");
+        std::fs::write(&svg, b"<svg/>").unwrap();
+        let mut state = ready();
+        let commands = state.attach(vec![pdf.clone(), svg]);
+        assert_eq!(commands, vec![Command::Upload { key: 1, path: pdf }]);
+        assert_eq!(
+            state.dialog,
+            Some(Dialog::Unsupported {
+                name: "logo.svg".into()
+            })
+        );
+        assert_eq!(state.can_send(), Err("Wait for the files to upload"));
+        state.update(Msg::Uploaded {
+            key: 1,
+            result: Ok(Uploaded {
+                signed_id: "sid".into(),
+                filename: "Q3 plan.pdf".into(),
+                byte_size: 4,
+                content_type: "application/pdf".into(),
+            }),
+        });
+        // Files alone can be sent.
+        assert_eq!(state.can_send(), Ok(()));
+        let [Command::Send(ask)] = &state.send()[..] else {
+            panic!("one send")
+        };
+        assert_eq!(ask.attachments, ["sid"]);
+        assert!(state.attachments.is_empty());
+    }
+
+    #[test]
+    fn a_refused_upload_comes_off_with_the_servers_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("setup.txt");
+        std::fs::write(&path, b"x").unwrap();
+        let mut state = ready();
+        state.attach(vec![path]);
+        state.update(Msg::Uploaded {
+            key: 1,
+            result: Err(Failure::new(
+                "attachment_refused",
+                "setup.txt is not a supported file type",
+            )),
+        });
+        assert!(state.attachments.is_empty());
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("setup.txt is not a supported file type")
+        );
+    }
+
+    #[test]
+    fn the_composer_takes_what_the_web_takes() {
+        assert!(accepts("Q3.PDF"));
+        assert!(accepts("main.rs"));
+        assert!(accepts("notes.log"));
+        assert!(!accepts("logo.svg"));
+        assert!(!accepts("setup.exe"));
+        assert!(!accepts("README"));
+    }
+
+    #[test]
+    fn a_decision_goes_once_and_reads_the_chat_again() {
+        let mut state = ready();
+        state.open_chat(2);
+        state.update(Msg::Shown {
+            chat: 2,
+            result: Ok(Transcript {
+                chat: summary(2, "idle"),
+                ..Transcript::default()
+            }),
+        });
+        let approve = Decision::Approve {
+            tool_call: 7,
+            for_rest_of_chat: true,
+        };
+        assert_eq!(
+            state.decide(approve.clone()),
+            vec![Command::Decide {
+                chat: 2,
+                decision: approve.clone()
+            }]
+        );
+        assert!(state.decide(approve).is_empty(), "one at a time");
+        let commands = state.update(Msg::Decided {
+            chat: 2,
+            result: Ok(summary(2, "processing")),
+        });
+        assert_eq!(commands, vec![Command::Open(2)]);
+        assert!(state.working() && state.deciding.is_none());
+    }
+
+    #[test]
+    fn forms_send_the_fields_as_typed() {
+        let question: Question = serde_json::from_value(serde_json::json!({
+            "id": 5, "service": "Notion", "decidable": true, "kind": "form",
+            "fields": [
+                { "name": "env", "type": "string", "required": true, "choices": ["staging", "production"] },
+                { "name": "days", "type": "integer", "default": 7 },
+                { "name": "drafts", "type": "boolean" },
+                { "name": "teams", "type": "array", "choices": ["Web", "Ops"], "default": ["Ops"] },
+                { "name": "note", "type": "string" },
+            ]
+        }))
+        .unwrap();
+        let mut form = default_form(&question);
+        form[0] = FieldValue::Text("production".into());
+        assert_eq!(
+            form_input(&question, Some(&form)),
+            serde_json::json!({ "env": "production", "days": "7", "drafts": false, "teams": ["Ops"] })
+        );
+    }
+
+    #[test]
+    fn branching_opens_the_new_chat_and_deleting_the_open_one_starts_afresh() {
+        let mut state = ready();
+        state.open_chat(2);
+        let commands = state.act(2, ChatAction::Branch(5));
+        assert_eq!(
+            commands,
+            vec![Command::Act {
+                chat: 2,
+                action: ChatAction::Branch(5)
+            }]
+        );
+        let commands = state.update(Msg::Acted {
+            chat: 2,
+            action: ChatAction::Branch(5),
+            result: Ok(Acted::Chat(summary(9, "idle"))),
+        });
+        assert_eq!(state.open, Some(9));
+        assert!(commands.contains(&Command::Open(9)));
+        state.act(9, ChatAction::Delete);
+        state.update(Msg::Acted {
+            chat: 9,
+            action: ChatAction::Delete,
+            result: Ok(Acted::Deleted),
+        });
+        assert_eq!(state.open, None);
+        assert!(state.list.chats.iter().all(|c| c.number != 9));
     }
 }

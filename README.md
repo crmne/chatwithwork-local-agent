@@ -194,7 +194,7 @@ The UI uses no CPU while nothing happens, follows `NO_COLOR`, and falls back to 
 
 ## Desktop app
 
-`cww-app` is a menu bar (macOS), notification area (Windows) or tray (Linux) app for the same daemon. It shows whether Chat with Work can reach this computer, pauses and resumes sharing, and has a settings window for shared folders, the deny list, the activity log, pairing, and start at login. On first run it starts the agent, pairs, and offers to share your Documents folder, and it shares nothing until you say so. It uses no CPU while idle.
+`cww-app` is a menu bar (macOS), notification area (Windows) or tray (Linux) app for the same daemon. It shows whether Chat with Work can reach this computer, pauses and resumes sharing, and has a window for your Chat with Work chats, drawn as the web draws them (models, attached files, approvals, and retry, branch, rename, delete and share included), and for shared folders, the deny list, the activity log, pairing, and start at login. On first run it starts the agent, pairs, and offers to share your Documents folder, and it shares nothing until you say so. It uses no CPU while idle.
 
 ```sh
 cargo run --release -p cww-app

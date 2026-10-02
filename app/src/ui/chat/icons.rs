@@ -31,10 +31,37 @@ pub enum Icon {
     Plug,
     Desktop,
     CaretUpDown,
+    DotsThree,
+    PencilSimple,
+    Trash,
+    ArrowsClockwise,
+    GitBranch,
+    Export,
+    HandPalm,
+    HourglassMedium,
+    Warning,
+    File,
+    FileImage,
+    FilePpt,
+    FileTxt,
+    FileCode,
+    FileAudio,
+    FileVideo,
 }
 
-const COUNT: usize = Icon::CaretUpDown as usize + 1;
+const COUNT: usize = Icon::FileVideo as usize + 1;
 const CELL: f32 = 64.0;
+/// Icons to a row of the atlas: 32 cells make 2048, the widest texture.
+const COLUMNS: usize = 32;
+const ROWS: usize = COUNT.div_ceil(COLUMNS);
+
+/// Where `icon` is in the atlas, in texture coordinates.
+fn uv(icon: Icon) -> Rect {
+    let i = icon as usize;
+    let (col, row) = ((i % COLUMNS) as f32, (i / COLUMNS) as f32);
+    let (w, h) = (1.0 / COLUMNS as f32, 1.0 / ROWS as f32);
+    Rect::from_min_size(pos2(col * w, row * h), vec2(w, h))
+}
 
 fn decode(png: &[u8]) -> egui::ColorImage {
     let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
@@ -62,7 +89,11 @@ pub struct Images {
 impl Images {
     pub fn load(ctx: &egui::Context) -> Self {
         let atlas = decode(include_bytes!("../../../assets/chat/icons.png"));
-        debug_assert_eq!(atlas.size[0], COUNT * CELL as usize, "atlas and Icon agree");
+        debug_assert_eq!(
+            atlas.size,
+            [COLUMNS * CELL as usize, ROWS * CELL as usize],
+            "atlas and Icon agree"
+        );
         Self {
             icons: ctx.load_texture("chat-icons", atlas, options()),
             logotype: ctx.load_texture(
@@ -81,12 +112,7 @@ impl Images {
 
     /// Draw `icon` filling `rect`, in `color`.
     pub fn icon(&self, painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
-        let i = icon as usize as f32;
-        let uv = Rect::from_min_max(
-            pos2(i / COUNT as f32, 0.0),
-            pos2((i + 1.0) / COUNT as f32, 1.0),
-        );
-        painter.image(self.icons.id(), rect, uv, color);
+        painter.image(self.icons.id(), rect, uv(icon), color);
     }
 
     /// Draw `icon` turned by `angle` radians around its center.
@@ -99,13 +125,12 @@ impl Images {
         color: Color32,
         angle: f32,
     ) {
-        let i = icon as usize as f32;
-        let uv = Rect::from_min_max(
-            pos2(i / COUNT as f32, 0.0),
-            pos2((i + 1.0) / COUNT as f32, 1.0),
-        );
         let mut mesh = egui::epaint::Mesh::with_texture(self.icons.id());
-        mesh.add_rect_with_uv(Rect::from_center_size(center, vec2(size, size)), uv, color);
+        mesh.add_rect_with_uv(
+            Rect::from_center_size(center, vec2(size, size)),
+            uv(icon),
+            color,
+        );
         mesh.rotate(egui::emath::Rot2::from_angle(angle), center);
         painter.add(egui::Shape::mesh(mesh));
     }
@@ -169,6 +194,6 @@ mod tests {
     #[test]
     fn the_atlas_has_a_cell_for_every_icon() {
         let atlas = super::decode(include_bytes!("../../../assets/chat/icons.png"));
-        assert_eq!(atlas.size, [super::COUNT * 64, 64]);
+        assert_eq!(atlas.size, [super::COLUMNS * 64, super::ROWS * 64]);
     }
 }

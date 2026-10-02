@@ -6,8 +6,11 @@
 //! transition, a streaming answer, running work's rings and shimmer. New
 //! text arrives from the follower thread, which wakes the window.
 
+pub mod cards;
 pub mod composer;
+pub mod controls;
 pub mod conversation;
+pub mod dialogs;
 pub mod highlight;
 pub mod icons;
 pub mod markdown;
@@ -81,6 +84,10 @@ pub struct ChatPage {
     new_chat_since: Option<f64>,
     /// Hold every animation at one moment, for snapshots.
     still: bool,
+    /// The file picker is open; what's picked arrives here.
+    picking: Option<std::sync::mpsc::Receiver<Vec<std::path::PathBuf>>>,
+    /// The window, to wake when the file picker closes.
+    ctx: Option<egui::Context>,
     /// When the list was last read because a chat in it was running.
     relisted: f64,
 }
@@ -111,6 +118,8 @@ impl ChatPage {
             greeting: seed % GREETINGS.len(),
             new_chat_since: None,
             still: false,
+            picking: None,
+            ctx: None,
             relisted: 0.0,
         }
     }
@@ -124,6 +133,11 @@ impl ChatPage {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn state(&self) -> &ChatState {
         &self.state
+    }
+
+    #[cfg(test)]
+    pub fn state_mut(&mut self) -> &mut ChatState {
+        &mut self.state
     }
 
     /// Pick the greeting (tests want the same one each time).
@@ -153,6 +167,27 @@ impl ChatPage {
     pub fn show(&mut self, ui: &mut Ui, env: &Env) -> Option<Action> {
         let ctx = ui.ctx().clone();
         self.runner.attach(&ctx);
+        if self.ctx.is_none() {
+            self.ctx = Some(ctx.clone());
+        }
+        // Files picked, or dropped on the window.
+        if let Some(rx) = &self.picking
+            && let Ok(paths) = rx.try_recv()
+        {
+            self.picking = None;
+            self.attach(paths);
+        }
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| p.is_absolute())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.attach(dropped);
+        }
         let paired = env
             .status
             .is_some_and(|s| s.is_paired() && s.connection.connection != "revoked");
@@ -253,9 +288,11 @@ impl ChatPage {
             animating |= self.new_chat_area(ui, main, &p, images, time, env, &mut action);
         }
 
-        // Moving things: running work, streaming, the drawer.
+        // Moving things: running work, streaming, uploads, the drawer.
         if !self.still
-            && (self.state.working() || self.state.list.chats.iter().any(|c| c.processing()))
+            && (self.state.working()
+                || self.state.uploading()
+                || self.state.list.chats.iter().any(|c| c.processing()))
         {
             animating = true;
         }
@@ -353,11 +390,30 @@ impl ChatPage {
                         focus_search: std::mem::take(&mut self.focus_search),
                     }
                     .show(&mut child, rect, &mut self.state);
-                    if event.is_some() {
+                    if matches!(
+                        event,
+                        Some(
+                            sidebar::Event::Open(_)
+                                | sidebar::Event::NewChat
+                                | sidebar::Event::Settings
+                                | sidebar::Event::Toggle
+                        )
+                    ) {
                         self.drawer = false;
                     }
                     self.sidebar_event(event, &mut action);
                 });
+        }
+
+        // The dialog over it all, and the clipboard.
+        for outcome in dialogs::show(&ctx, &mut self.state, &p, images) {
+            match outcome {
+                dialogs::Outcome::Commands(commands) => self.run(commands),
+                dialogs::Outcome::Copy(text) => ctx.copy_text(text),
+            }
+        }
+        if let Some(text) = self.state.clipboard.take() {
+            ctx.copy_text(text);
         }
 
         if animating {
@@ -387,6 +443,13 @@ impl ChatPage {
             }
             Some(sidebar::Event::Settings) => {
                 *action = Some(Action::Settings(super::Page::Folders))
+            }
+            Some(sidebar::Event::Rename(chat, title)) => {
+                let commands = self.state.act(chat, state::ChatAction::Rename(title));
+                self.run(commands);
+            }
+            Some(sidebar::Event::Delete(chat)) => {
+                self.state.dialog = Some(state::Dialog::Delete { chat });
             }
             None => {}
         }
@@ -493,6 +556,56 @@ impl ChatPage {
         }
     }
 
+    /// The native file picker, for files to attach. It's built on this
+    /// thread (AppKit wants that) and awaited on another; what's picked
+    /// comes back through `picked`.
+    fn pick_files(&mut self) {
+        if self.picking.is_some() || !self.state.ready() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.picking = Some(rx);
+        #[cfg(test)]
+        {
+            // Tests never open a window: they say what was picked.
+            let _ = tx.send(
+                tests::PICKED
+                    .with(|p| p.borrow_mut().take())
+                    .unwrap_or_default(),
+            );
+        }
+        #[cfg(not(test))]
+        {
+            let mut dialog = rfd::AsyncFileDialog::new().set_title("Attach Files");
+            if let Some(home) = crate::paths::home_dir() {
+                dialog = dialog.set_directory(home);
+            }
+            let picked = dialog.pick_files();
+            let ctx = self.ctx.clone();
+            let spawned = std::thread::Builder::new()
+                .name("cww-chat-pick".into())
+                .spawn(move || {
+                    let files = pollster::block_on(picked)
+                        .map(|files| files.iter().map(|f| f.path().to_path_buf()).collect())
+                        .unwrap_or_default();
+                    let _ = tx.send(files);
+                    if let Some(ctx) = ctx {
+                        ctx.request_repaint();
+                    }
+                });
+            if let Err(e) = spawned {
+                log::error!("can't open the file picker: {e}");
+                self.picking = None;
+            }
+        }
+    }
+
+    /// Files to attach: picked, or dropped on the window.
+    pub fn attach(&mut self, paths: Vec<std::path::PathBuf>) {
+        let commands = self.state.attach(paths);
+        self.run(commands);
+    }
+
     fn composer_event(
         &mut self,
         event: Option<composer::Event>,
@@ -510,7 +623,9 @@ impl ChatPage {
                 self.run(commands);
             }
             Some(composer::Event::Action) => self.lock_action(env, action),
-            Some(composer::Event::Attach) => self.open_chat_in_browser(env),
+            Some(composer::Event::Attach) => self.pick_files(),
+            Some(composer::Event::Detach(key)) => self.state.detach(key),
+            Some(composer::Event::PickModel(id)) => self.state.pick_model(&id),
             None => {}
         }
     }
@@ -536,6 +651,12 @@ impl ChatPage {
             sending: self.state.sending,
             can_send: self.state.can_send().is_ok(),
             time,
+            attachments: self.state.attachments.clone(),
+            models: match &self.state.models {
+                state::ModelList::Ready(models) => models.models.clone(),
+                _ => Vec::new(),
+            },
+            model: self.state.current_model(),
         }
     }
 
@@ -613,6 +734,33 @@ impl ChatPage {
                 conversation::Event::OpenUrl(url) => super::open_url(&url),
                 conversation::Event::OpenChat => self.open_chat_in_browser(env),
                 conversation::Event::Copy(text) => ctx.copy_text(text),
+                conversation::Event::Retry { message, user } => {
+                    if let Some(chat) = self.state.open {
+                        self.state.dialog = Some(state::Dialog::Retry {
+                            chat,
+                            message,
+                            user,
+                        });
+                    }
+                }
+                conversation::Event::Branch(message) => {
+                    if let Some(chat) = self.state.open {
+                        let commands = self.state.act(chat, state::ChatAction::Branch(message));
+                        self.run(commands);
+                    }
+                }
+                conversation::Event::Share => {
+                    if let Some(chat) = self.state.open {
+                        self.state.dialog = Some(state::Dialog::Share {
+                            chat,
+                            copied: false,
+                        });
+                    }
+                }
+                conversation::Event::Decide(decision) => {
+                    let commands = self.state.decide(decision);
+                    self.run(commands);
+                }
             }
         }
         let behind = output.content_size.y - output.inner_rect.height() - output.state.offset.y;
@@ -630,9 +778,13 @@ impl ChatPage {
         let focus = std::mem::take(&mut self.focus_composer);
         let mut event = None;
         let mut jump = false;
+        // Not constrained to the window: a constrained area keeps last
+        // frame's size and creeps up from the bottom edge, covering the
+        // conversation above the composer.
         egui::Area::new(Id::new("chat-dock"))
             .order(egui::Order::Middle)
-            .fixed_pos(rect.min - vec2(48.0, 64.0))
+            .constrain(false)
+            .fixed_pos(rect.min)
             .show(&ctx, |ui| {
                 ui.allocate_rect(rect, Sense::hover());
                 event = composer.show(ui, rect, &mut self.state.input, images, p, focus);
@@ -816,12 +968,10 @@ impl ChatPage {
     }
 }
 
-/// A failure over the composer: a question that didn't go.
+/// A failure over the composer: a question that didn't go, a file or a
+/// model refused.
 fn notice_toast(ctx: &egui::Context, composer: Rect, text: &str, p: &Palette, images: &Images) {
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        Id::new("chat-notice"),
-    ));
+    let painter = ctx.layer_painter(egui::LayerId::background());
     let galley = paint::layout(
         &painter,
         paint::job(text, tokens::scale::SMALL, p.ink, composer.width() - 64.0),
@@ -831,24 +981,33 @@ fn notice_toast(ctx: &egui::Context, composer: Rect, text: &str, p: &Palette, im
         pos2(composer.left(), composer.top() - 12.0 - height),
         vec2(composer.width(), height),
     );
-    painter.rect_filled(rect, tokens::RADIUS_CARD, p.surface);
-    painter.rect_stroke(
-        rect.shrink(0.5),
-        tokens::RADIUS_CARD,
-        egui::Stroke::new(1.0, p.line),
-        egui::StrokeKind::Middle,
-    );
-    painter
-        .with_clip_rect(Rect::from_min_size(rect.min, vec2(2.0, rect.height())))
-        .rect_filled(rect, tokens::RADIUS_CARD, p.negative());
-    images.icon_at(
-        &painter,
-        pos2(rect.left() + 16.0 + 9.0, rect.top() + 10.0 + 10.0),
-        18.0,
-        Icon::WarningCircle,
-        p.negative(),
-    );
-    painter.galley(pos2(rect.left() + 46.0, rect.top() + 10.0), galley, p.ink);
+    egui::Area::new(Id::new("chat-notice"))
+        .order(egui::Order::Foreground)
+        .constrain(false)
+        .fixed_pos(rect.min)
+        .show(ctx, |ui| {
+            let response = ui.allocate_rect(rect, Sense::hover());
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+            let painter = ui.painter();
+            painter.rect_filled(rect, tokens::RADIUS_CARD, p.surface);
+            painter.rect_stroke(
+                rect.shrink(0.5),
+                tokens::RADIUS_CARD,
+                egui::Stroke::new(1.0, p.line),
+                egui::StrokeKind::Middle,
+            );
+            painter
+                .with_clip_rect(Rect::from_min_size(rect.min, vec2(2.0, rect.height())))
+                .rect_filled(rect, tokens::RADIUS_CARD, p.negative());
+            images.icon_at(
+                painter,
+                pos2(rect.left() + 16.0 + 9.0, rect.top() + 10.0 + 10.0),
+                18.0,
+                Icon::WarningCircle,
+                p.negative(),
+            );
+            painter.galley(pos2(rect.left() + 46.0, rect.top() + 10.0), galley, p.ink);
+        });
 }
 
 /// `.empty-state`: a dashed card on the dot grid with an icon, one bold

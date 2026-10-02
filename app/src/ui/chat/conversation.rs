@@ -9,14 +9,17 @@ use std::sync::Arc;
 
 use egui::{Id, Pos2, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 
-use cww::tui::chat::{Entry, Source, Step};
+use cww::tui::chat::{Attachment, Can, Entry, Source, Step};
 
+use super::cards::{Card, CardEvent, CardInputs, Cards};
+use super::composer::file_icon;
 use super::icons::{Icon, Images};
 use super::markdown::{self, Block};
 use super::mcp_app::McpAppSlot;
 use super::paint;
 use super::prose::{self, Clicked, Prose};
 use super::state::ChatState;
+use super::state::Decision;
 use super::tokens::{self, Palette, Type, scale};
 use super::widgets;
 
@@ -26,6 +29,17 @@ pub enum Event {
     /// Open this chat in the browser (a tool's view, for now).
     OpenChat,
     Copy(String),
+    /// Retry this question or answer (after the web's confirmation).
+    Retry {
+        message: u64,
+        user: bool,
+    },
+    /// Branch into a new chat up to this message.
+    Branch(u64),
+    /// Open the chat's share dialog.
+    Share,
+    /// Settle a step the answer stopped at.
+    Decide(Decision),
 }
 
 /// What the conversation remembers between frames.
@@ -39,6 +53,10 @@ pub struct ConversationView {
     seen: HashMap<String, f64>,
     /// Parsed answers, by message, with a hash of what they were parsed from.
     parsed: HashMap<u64, (u64, Arc<Vec<Block>>)>,
+    /// What's filled in on the approval and question cards.
+    pub inputs: CardInputs,
+    /// Review was clicked: bring the first card into view.
+    review: bool,
 }
 
 impl ConversationView {
@@ -86,6 +104,10 @@ enum Item<'a> {
     Streamed(u64, &'a str),
     Pending(&'a str),
     Thinking,
+    /// Cards no step of the conversation claims.
+    Cards(Vec<Card<'a>>),
+    /// "Waiting for your approval. Review"
+    Waiting(String),
 }
 
 impl Conversation<'_> {
@@ -117,6 +139,67 @@ impl Conversation<'_> {
         if working && !live_activity {
             items.push(Item::Thinking);
         }
+        // What the answer stopped at, at the steps that wait for it, in order.
+        let transcript = state.transcript.as_ref();
+        let mut cards: Vec<Card> = transcript
+            .map(|t| {
+                t.approvals
+                    .iter()
+                    .map(Card::Approval)
+                    .chain(t.questions.iter().map(Card::Question))
+                    .collect()
+            })
+            .unwrap_or_default();
+        cards.sort_by_key(Card::id);
+        let mut placed: HashMap<u64, Vec<(usize, Card)>> = HashMap::new();
+        let mut queue = cards.iter().copied();
+        let mut last_activity = None;
+        for entry in entries {
+            if let Entry::Activity { id, steps, .. } = entry {
+                last_activity = Some((*id, steps.len()));
+                for (n, step) in steps.iter().enumerate() {
+                    if step.waiting
+                        && let Some(card) = queue.next()
+                    {
+                        placed.entry(*id).or_default().push((n, card));
+                    }
+                }
+            }
+        }
+        let leftover: Vec<Card> = queue.collect();
+        if !leftover.is_empty() {
+            match last_activity {
+                Some((id, steps)) => placed
+                    .entry(id)
+                    .or_default()
+                    .extend(leftover.into_iter().map(|c| (steps, c))),
+                None => items.push(Item::Cards(leftover)),
+            }
+        }
+        if !working && let Some(first) = cards.first() {
+            let project = state.open_summary().is_some_and(|c| c.project.is_some());
+            let text = match (first, first.decidable()) {
+                (Card::Approval(_), true) => "Waiting for your approval.".to_string(),
+                (Card::Question(_), true) => "Waiting for your answer.".to_string(),
+                (Card::Approval(a), false) => format!(
+                    "Waiting for {} to approve a change.",
+                    a.waiting_for.as_deref().unwrap_or("someone")
+                ),
+                (Card::Question(q), false) if project => format!(
+                    "Waiting for {} to answer a question.",
+                    q.waiting_for.as_deref().unwrap_or("someone")
+                ),
+                (Card::Question(_), false) => "Waiting for your answer.".to_string(),
+            };
+            items.push(Item::Waiting(text));
+        }
+        let can = state.open_summary().and_then(|c| c.can).unwrap_or_default();
+        let cards_ui = Cards {
+            palette: self.palette,
+            images: self.images,
+            deciding: state.deciding,
+        };
+        let review = std::mem::take(&mut view.review);
         // The latest answer with text keeps its actions in view.
         let latest = items.iter().rposition(|item| match item {
             Item::Entry(Entry::Assistant { id, content, .. }) => {
@@ -148,6 +231,8 @@ impl Conversation<'_> {
                 Item::Entry(Entry::Unknown) => format!("unknown-{i}"),
                 Item::Pending(_) => format!("user-pending-{}", entries.len()),
                 Item::Thinking => "thinking".into(),
+                Item::Cards(_) => "cards".into(),
+                Item::Waiting(_) => "waiting".into(),
             };
             let rise = if self.still {
                 1.0
@@ -176,19 +261,29 @@ impl Conversation<'_> {
                     id,
                     content,
                     author,
-                    ..
+                    attachments,
                 }) => {
                     self.user(
                         &mut child,
                         Id::new(("user", *id)),
+                        Some(*id),
                         content,
                         author.as_deref(),
+                        attachments,
+                        can,
                         &mut events,
                     );
                 }
-                Item::Pending(text) => {
-                    self.user(&mut child, Id::new("user-pending"), text, None, &mut events)
-                }
+                Item::Pending(text) => self.user(
+                    &mut child,
+                    Id::new("user-pending"),
+                    None,
+                    text,
+                    None,
+                    &[],
+                    Can::default(),
+                    &mut events,
+                ),
                 Item::Entry(Entry::Assistant {
                     id,
                     content,
@@ -210,6 +305,7 @@ impl Conversation<'_> {
                             sources,
                             Some(i) == latest,
                             caret,
+                            can,
                             view,
                             &mut events,
                         );
@@ -225,6 +321,7 @@ impl Conversation<'_> {
                         &[],
                         Some(i) == latest,
                         caret,
+                        Can::default(),
                         view,
                         &mut events,
                     );
@@ -244,6 +341,7 @@ impl Conversation<'_> {
                         None
                     };
                     let detail = live_progress.or(details.as_deref());
+                    let here = placed.remove(id).unwrap_or_default();
                     animating |= self.activity(
                         &mut child,
                         *id,
@@ -252,6 +350,9 @@ impl Conversation<'_> {
                         services,
                         *pending,
                         steps,
+                        &here,
+                        &cards_ui,
+                        review,
                         view,
                         &mut events,
                     );
@@ -268,6 +369,19 @@ impl Conversation<'_> {
                     };
                     self.thinking(&mut child, label, state.stopping);
                 }
+                Item::Cards(cards) => {
+                    for card in cards {
+                        if let Some(e) = cards_ui.show(&mut child, card, &mut view.inputs, review) {
+                            events.push(card_event(e));
+                        }
+                    }
+                }
+                Item::Waiting(text) => {
+                    if super::cards::waiting_line(&mut child, &text, self.palette, self.images) {
+                        view.review = true;
+                        child.ctx().request_repaint();
+                    }
+                }
             }
             let height = child.min_rect().height() - 6.0 * (1.0 - eased);
             ui.allocate_exact_size(vec2(width, height.max(0.0)), Sense::hover());
@@ -275,16 +389,21 @@ impl Conversation<'_> {
         (events, animating)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn user(
         &self,
         ui: &mut Ui,
         id: Id,
+        message: Option<u64>,
         content: &str,
         author: Option<&str>,
+        attachments: &[Attachment],
+        can: Can,
         events: &mut Vec<Event>,
     ) {
         let p = self.palette;
         let width = ui.available_width();
+        let top = ui.cursor().top();
         ui.add_space(12.0);
         if let Some(author) = author {
             let galley = paint::layout(
@@ -299,62 +418,220 @@ impl Conversation<'_> {
             );
         }
         let max = (width * 0.85).min(576.0);
-        let galley = paint::layout(
-            ui.painter(),
-            paint::job(content.trim_end(), scale::BODY, p.ink, max - 32.0),
-        );
-        let size = galley.size() + vec2(32.0, 20.0);
-        let (row, response) = ui.allocate_exact_size(vec2(width, size.y), Sense::hover());
-        let bubble = Rect::from_min_size(pos2(row.right() - size.x, row.top()), size);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, content));
-        let painter = ui.painter();
-        // Corners 14, but 6 at the bottom right, towards you.
-        let outline = paint::rounded_outline(bubble, [14.0, 14.0, tokens::RADIUS_TAG, 14.0], 10);
-        painter.add(egui::Shape::convex_polygon(
-            outline.clone(),
-            p.surface_raised,
-            egui::Stroke::NONE,
-        ));
-        let inner = paint::rounded_outline(
-            bubble.shrink(0.5),
-            [13.5, 13.5, tokens::RADIUS_TAG - 0.5, 13.5],
-            10,
-        );
-        painter.add(egui::Shape::closed_line(
-            inner,
-            egui::Stroke::new(1.0, p.line),
-        ));
-        painter.galley(bubble.min + vec2(16.0, 10.0), galley, p.ink);
-        // Copy, on hover.
-        ui.add_space(6.0);
-        let hovered =
-            ui.rect_contains_pointer(Rect::from_min_max(row.min, row.max + vec2(0.0, 34.0)));
-        let (actions, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
-        let shown = widgets::hover(ui, id.with("actions"), hovered, tokens::FAST);
-        if shown > 0.0 {
-            let rect = Rect::from_min_size(
-                pos2(actions.right() + 6.0 - 28.0, actions.top()),
-                vec2(28.0, 28.0),
+        if !content.trim().is_empty() {
+            let galley = paint::layout(
+                ui.painter(),
+                paint::job(content.trim_end(), scale::BODY, p.ink, max - 32.0),
             );
-            let mut faded = ui.new_child(UiBuilder::new().max_rect(rect));
-            faded.set_opacity(shown);
-            if self
-                .action(&mut faded, id.with("copy"), rect, Icon::Copy, "Copy")
-                .clicked()
-            {
-                events.push(Event::Copy(content.to_string()));
+            let size = galley.size() + vec2(32.0, 20.0);
+            let (row, _) = ui.allocate_exact_size(vec2(width, size.y), Sense::hover());
+            let bubble = Rect::from_min_size(pos2(row.right() - size.x, row.top()), size);
+            let text_rect = Rect::from_min_size(bubble.min + vec2(16.0, 10.0), galley.size());
+            let response = ui.interact(text_rect, id.with("text"), prose::selectable_sense());
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, content));
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+            }
+            let painter = ui.painter();
+            // Corners 14, but 6 at the bottom right, towards you.
+            let outline =
+                paint::rounded_outline(bubble, [14.0, 14.0, tokens::RADIUS_TAG, 14.0], 10);
+            painter.add(egui::Shape::convex_polygon(
+                outline.clone(),
+                p.surface_raised,
+                egui::Stroke::NONE,
+            ));
+            let inner = paint::rounded_outline(
+                bubble.shrink(0.5),
+                [13.5, 13.5, tokens::RADIUS_TAG - 0.5, 13.5],
+                10,
+            );
+            painter.add(egui::Shape::closed_line(
+                inner,
+                egui::Stroke::new(1.0, p.line),
+            ));
+            egui::text_selection::LabelSelectionState::label_text_selection(
+                ui,
+                &response,
+                text_rect.min,
+                galley,
+                p.ink,
+                egui::Stroke::NONE,
+            );
+        }
+        if !attachments.is_empty() {
+            if !content.trim().is_empty() {
+                ui.add_space(6.0);
+            }
+            self.file_chips(ui, id, attachments, max);
+        }
+        // Copy and Retry, on hover.
+        ui.add_space(6.0);
+        let mut actions: Vec<(Icon, &str, &str, Event)> = Vec::new();
+        if !content.trim().is_empty() {
+            actions.push((
+                Icon::Copy,
+                "Copy message",
+                "Copy",
+                Event::Copy(content.to_string()),
+            ));
+        }
+        if let Some(message) = message
+            && can.retry
+        {
+            actions.push((
+                Icon::ArrowsClockwise,
+                "Retry this question",
+                "Retry",
+                Event::Retry {
+                    message,
+                    user: true,
+                },
+            ));
+        }
+        let bottom = ui.cursor().top();
+        let hovered = ui.rect_contains_pointer(Rect::from_min_max(
+            pos2(ui.cursor().left(), top),
+            pos2(ui.cursor().left() + width, bottom + 34.0),
+        ));
+        let (row, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
+        let shown = widgets::hover(ui, id.with("actions"), hovered, tokens::FAST);
+        if shown > 0.0 && !actions.is_empty() {
+            let mut x =
+                row.right() + 6.0 - 28.0 * actions.len() as f32 - 2.0 * (actions.len() - 1) as f32;
+            for (n, (icon, label, tip, event)) in actions.into_iter().enumerate() {
+                let rect = Rect::from_min_size(pos2(x, row.top()), vec2(28.0, 28.0));
+                let mut faded = ui.new_child(UiBuilder::new().max_rect(rect));
+                faded.set_opacity(shown);
+                if self
+                    .action(&mut faded, id.with(("action", n)), rect, icon, label, tip)
+                    .clicked()
+                {
+                    events.push(event);
+                }
+                x += 30.0;
             }
         }
         ui.add_space(4.0);
     }
 
-    fn action(&self, ui: &mut Ui, id: Id, rect: Rect, icon: Icon, label: &str) -> egui::Response {
+    /// `.message__attachments`: the files sent with a question, as
+    /// `.file-chip`s, right-aligned and wrapping, at most `max` wide.
+    fn file_chips(&self, ui: &mut Ui, id: Id, attachments: &[Attachment], max: f32) {
+        let p = self.palette;
+        let width = ui.available_width();
+        let painter = ui.painter().clone();
+        // Lay the chips out in rows from the right.
+        let chips: Vec<(f32, Arc<egui::Galley>, Arc<egui::Galley>, &Attachment)> = attachments
+            .iter()
+            .map(|a| {
+                let size = paint::layout(
+                    &painter,
+                    paint::job(
+                        &rails_size(a.byte_size),
+                        scale::MICRO,
+                        p.ink_faint,
+                        f32::INFINITY,
+                    ),
+                );
+                let name_max = 288.0 - 8.0 - 24.0 - 8.0 - 8.0 - size.size().x - 12.0;
+                let name = paint::layout(
+                    &painter,
+                    paint::line_job(&a.filename, scale::SMALLER.weight(550.0), p.ink, name_max),
+                );
+                let w = 8.0 + 24.0 + 8.0 + name.size().x + 8.0 + size.size().x + 12.0;
+                (w, name, size, a)
+            })
+            .collect();
+        let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut used = 0.0;
+        for (n, (w, ..)) in chips.iter().enumerate() {
+            let need = if rows.last().is_some_and(|r| r.is_empty()) {
+                *w
+            } else {
+                used + 6.0 + w
+            };
+            if need > max && !rows.last().is_some_and(|r| r.is_empty()) {
+                rows.push(vec![n]);
+                used = *w;
+            } else {
+                rows.last_mut().expect("a row").push(n);
+                used = need;
+            }
+        }
+        for (r, row) in rows.iter().enumerate() {
+            if r > 0 {
+                ui.add_space(6.0);
+            }
+            let (line, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
+            let total: f32 =
+                row.iter().map(|&n| chips[n].0).sum::<f32>() + 6.0 * (row.len() - 1) as f32;
+            let mut x = line.right() - total;
+            for &n in row {
+                let (w, name, size, attachment) = &chips[n];
+                let rect = Rect::from_min_size(pos2(x, line.top()), vec2(*w, 36.0));
+                x += w + 6.0;
+                let chip_id = id.with(("file", n));
+                let response = ui.interact(rect, chip_id, Sense::hover());
+                let label = format!(
+                    "{}, {}",
+                    attachment.filename,
+                    rails_size(attachment.byte_size)
+                );
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &label)
+                });
+                let t = widgets::hover(ui, chip_id, response.hovered(), tokens::FAST);
+                let painter = ui.painter();
+                painter.rect_filled(rect, tokens::RADIUS_CONTROL, p.surface);
+                painter.rect_stroke(
+                    rect.shrink(0.5),
+                    tokens::RADIUS_CONTROL - 0.5,
+                    egui::Stroke::new(1.0, tokens::lerp_rgb(p.line, p.line_strong, t)),
+                    egui::StrokeKind::Middle,
+                );
+                let (icon, tint) = file_icon(&attachment.content_type, p);
+                self.images.icon_at(
+                    painter,
+                    pos2(rect.left() + 8.0 + 12.0, rect.center().y),
+                    24.0,
+                    icon,
+                    tint,
+                );
+                let nx = rect.left() + 8.0 + 24.0 + 8.0;
+                painter.galley(
+                    pos2(nx, rect.center().y - name.size().y / 2.0),
+                    name.clone(),
+                    p.ink,
+                );
+                painter.galley(
+                    pos2(
+                        nx + name.size().x + 8.0,
+                        rect.center().y - size.size().y / 2.0 + 0.5,
+                    ),
+                    size.clone(),
+                    p.ink_faint,
+                );
+            }
+        }
+    }
+
+    fn action(
+        &self,
+        ui: &mut Ui,
+        id: Id,
+        rect: Rect,
+        icon: Icon,
+        label: &str,
+        tip: &str,
+    ) -> egui::Response {
         let p = self.palette;
         widgets::IconButton {
             icon,
             icon_size: 15.0,
             label,
-            tooltip: Some(label),
+            tooltip: Some(tip),
             color: p.ink_faint,
             hover_color: p.ink,
             wash: 6.0,
@@ -374,6 +651,7 @@ impl Conversation<'_> {
         sources: &[Source],
         latest: bool,
         caret: bool,
+        can: Can,
         view: &mut ConversationView,
         events: &mut Vec<Event>,
     ) {
@@ -413,21 +691,59 @@ impl Conversation<'_> {
             tokens::FAST,
         );
         if shown > 0.0 {
-            let rect =
-                Rect::from_min_size(pos2(footer.left() - 6.0, footer.top()), vec2(28.0, 28.0));
-            let mut faded = ui.new_child(UiBuilder::new().max_rect(rect));
-            faded.set_opacity(shown);
-            if self
-                .action(
-                    &mut faded,
-                    Id::new(("answer-copy", id)),
-                    rect,
-                    Icon::Copy,
-                    "Copy",
-                )
-                .clicked()
-            {
-                events.push(Event::Copy(text.to_string()));
+            // `.message__actions`: Copy, then what the chat allows.
+            let mut actions: Vec<(Icon, &str, &str, Event)> = vec![(
+                Icon::Copy,
+                "Copy message",
+                "Copy",
+                Event::Copy(text.to_string()),
+            )];
+            if can.retry {
+                actions.push((
+                    Icon::ArrowsClockwise,
+                    "Retry this answer",
+                    "Retry",
+                    Event::Retry {
+                        message: id,
+                        user: false,
+                    },
+                ));
+            }
+            if can.branch {
+                actions.push((
+                    Icon::GitBranch,
+                    "Branch into a new chat",
+                    "Branch into a new chat",
+                    Event::Branch(id),
+                ));
+            }
+            if can.share {
+                actions.push((
+                    Icon::Export,
+                    "Share a public link to this chat",
+                    "Share",
+                    Event::Share,
+                ));
+            }
+            let mut x = footer.left() - 6.0;
+            for (n, (icon, label, tip, event)) in actions.into_iter().enumerate() {
+                let rect = Rect::from_min_size(pos2(x, footer.top()), vec2(28.0, 28.0));
+                let mut faded = ui.new_child(UiBuilder::new().max_rect(rect));
+                faded.set_opacity(shown);
+                if self
+                    .action(
+                        &mut faded,
+                        Id::new(("answer-action", id, n)),
+                        rect,
+                        icon,
+                        label,
+                        tip,
+                    )
+                    .clicked()
+                {
+                    events.push(event);
+                }
+                x += 30.0;
             }
         }
         if !sources.is_empty() {
@@ -669,6 +985,9 @@ impl Conversation<'_> {
         services: &[String],
         pending: bool,
         steps: &[Step],
+        cards: &[(usize, Card)],
+        cards_ui: &Cards,
+        review: bool,
         view: &mut ConversationView,
         events: &mut Vec<Event>,
     ) -> bool {
@@ -676,7 +995,9 @@ impl Conversation<'_> {
         let mut animating = false;
         let width = ui.available_width();
         let has_app = steps.iter().any(|s| s.app.is_some());
-        let open = *view.expanded.get(&id).unwrap_or(&has_app);
+        // A step waiting for the person opens the log, so its card shows.
+        let waiting = steps.iter().any(|s| s.waiting) || !cards.is_empty();
+        let open = *view.expanded.get(&id).unwrap_or(&(has_app || waiting));
         let egui_id = Id::new(("activity", id));
         ui.add_space(8.0);
         // The wire wires in while the line is live and retracts after.
@@ -705,9 +1026,12 @@ impl Conversation<'_> {
             .as_deref()
             .map(|d| paint::layout(ui.painter(), paint::job(d, ty, p.ink_faint, f32::INFINITY)));
         let wire_w = (6.0 + 24.0 + 4.0) * wire;
+        // `.activity__line--waiting`: an attention dot after the title.
+        let dot_w = if waiting { 8.0 + 7.0 } else { 0.0 };
         let text_max = (width - 4.0 - wire_w - avatar_w - 10.0 - 8.0 - 12.0 - 10.0).max(40.0);
-        let text_w = (title_galley.size().x + detail_galley.as_ref().map_or(0.0, |g| g.size().x))
-            .min(text_max);
+        let text_w =
+            (title_galley.size().x + dot_w + detail_galley.as_ref().map_or(0.0, |g| g.size().x))
+                .min(text_max);
         let pill_w = 4.0
             + wire_w
             + avatar_w
@@ -774,13 +1098,20 @@ impl Conversation<'_> {
         let text_color = tokens::lerp_rgb(p.ink, p.ink, t);
         let mut job = paint::job(title, ty.weight(550.0), text_color, f32::INFINITY);
         if let Some(d) = &detail_text {
-            job.append(d, 0.0, ty.format(p.ink_faint));
+            job.append(d, if waiting { dot_w } else { 0.0 }, ty.format(p.ink_faint));
         }
         job.wrap.max_width = text_w + 0.5;
         job.wrap.max_rows = 1;
         job.wrap.break_anywhere = true;
         let line = paint::layout(&painter, job);
         let pos = pos2(x, cy - line.size().y / 2.0);
+        if waiting && title_galley.size().x + dot_w <= text_w + 0.5 {
+            painter.circle_filled(
+                pos2(pos.x + title_galley.size().x + 8.0 + 3.5, cy - 1.0),
+                3.5,
+                p.attention,
+            );
+        }
         if pending {
             paint::shimmer(&painter, pos, &line, p.ink_faint, self.time);
         } else {
@@ -818,6 +1149,11 @@ impl Conversation<'_> {
             log.spacing_mut().item_spacing = vec2(0.0, 6.0);
             for (n, step) in steps.iter().enumerate() {
                 self.step(&mut log, step, pending);
+                for (_, card) in cards.iter().filter(|(at, _)| *at == n) {
+                    if let Some(e) = cards_ui.show(&mut log, *card, &mut view.inputs, review) {
+                        events.push(card_event(e));
+                    }
+                }
                 if let Some(app) = &step.app {
                     let slot = McpAppSlot {
                         app,
@@ -830,6 +1166,11 @@ impl Conversation<'_> {
                         events.push(Event::OpenChat);
                     }
                     log.add_space(2.0);
+                }
+            }
+            for (_, card) in cards.iter().filter(|(at, _)| *at >= steps.len()) {
+                if let Some(e) = cards_ui.show(&mut log, *card, &mut view.inputs, review) {
+                    events.push(card_event(e));
                 }
             }
             let log_height = log.min_rect().height() + 8.0;
@@ -1015,6 +1356,42 @@ impl Conversation<'_> {
         );
         paint::shimmer(painter, pos, &galley, p.ink_faint, self.time);
     }
+}
+
+fn card_event(event: CardEvent) -> Event {
+    match event {
+        CardEvent::Decide(decision) => Event::Decide(decision),
+        CardEvent::OpenPage(url) => Event::OpenUrl(url),
+    }
+}
+
+/// A size as Rails' `number_to_human_size` writes it: "47.1 KB", "18 KB".
+pub fn rails_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} {}", if bytes == 1 { "Byte" } else { "Bytes" });
+    }
+    let units = ["KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < units.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    // Three significant digits, without trailing zeros.
+    let digits = if value >= 100.0 {
+        0
+    } else if value >= 10.0 {
+        1
+    } else {
+        2
+    };
+    let text = format!("{value:.digits$}");
+    let text = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        text
+    };
+    format!("{text} {}", units[unit])
 }
 
 fn step_icon(step: &Step) -> Icon {

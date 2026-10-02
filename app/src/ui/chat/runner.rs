@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use cww::control::Closer;
 use cww::tui::chat::Chats;
 
-use super::state::{Command, Msg};
+use super::state::{Acted, ChatAction, Command, Decision, Msg};
 
 /// How often to check whether the owner allowed chats, and for how long.
 const ACCESS_POLL: Duration = Duration::from_secs(5);
@@ -116,12 +116,68 @@ impl Runner {
                     });
                 }),
             ),
-            Command::Send { chat, text } => spawn(
+            Command::Send(ask) => spawn(
                 "cww-chat-send",
                 Box::new(move || {
                     wake.send(Msg::Sent {
+                        chat: ask.chat,
+                        result: chats.ask(&ask),
+                    });
+                }),
+            ),
+            Command::Models => spawn(
+                "cww-chat-models",
+                Box::new(move || {
+                    wake.send(Msg::Models(chats.models()));
+                }),
+            ),
+            Command::Upload { key, path } => spawn(
+                "cww-chat-upload",
+                Box::new(move || {
+                    wake.send(Msg::Uploaded {
+                        key,
+                        result: chats.upload(&path),
+                    });
+                }),
+            ),
+            Command::Decide { chat, decision } => spawn(
+                "cww-chat-decide",
+                Box::new(move || {
+                    let result = match decision {
+                        Decision::Approve {
+                            tool_call,
+                            for_rest_of_chat,
+                        } => chats.approve(chat, tool_call, for_rest_of_chat),
+                        Decision::Deny { tool_call, reason } => {
+                            chats.deny(chat, tool_call, reason.as_deref())
+                        }
+                        Decision::Answer { tool_call, input } => {
+                            chats.answer(chat, tool_call, input)
+                        }
+                        Decision::Decline { tool_call } => chats.decline(chat, tool_call),
+                    };
+                    wake.send(Msg::Decided { chat, result });
+                }),
+            ),
+            Command::Act { chat, action } => spawn(
+                "cww-chat-act",
+                Box::new(move || {
+                    let result = match &action {
+                        ChatAction::Retry(message) => {
+                            chats.retry(chat, Some(*message)).map(Acted::Chat)
+                        }
+                        ChatAction::Branch(message) => {
+                            chats.branch(chat, Some(*message)).map(Acted::Chat)
+                        }
+                        ChatAction::Rename(title) => chats.rename(chat, title).map(Acted::Chat),
+                        ChatAction::Delete => chats.delete(chat).map(|()| Acted::Deleted),
+                        ChatAction::Share => chats.share(chat).map(Acted::Shared),
+                        ChatAction::Unshare => chats.unshare(chat).map(Acted::Chat),
+                    };
+                    wake.send(Msg::Acted {
                         chat,
-                        result: chats.send(chat, &text),
+                        action,
+                        result,
                     });
                 }),
             ),
