@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use cww::tui::chat::{
-    AccessRequest, Ask, ChatList, ChatSummary, Entry, Failure, Field, Live, Models, Question,
-    Shared, Transcript, Uploaded,
+    AccessRequest, Ask, ChatList, ChatSummary, Entry, Failure, Field, ListLive, Live, Models,
+    Question, Shared, Transcript, Uploaded,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +21,8 @@ pub enum Command {
     Open(u64),
     /// Follow one chat live, or stop following.
     Follow(Option<u64>),
+    /// Keep the list of chats current, starting over, or stop.
+    FollowList(bool),
     /// Ask in a chat, or in a new one.
     Send(Ask),
     Cancel(u64),
@@ -83,6 +85,11 @@ pub enum Msg {
         chat: u64,
         failure: Failure,
     },
+    /// A change to the list, as the server keeps it current.
+    ListLive(ListLive),
+    /// Keeping the list current stopped: the daemon went away, or can't
+    /// (an older one refuses the `chats` topic).
+    ListFollowEnded(Option<Failure>),
 }
 
 /// Whether chats can be used here, and if not, why.
@@ -276,6 +283,11 @@ pub struct ChatState {
     pub clipboard: Option<String>,
     /// The daemon is running and paired, so chats can be asked for.
     paired: bool,
+    /// The list is kept current by the server: no need to read it again
+    /// after a change made here, or now and then while a chat runs.
+    pub list_live: bool,
+    /// A follower for the list was started and hasn't ended.
+    list_followed: bool,
 }
 
 impl Default for ChatState {
@@ -308,6 +320,8 @@ impl Default for ChatState {
             acting: None,
             clipboard: None,
             paired: false,
+            list_live: false,
+            list_followed: false,
         }
     }
 }
@@ -390,11 +404,15 @@ impl ChatState {
             // Reads under way fail with the daemon; read again once it's back.
             self.loading = false;
             self.stale = false;
+            let mut commands = Vec::new();
             if followed {
-                vec![Command::Follow(None)]
-            } else {
-                Vec::new()
+                commands.push(Command::Follow(None));
             }
+            self.list_live = false;
+            if std::mem::take(&mut self.list_followed) {
+                commands.push(Command::FollowList(false));
+            }
+            commands
         }
     }
 
@@ -705,18 +723,16 @@ impl ChatState {
                 let was_ready = self.ready();
                 self.access = Access::Ready;
                 self.list = list;
+                let mut commands = Vec::new();
                 if self.models == ModelList::Unknown {
                     self.models = ModelList::Loading;
-                    let mut commands = vec![Command::Models];
-                    if let Some(open) = self.open
-                        && !was_ready
-                        && self.following != Following::Starting
-                    {
-                        self.following = Following::Starting;
-                        commands.push(Command::Follow(Some(open)));
-                        commands.extend(self.refresh(open));
-                    }
-                    return commands;
+                    commands.push(Command::Models);
+                }
+                // Chats are allowed (again): keep the list current from
+                // now on, unless that's under way.
+                if !was_ready && !self.list_followed {
+                    self.list_followed = true;
+                    commands.push(Command::FollowList(true));
                 }
                 // Chats are back (allowed again, say): follow the open one
                 // again, unless that's already under way.
@@ -725,10 +741,10 @@ impl ChatState {
                     && self.following != Following::Starting
                 {
                     self.following = Following::Starting;
-                    let mut commands = vec![Command::Follow(Some(open))];
+                    commands.push(Command::Follow(Some(open)));
                     commands.extend(self.refresh(open));
-                    return commands;
                 }
+                return commands;
             }
             Msg::Listed(Err(failure)) => {
                 self.failure(failure);
@@ -767,9 +783,8 @@ impl ChatState {
                 match result {
                     Ok(summary) => {
                         let number = summary.number;
-                        self.list.chats.retain(|c| c.number != number);
-                        self.list.chats.insert(0, summary);
-                        let mut commands = vec![Command::List];
+                        self.upsert_chat(summary);
+                        let mut commands = self.list_again();
                         if chat.is_none() && self.open.is_none() {
                             // The first question made the chat: follow it,
                             // and the model picked for it goes with it.
@@ -900,6 +915,98 @@ impl ChatState {
                     }
                 }
             }
+            Msg::ListLive(live) => return self.list_changed(live),
+            Msg::ListFollowEnded(_) => {
+                self.list_followed = false;
+                self.list_live = false;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Read the list again after a change made here, unless the server
+    /// keeps it current anyway.
+    fn list_again(&self) -> Vec<Command> {
+        if self.list_live {
+            Vec::new()
+        } else {
+            vec![Command::List]
+        }
+    }
+
+    /// A chat as the server last sent it: a new one goes in, another is
+    /// replaced, and the list stays newest first.
+    pub fn upsert_chat(&mut self, chat: ChatSummary) {
+        let chats = &mut self.list.chats;
+        chats.retain(|c| c.number != chat.number);
+        let at = chats
+            .iter()
+            .position(|c| newer(&chat.updated_at, &c.updated_at))
+            .unwrap_or(chats.len());
+        chats.insert(at, chat.clone());
+        if let Some(transcript) = self
+            .transcript
+            .as_mut()
+            .filter(|t| t.chat.number == chat.number)
+        {
+            transcript.chat = chat;
+        }
+    }
+
+    /// A chat that's gone from the list: deleted, or out of sight now.
+    /// Open, it closes, saying so.
+    fn remove_chat(&mut self, number: u64) -> Vec<Command> {
+        self.list.chats.retain(|c| c.number != number);
+        if self.menu == Some(number) {
+            self.menu = None;
+        }
+        if self.renaming.as_ref().is_some_and(|(n, _)| *n == number) {
+            self.renaming = None;
+        }
+        if self.open != Some(number) {
+            return Vec::new();
+        }
+        let commands = self.new_chat();
+        self.notice = Some(GONE.into());
+        commands
+    }
+
+    /// A change to the list, as the server keeps it current.
+    fn list_changed(&mut self, live: ListLive) -> Vec<Command> {
+        match live {
+            ListLive::Watching => {
+                self.list_live = true;
+                // Catch up on what changed before the subscription.
+                if self.ready() {
+                    return vec![Command::List];
+                }
+            }
+            ListLive::Missed => {
+                if self.ready() {
+                    return vec![Command::List];
+                }
+            }
+            ListLive::Refused | ListLive::Unsupported | ListLive::Offline => {
+                self.list_live = false;
+            }
+            // Changes only apply to a list that was read.
+            _ if !self.ready() => {}
+            ListLive::Chat(chat) => {
+                let number = chat.number;
+                let moved = self.open == Some(number)
+                    && self
+                        .open_summary()
+                        .is_some_and(|open| open.state != chat.state);
+                self.upsert_chat(chat);
+                // The open chat's follower says what changed, unless it
+                // can't follow it.
+                if moved && self.following != Following::Live {
+                    return self.refresh(number);
+                }
+            }
+            ListLive::Removed(number) => return self.remove_chat(number),
+            ListLive::Projects(projects) => self.list.projects = projects,
+            ListLive::Account(account) => self.list.set_account(account),
         }
         Vec::new()
     }
@@ -921,10 +1028,9 @@ impl ChatState {
         match (action, acted) {
             (ChatAction::Branch(_), Acted::Chat(branch)) => {
                 let number = branch.number;
-                self.list.chats.retain(|c| c.number != number);
-                self.list.chats.insert(0, branch);
+                self.upsert_chat(branch);
                 let mut commands = self.open_chat(number);
-                commands.push(Command::List);
+                commands.extend(self.list_again());
                 commands
             }
             (ChatAction::Delete, _) => {
@@ -1004,6 +1110,18 @@ impl ChatState {
             "daemon_stopped" | "not_paired" => Access::Unknown,
             _ => Access::Unavailable(failure),
         };
+    }
+}
+
+/// What the page says when the open chat goes from the list.
+pub const GONE: &str = "This chat was deleted, or you can't see it anymore.";
+
+/// Whether `a` is later than `b`, both RFC 3339; as text when either
+/// doesn't parse.
+fn newer(a: &str, b: &str) -> bool {
+    match (a.parse::<jiff::Timestamp>(), b.parse::<jiff::Timestamp>()) {
+        (Ok(a), Ok(b)) => a > b,
+        _ => a > b,
     }
 }
 
@@ -1193,9 +1311,99 @@ mod tests {
             chats: vec![summary(2, "idle"), summary(1, "idle")],
             ..ChatList::default()
         })));
-        assert_eq!(commands, vec![Command::Models], "the picker's models, once");
+        assert_eq!(
+            commands,
+            vec![Command::Models, Command::FollowList(true)],
+            "the picker's models, and the list kept current, once"
+        );
         assert!(state.ready());
         state
+    }
+
+    fn at(minutes_ago: i64) -> String {
+        (jiff::Timestamp::now() - jiff::SignedDuration::from_mins(minutes_ago)).to_string()
+    }
+
+    #[test]
+    fn the_list_changes_in_place_once_the_server_keeps_it_current() {
+        let mut state = ready();
+        state.list.chats = vec![
+            ChatSummary {
+                updated_at: at(5),
+                ..summary(2, "idle")
+            },
+            ChatSummary {
+                updated_at: at(60),
+                ..summary(1, "idle")
+            },
+        ];
+        // Watching: catch up once, then no more reading after changes here.
+        assert_eq!(
+            state.update(Msg::ListLive(ListLive::Watching)),
+            vec![Command::List]
+        );
+        assert!(state.list_live);
+        // A chat started elsewhere goes in by time; a changed one moves.
+        state.update(Msg::ListLive(ListLive::Chat(ChatSummary {
+            updated_at: at(0),
+            ..summary(3, "processing")
+        })));
+        state.update(Msg::ListLive(ListLive::Chat(ChatSummary {
+            title: "Renamed".into(),
+            updated_at: at(30),
+            ..summary(1, "idle")
+        })));
+        let order: Vec<u64> = state.list.chats.iter().map(|c| c.number).collect();
+        assert_eq!(order, [3, 2, 1]);
+        assert_eq!(state.list.chats[2].title, "Renamed");
+        // Asking needs no read of the list while it's live.
+        state.input = "Hi".into();
+        state.send();
+        let commands = state.update(Msg::Sent {
+            chat: None,
+            result: Ok(ChatSummary {
+                updated_at: at(0),
+                ..summary(4, "processing")
+            }),
+        });
+        assert!(!commands.contains(&Command::List), "{commands:?}");
+        // The open chat deleted elsewhere closes, saying so.
+        assert_eq!(state.open, Some(4));
+        assert_eq!(
+            state.update(Msg::ListLive(ListLive::Removed(4))),
+            vec![Command::Follow(None)]
+        );
+        assert_eq!(state.open, None);
+        assert_eq!(state.notice.as_deref(), Some(GONE));
+        // Missed changes: read it all again.
+        assert_eq!(
+            state.update(Msg::ListLive(ListLive::Missed)),
+            vec![Command::List]
+        );
+        // Offline, or a daemon that can't: back to reading it after changes.
+        state.update(Msg::ListLive(ListLive::Offline));
+        assert!(!state.list_live);
+        state.update(Msg::ListFollowEnded(Some(Failure::new(
+            "daemon_outdated",
+            "old",
+        ))));
+        assert_eq!(state.set_paired(false), vec![]);
+    }
+
+    #[test]
+    fn the_list_follower_stops_with_the_daemon_and_starts_again() {
+        let mut state = ready();
+        assert_eq!(state.set_paired(false), vec![Command::FollowList(false)]);
+        assert_eq!(state.set_paired(true), vec![Command::List]);
+        let commands = state.update(Msg::Listed(Ok(ChatList::default())));
+        assert_eq!(commands, vec![Command::FollowList(true)]);
+        // Read again while following: not twice.
+        state.update(Msg::ListLive(ListLive::Refused));
+        assert!(
+            state
+                .update(Msg::Listed(Ok(ChatList::default())))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1215,11 +1423,15 @@ mod tests {
         assert!(state.send().is_empty());
         let commands = state.update(Msg::Sent {
             chat: None,
-            result: Ok(summary(3, "processing")),
+            result: Ok(ChatSummary {
+                updated_at: at(0),
+                ..summary(3, "processing")
+            }),
         });
         assert_eq!(
             commands,
-            vec![Command::List, Command::Follow(Some(3)), Command::Open(3)]
+            vec![Command::List, Command::Follow(Some(3)), Command::Open(3)],
+            "the list isn't live yet: read it again"
         );
         assert_eq!(state.open, Some(3));
         assert_eq!(state.list.chats[0].number, 3);
@@ -1334,7 +1546,10 @@ mod tests {
     fn the_daemon_going_away_stops_following() {
         let mut state = ready();
         state.open_chat(2);
-        assert_eq!(state.set_paired(false), vec![Command::Follow(None)]);
+        assert_eq!(
+            state.set_paired(false),
+            vec![Command::Follow(None), Command::FollowList(false)]
+        );
         assert_eq!(state.access, Access::Unknown);
         // Back again: list, follow and read the open chat.
         let commands = state.set_paired(true);

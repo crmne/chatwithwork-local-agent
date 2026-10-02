@@ -197,9 +197,11 @@ impl ChatPage {
             let commands = self.state.update(msg);
             self.run(commands);
         }
-        // A chat being answered elsewhere: read the list again now and
-        // then, until it's done. Nothing runs, nothing is read.
+        // A chat being answered elsewhere, while the server doesn't keep
+        // the list current (an older daemon or server): read the list again
+        // now and then, until it's done. Nothing runs, nothing is read.
         let running_elsewhere = self.state.ready()
+            && !self.state.list_live
             && self
                 .state
                 .list

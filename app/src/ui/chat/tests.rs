@@ -33,6 +33,9 @@ struct Options {
     size: [f32; 2],
     dark: bool,
     held: bool,
+    /// The daemon refuses to keep the list current, as one from before
+    /// live lists does.
+    old_daemon: bool,
     renderer: Option<egui_kittest::wgpu::WgpuTestRenderer>,
 }
 
@@ -43,6 +46,7 @@ impl Default for Options {
             size: [1280.0, 820.0],
             dark: false,
             held: true,
+            old_daemon: false,
             renderer: None,
         }
     }
@@ -51,6 +55,9 @@ impl Default for Options {
 fn fixture(options: Options) -> Fixture {
     let server = demo::start(options.scenario).unwrap();
     server.hold_streams(options.held);
+    if options.old_daemon {
+        server.act_old();
+    }
     if options.scenario == Scenario::Sample {
         AppState { onboarded: true }.save(&server.paths);
     }
@@ -312,6 +319,100 @@ fn a_settled_chat_asks_for_no_more_frames() {
     fx.wait_for_label("The Acme contract renews");
     // Hovers and rises settle, then nothing more is asked for.
     fx.harness.try_run().expect("a settled page stops drawing");
+}
+
+impl Fixture {
+    /// How many times the page has read the list so far.
+    fn lists(&self) -> usize {
+        self.server
+            .requests()
+            .iter()
+            .filter(|r| r["cmd"] == "chats")
+            .count()
+    }
+
+    /// Wait until the server keeps the list current, and the catch-up
+    /// read is in.
+    fn live(&mut self) {
+        self.wait_for_request("subscribe", |r| r["topics"] == serde_json::json!(["chats"]));
+        self.wait("the list to be live", |h| {
+            h.state().chat_state().is_some_and(|s| s.list_live)
+        });
+        self.harness.run_steps(4);
+    }
+}
+
+#[test]
+fn the_list_stays_current_as_chats_change_elsewhere() {
+    let mut fx = fixture(Options::default());
+    fx.wait_for_label("Vendor contract renewal");
+    fx.live();
+    let listed = fx.lists();
+    // Started on the web: it shows up, being answered, then settles.
+    fx.server.start_elsewhere(
+        30,
+        "Draft the Q4 hiring plan",
+        "Draft the Q4 hiring plan from the headcount sheet.",
+    );
+    fx.wait_for_label("Draft the Q4 hiring plan");
+    assert!(
+        fx.harness
+            .state()
+            .chat_state()
+            .is_some_and(|s| s.list.chats[0].number == 30 && s.list.chats[0].processing()),
+        "newest first, being answered"
+    );
+    fx.server.finish(30, 302, "Here's a first draft.");
+    fx.wait("chat 30 to settle", |h| {
+        h.state().chat_state().is_some_and(|s| {
+            s.list
+                .chats
+                .iter()
+                .any(|c| c.number == 30 && !c.processing())
+        })
+    });
+    // Renamed elsewhere: the row says so.
+    fx.server
+        .edit_elsewhere(30, |c| c["title"] = serde_json::json!("Q4 hiring plan"));
+    fx.wait_for_label("Q4 hiring plan");
+    assert!(
+        fx.harness
+            .query_by_label("Draft the Q4 hiring plan")
+            .is_none()
+    );
+    // The open chat deleted elsewhere closes, saying so.
+    fx.open(11);
+    fx.wait_for_label("When does the Acme contract renew");
+    fx.server.delete_elsewhere(11);
+    fx.wait_for_label(super::state::GONE);
+    assert!(
+        fx.harness
+            .query_by_label("Vendor contract renewal")
+            .is_none()
+    );
+    assert_eq!(fx.chat().state().open, None);
+    // None of it needed the list read again.
+    assert_eq!(fx.lists(), listed, "no reads while the list is live");
+}
+
+#[test]
+fn an_older_daemon_still_gets_the_list_read_again() {
+    let mut fx = fixture(Options {
+        old_daemon: true,
+        ..Options::default()
+    });
+    fx.wait_for_label("Vendor contract renewal");
+    fx.wait_for_request("subscribe", |r| r["topics"] == serde_json::json!(["chats"]));
+    let listed = fx.lists();
+    // Chat 12 is answered elsewhere: the list is read again until it's done.
+    fx.server.finish(12, 123, "Done.");
+    fx.wait("the list to show it settled", |h| {
+        h.state()
+            .chat_state()
+            .is_some_and(|s| s.list.chats.iter().all(|c| !c.processing()))
+    });
+    assert!(fx.lists() > listed);
+    assert!(!fx.chat().state().list_live);
 }
 
 #[test]

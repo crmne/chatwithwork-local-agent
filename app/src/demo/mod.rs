@@ -25,6 +25,12 @@ struct State {
     chats: Vec<chats::Chat>,
     /// Every chat update so far, as followers get them.
     chat_events: Vec<Value>,
+    /// Every change to the list so far, as `chats` subscribers get them.
+    list_events: Vec<Value>,
+    /// The chats as the list's subscribers last heard of them.
+    listed: Vec<Value>,
+    /// Refuse the `chats` topic, as a daemon from before live lists does.
+    old_daemon: bool,
     /// Answers don't stream on their own (tests hold them still).
     held: bool,
     /// Chats whose answer is streaming now.
@@ -85,6 +91,84 @@ impl Server {
             },
         );
     }
+
+    /// Refuse the `chats` topic, as a daemon from before live lists does.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn act_old(&self) {
+        self.demo.change(|s| s.old_daemon = true);
+    }
+
+    /// A chat started on the web: it shows up being answered.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn start_elsewhere(&self, number: u64, title: &str, question: &str) {
+        self.demo.change(|s| {
+            let mut summary = chats::summary(number, title, "processing", ago(0));
+            summary["url"] = json!(format!("https://chatwithwork.com/northwind/chats/{number}"));
+            s.chats.insert(
+                0,
+                chats::Chat::new(
+                    summary,
+                    vec![json!({ "kind": "user", "id": number * 10 + 1, "content": question })],
+                ),
+            );
+        });
+        self.demo.sync_list();
+    }
+
+    /// Change a chat as someone elsewhere would: a new title, say.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn edit_elsewhere(&self, number: u64, edit: impl FnOnce(&mut Value)) {
+        self.demo.change(|s| {
+            if let Some(chat) = s
+                .chats
+                .iter_mut()
+                .find(|c| c.summary["number"] == json!(number))
+            {
+                edit(&mut chat.summary);
+                chat.summary["updated_at"] = json!(ago(0));
+            }
+        });
+        self.demo.sync_list();
+    }
+
+    /// A chat deleted on the web, or moved out of sight.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn delete_elsewhere(&self, number: u64) {
+        self.demo
+            .change(|s| s.chats.retain(|c| c.summary["number"] != json!(number)));
+        self.demo.sync_list();
+    }
+
+    /// Send the list's subscribers one change as the server words it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn list_event(&self, update: Value) {
+        self.demo.change(|s| s.list_events.push(update));
+    }
+
+    /// What happens elsewhere while `--demo` runs: a chat started on the
+    /// web shows up, is answered and renamed, and the credits run low.
+    #[cfg_attr(test, allow(dead_code))]
+    pub fn script_live_events(&self) {
+        let me = Server {
+            paths: self.paths.clone(),
+            demo: Arc::clone(&self.demo),
+        };
+        std::thread::spawn(move || {
+            let pause = |s| std::thread::sleep(Duration::from_secs(s));
+            pause(20);
+            me.start_elsewhere(
+                30,
+                "Draft the Q4 hiring plan",
+                "Draft the Q4 hiring plan from the headcount sheet.",
+            );
+            pause(6);
+            me.finish(30, 302, "Here's a first draft of the Q4 hiring plan.");
+            pause(4);
+            me.edit_elsewhere(30, |c| c["title"] = json!("Q4 hiring plan"));
+            pause(10);
+            me.list_event(chats::account_update(410));
+        });
+    }
 }
 
 fn ago(seconds: i64) -> String {
@@ -111,8 +195,11 @@ fn fresh() -> State {
         log: vec![json!({ "ts": ago(5), "event": "started", "detail": "cww 0.1.0" })],
         generation: 0,
         requests: Vec::new(),
+        listed: chats::sample().into_iter().map(|c| c.summary).collect(),
         chats: chats::sample(),
         chat_events: Vec::new(),
+        list_events: Vec::new(),
+        old_daemon: false,
         held: false,
         streaming: HashSet::new(),
         cancelled: HashSet::new(),
@@ -214,8 +301,11 @@ fn sample() -> State {
         log,
         generation: 0,
         requests: Vec::new(),
+        listed: chats::sample().into_iter().map(|c| c.summary).collect(),
         chats: chats::sample(),
         chat_events: Vec::new(),
+        list_events: Vec::new(),
+        old_daemon: false,
         held: false,
         streaming: HashSet::new(),
         cancelled: HashSet::new(),
@@ -327,7 +417,11 @@ impl Demo {
             "chats" | "chat" | "chat_send" | "chat_cancel" | "chat_access" | "models"
             | "chat_upload" | "chat_approve" | "chat_deny" | "chat_answer" | "chat_decline"
             | "chat_retry" | "chat_branch" | "chat_rename" | "chat_delete" | "chat_share"
-            | "chat_unshare" => self.chat_request(cmd, request),
+            | "chat_unshare" => {
+                let answer = self.chat_request(cmd, request);
+                self.sync_list();
+                answer
+            }
             "deny" => deny(),
             "audit_tail" => {
                 let n = request["lines"].as_u64().unwrap_or(50) as usize;
@@ -358,6 +452,18 @@ impl Demo {
                     reader.get_mut(),
                     request["chat"].as_str().unwrap_or_default(),
                 );
+            }
+            if request["cmd"] == "subscribe"
+                && request["topics"]
+                    .as_array()
+                    .is_some_and(|t| t.iter().any(|t| t == "chats"))
+            {
+                self.state
+                    .lock()
+                    .expect("demo lock")
+                    .requests
+                    .push(request.clone());
+                return self.follow_list(reader.get_mut());
             }
             if request["cmd"] == "subscribe" {
                 self.state
@@ -846,6 +952,67 @@ impl Demo {
             s.cancelled.remove(&chat);
         });
         self.changed(chat);
+        self.sync_list();
+    }
+
+    /// Tell the list's subscribers about every chat that started, changed
+    /// or went since they last heard, as the server's list channel does.
+    fn sync_list(&self) {
+        self.change(|s| {
+            let mut events = Vec::new();
+            for chat in &s.chats {
+                let number = &chat.summary["number"];
+                let before = s.listed.iter().find(|c| &c["number"] == number);
+                if before != Some(&chat.summary) {
+                    events.push(json!({ "event": "chat", "chat": chat.summary }));
+                }
+            }
+            for gone in s.listed.iter().filter(|c| {
+                !s.chats
+                    .iter()
+                    .any(|chat| chat.summary["number"] == c["number"])
+            }) {
+                events.push(json!({ "event": "removed", "number": gone["number"] }));
+            }
+            s.listed = s.chats.iter().map(|c| c.summary.clone()).collect();
+            s.list_events.extend(events);
+        });
+    }
+
+    /// A `chats` subscription: "watching", then every change to the list
+    /// until the client goes away, as the daemon relays the server's.
+    fn follow_list(self: &Arc<Self>, stream: &mut impl Write) {
+        if self.state.lock().expect("demo lock").old_daemon {
+            let _ = send(
+                stream,
+                &json!({ "ok": false, "error": "bad request: unknown variant `chats`, expected `status` or `audit`" }),
+            );
+            return;
+        }
+        if send(stream, &json!({ "ok": true, "topics": ["chats"] })).is_err() {
+            return;
+        }
+        let mut seen = self.state.lock().expect("demo lock").list_events.len();
+        let watching = json!({ "event": "chats", "update": { "event": "watching" } });
+        if send(stream, &watching).is_err() {
+            return;
+        }
+        loop {
+            let events = {
+                let mut state = self.state.lock().expect("demo lock");
+                while state.list_events.len() == seen {
+                    state = self.changed.wait(state).expect("demo lock");
+                }
+                let events = state.list_events[seen..].to_vec();
+                seen = state.list_events.len();
+                events
+            };
+            for update in events {
+                if send(stream, &json!({ "event": "chats", "update": update })).is_err() {
+                    return;
+                }
+            }
+        }
     }
 
     /// Play `steps` into `chat` on a thread of their own.
@@ -965,6 +1132,7 @@ impl Demo {
                     }
                 });
                 self.changed(chat);
+                self.sync_list();
             }
         }
     }

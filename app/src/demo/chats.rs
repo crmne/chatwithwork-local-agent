@@ -119,6 +119,18 @@ fn in_project(mut chat: Value, project: (u64, &str), mine: bool) -> Value {
     chat
 }
 
+/// The list's header, as the server sends it again when the credits move:
+/// `left` of 5,000.
+pub fn account_update(left: u64) -> Value {
+    json!({
+        "event": "account",
+        "account": { "name": ACCOUNT, "logo": null },
+        "user": { "name": USER, "avatar": null },
+        "credits": { "left": left, "capacity": 5000, "running_low": left * 5 < 5000 },
+        "locked_reason": null,
+    })
+}
+
 /// The models the composer offers: names made up for the demo, one out of
 /// reach for now.
 pub fn models() -> Value {

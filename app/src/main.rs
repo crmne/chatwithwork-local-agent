@@ -139,6 +139,9 @@ fn run(args: Args) -> anyhow::Result<()> {
             demo::Scenario::Sample
         };
         let server = demo::start(scenario)?;
+        if scenario == demo::Scenario::Sample {
+            server.script_live_events();
+        }
         let mut options = args.shell;
         options.account = Some(server.account());
         return shell::run(server.paths.clone(), options);
