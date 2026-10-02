@@ -1381,10 +1381,11 @@ impl Conversation<'_> {
         let p = self.palette;
         let width = ui.available_width();
         ui.add_space(12.0);
-        let color = if tone == "negative" {
-            p.negative()
+        // `.chat-notice`: attention unless it's a failure.
+        let (color, wash, edge) = if tone == "negative" {
+            (p.negative(), p.negative_wash(), p.negative_edge())
         } else {
-            p.attention
+            (p.attention, p.attention_wash(), p.attention_edge())
         };
         let galley = paint::layout(
             ui.painter(),
@@ -1394,17 +1395,7 @@ impl Conversation<'_> {
         let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
         let painter = ui.painter();
-        painter.rect_filled(rect, tokens::RADIUS_CARD, p.surface);
-        painter.rect_stroke(
-            rect.shrink(0.5),
-            tokens::RADIUS_CARD,
-            egui::Stroke::new(1.0, p.line),
-            egui::StrokeKind::Middle,
-        );
-        // The signal edge on the left, inside the corner.
-        painter
-            .with_clip_rect(Rect::from_min_size(rect.min, vec2(2.0, rect.height())))
-            .rect_filled(rect, tokens::RADIUS_CARD, color);
+        paint::tinted_card(painter, rect, color, wash, edge);
         self.images.icon_at(
             painter,
             pos2(rect.left() + 16.0 + 9.0, rect.top() + 14.0 + 1.0 + 9.0),

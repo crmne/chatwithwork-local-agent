@@ -138,6 +138,16 @@ impl Palette {
         mix(self.attention, self.line, 0.42)
     }
 
+    /// `--negative-wash`: something that failed, as a card.
+    pub fn negative_wash(&self) -> Color32 {
+        mix(self.negative(), self.surface, 0.10)
+    }
+
+    /// `--negative-edge`: that card's ring.
+    pub fn negative_edge(&self) -> Color32 {
+        mix(self.negative(), self.line, 0.45)
+    }
+
     /// `--attention-paper`: what will be written, set inside the card.
     pub fn attention_paper(&self) -> Color32 {
         mix(

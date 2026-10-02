@@ -79,8 +79,8 @@ impl Tint {
         if destructive {
             let paper_base = if p.dark { p.canvas_sunken } else { p.surface };
             Self {
-                wash: tokens::mix(p.negative(), p.surface, 0.10),
-                edge: tokens::mix(p.negative(), p.line, 0.45),
+                wash: p.negative_wash(),
+                edge: p.negative_edge(),
                 paper: tokens::mix(p.negative(), paper_base, 0.03),
                 ink: p.negative_ink(),
                 tone: p.negative(),

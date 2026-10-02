@@ -511,6 +511,28 @@ pub fn kbd_hint(
     right_center.x - x - 3.0
 }
 
+/// A card tinted whole in its meaning's color, as the web's notices and
+/// approval cards are (`.chat-notice`): the wash, a tinted ring, and a soft
+/// shadow in the tone. Never a stripe down one side.
+pub fn tinted_card(painter: &Painter, rect: Rect, tone: Color32, wash: Color32, edge: Color32) {
+    let radius = super::tokens::RADIUS_CARD;
+    painter.add(drop_shadow_shape(
+        rect,
+        radius,
+        egui::vec2(0.0, 18.0),
+        40.0,
+        -28.0,
+        super::tokens::alpha(tone, 0.55),
+    ));
+    painter.rect_filled(rect, radius, wash);
+    painter.rect_stroke(
+        rect.shrink(0.5),
+        radius - 0.5,
+        egui::Stroke::new(1.0, edge),
+        egui::StrokeKind::Middle,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

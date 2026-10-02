@@ -1116,6 +1116,14 @@ fn review_screens() -> Vec<Screen> {
             },
         },
         Screen {
+            name: "notice",
+            chat: Some(9),
+            setup: |fx| {
+                fx.chat().state_mut().notice =
+                    Some("An answer is being written in this chat.".into())
+            },
+        },
+        Screen {
             name: "user-menu",
             chat: Some(11),
             setup: |fx| fx.chat().state_mut().user_menu = true,

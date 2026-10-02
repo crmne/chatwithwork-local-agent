@@ -1149,16 +1149,13 @@ fn notice_toast(ctx: &egui::Context, composer: Rect, text: &str, p: &Palette, im
             let response = ui.allocate_rect(rect, Sense::hover());
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
             let painter = ui.painter();
-            painter.rect_filled(rect, tokens::RADIUS_CARD, p.surface);
-            painter.rect_stroke(
-                rect.shrink(0.5),
-                tokens::RADIUS_CARD,
-                egui::Stroke::new(1.0, p.line),
-                egui::StrokeKind::Middle,
+            paint::tinted_card(
+                painter,
+                rect,
+                p.negative(),
+                p.negative_wash(),
+                p.negative_edge(),
             );
-            painter
-                .with_clip_rect(Rect::from_min_size(rect.min, vec2(2.0, rect.height())))
-                .rect_filled(rect, tokens::RADIUS_CARD, p.negative());
             images.icon_at(
                 painter,
                 pos2(rect.left() + 16.0 + 9.0, rect.top() + 10.0 + 10.0),
