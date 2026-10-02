@@ -2942,3 +2942,32 @@ fn snapshot_settings_privacy() {
     let screen = render_to_string(&app, 100, 30);
     assert!(screen.contains("can't read config.toml"), "{screen}");
 }
+
+#[test]
+fn a_card_that_needs_you_is_tinted_whole_never_striped() {
+    let mut app = app();
+    waiting(&mut app, vec![approval()], vec![]);
+    let theme = Theme::new(Depth::TrueColor);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| render(frame, &app, &theme, NOW))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let (x, y) = find(&app, "Waiting for your approval");
+    // The ring left of the title, and the space inside it.
+    let ring = (0..x)
+        .rev()
+        .find(|&cx| buffer[(cx, y)].symbol() == "│")
+        .expect("a ring");
+    let wash = theme.wash(Signal::Attention).bg;
+    assert_eq!(
+        buffer[(ring, y)].fg,
+        theme.edge(Signal::Attention).fg.unwrap()
+    );
+    assert_eq!(Some(buffer[(ring + 1, y)].bg), wash);
+    assert_ne!(
+        buffer[(ring, y)].fg,
+        theme.signal(Signal::Attention).fg.unwrap(),
+        "no stripe in the signal's own colour"
+    );
+}

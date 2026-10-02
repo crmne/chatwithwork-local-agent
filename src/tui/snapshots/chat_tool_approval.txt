@@ -13,16 +13,16 @@
                                │  SOURCES
                                │  [1] Q3 plan.pdf  https://drive.google.com/file/d/q3
                                │
-                               │  ● Waiting for your approval · Slack
-                               │    Post a message to #general
-                               │    Channel  #general
-                               │    Message  We shipped!
-                               │  ❯ 1. Approve
-                               │    2. Approve for the rest of this chat
-                               │    3. Deny
-                               │    4. Deny, and say what to do instead
-                               │
-                               │
+                               │  ╭──────────────────────────────────────────────────────────────╮
+                               │  │ ● Waiting for your approval · Slack                          │
+                               │  │   Post a message to #general                                 │
+                               │  │   Channel  #general                                          │
+                               │  │   Message  We shipped!                                       │
+                               │  │ ❯ 1. Approve                                                 │
+                               │  │   2. Approve for the rest of this chat                       │
+                               │  │   3. Deny                                                    │
+                               │  │   4. Deny, and say what to do instead                        │
+                               │  ╰──────────────────────────────────────────────────────────────╯
                                │
   PINNED                  all  │
    Falcon                      │ ╭────────────────────────────────────────────────────────────────╮

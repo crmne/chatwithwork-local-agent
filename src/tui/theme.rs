@@ -190,6 +190,31 @@ impl Theme {
         }
     }
 
+    /// A card that needs someone, tinted whole as the web does (`--attention-wash`,
+    /// `--negative-wash`): the signal mixed into the surface. Never a stripe down
+    /// one side.
+    pub fn wash(&self, signal: Signal) -> Style {
+        match signal {
+            Signal::Attention => self.bg(mix(ATTENTION, SURFACE, 0.14)),
+            Signal::Negative => self.bg(mix(NEGATIVE, SURFACE, 0.10)),
+            Signal::Positive => self.bg(mix(POSITIVE, SURFACE, 0.08)),
+            Signal::Live => self.bg(mix(LIVE, SURFACE, 0.10)),
+            Signal::Idle => self.surface(),
+        }
+    }
+
+    /// That card's ring (`--attention-edge`, `--negative-edge`): the signal
+    /// mixed into the line colour.
+    pub fn edge(&self, signal: Signal) -> Style {
+        match signal {
+            Signal::Attention => self.fg(mix(ATTENTION, LINE, 0.42)),
+            Signal::Negative => self.fg(mix(NEGATIVE, LINE, 0.45)),
+            Signal::Positive => self.fg(mix(POSITIVE, LINE, 0.42)),
+            Signal::Live => self.fg(mix(LIVE, LINE, 0.42)),
+            Signal::Idle => self.line(),
+        }
+    }
+
     /// Small text in a signal colour (the `-ink` variants).
     pub fn signal_ink(&self, signal: Signal) -> Style {
         match signal {

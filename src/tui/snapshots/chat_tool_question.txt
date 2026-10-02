@@ -13,17 +13,17 @@
                                │  SOURCES
                                │  [1] Q3 plan.pdf  https://drive.google.com/file/d/q3
                                │
-                               │  ● Notion asks
-                               │    Which environment should the report cover?
-                               │    Environment     production
-                               │    Days            typing below…
-                               │    Include drafts  no
-                               │    Send
-                               │    Decline
-                               │    Only Notion sees your answer. Never enter a password here;
-                               │    sign in on the service's own page instead.
-                               │
-                               │
+                               │  ╭──────────────────────────────────────────────────────────────╮
+                               │  │ ● Notion asks                                                │
+                               │  │   Which environment should the report cover?                 │
+                               │  │   Environment     production                                 │
+                               │  │   Days            typing below…                              │
+                               │  │   Include drafts  no                                         │
+                               │  │   Send                                                       │
+                               │  │   Decline                                                    │
+                               │  │   Only Notion sees your answer. Never enter a password here; │
+                               │  │   sign in on the service's own page instead.                 │
+                               │  ╰──────────────────────────────────────────────────────────────╯
   PINNED                  all  │
    Falcon                      │ ╭────────────────────────────────────────────────────────────────╮
                                │ │ ❯ 30                                                           │

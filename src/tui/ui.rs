@@ -527,7 +527,12 @@ fn main_pane(
         heading(frame, pad(header, 2, 0), Vec::new(), app, theme, now, hits);
     }
     chat_view(frame, pad(body, 2, 0), app, theme, now, hits);
-    frame.render_widget(Paragraph::new(notice), pad(notice_area, 2, 0));
+    // A notice that needs you is tinted whole, as the web's are.
+    let tint = match app.notice.as_ref().map(|n| n.signal) {
+        Some(signal @ (Signal::Attention | Signal::Negative)) => theme.wash(signal),
+        _ => theme.base(),
+    };
+    frame.render_widget(Paragraph::new(notice).style(tint), pad(notice_area, 2, 0));
     composer_box(frame, pad(composer, 1, 0), app, theme, now, view, hits);
 }
 
@@ -819,22 +824,15 @@ pub(super) fn render_card(
     lines: Vec<Line<'static>>,
     theme: &Theme,
 ) {
+    // Tinted whole, with a ring in the signal's colour, as the web's notices
+    // and approval cards are: never a stripe down one side.
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(theme.line())
-        .style(theme.surface());
+        .border_style(theme.edge(card.signal))
+        .style(theme.wash(card.signal));
     let inner = pad(block.inner(area), 1, 0);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(lines), inner);
-    if card.signal != Signal::Idle {
-        // The alert edge.
-        let style = theme.signal(card.signal);
-        for y in area.y + 1..area.bottom().saturating_sub(1) {
-            if let Some(cell) = frame.buffer_mut().cell_mut(Position::new(area.x, y)) {
-                cell.set_style(style);
-            }
-        }
-    }
 }
 
 fn chat_view(
@@ -1144,6 +1142,10 @@ fn waiting_lines(
         lines.push(Line::raw(""));
     }
     if let Some(approval) = pane.pending_decision() {
+        // The card's ring; its content is laid out four columns narrower.
+        let start = lines.len();
+        lines.push(card_edge(width, true, Signal::Attention, theme));
+        let width = width.saturating_sub(4);
         let title = if pane.deciding {
             "Sending your answer…".to_string()
         } else {
@@ -1185,10 +1187,61 @@ fn waiting_lines(
                 theme,
             ));
         }
+        tint_card(lines, start, width + 4, Signal::Attention, theme);
         lines.push(Line::raw(""));
     } else if let Some(question) = pane.pending_question() {
-        question_lines(lines, marks, app, question, width, theme);
+        let start = lines.len();
+        lines.push(card_edge(width, true, Signal::Attention, theme));
+        question_lines(lines, marks, app, question, width.saturating_sub(4), theme);
+        // The form ends with a blank line of its own; the card closes over it.
+        if lines.last().is_some_and(|l| l.width() == 0) {
+            lines.pop();
+        }
+        tint_card(lines, start, width, Signal::Attention, theme);
+        lines.push(Line::raw(""));
     }
+}
+
+/// The top or bottom of a card in the transcript, in the signal's ring.
+fn card_edge(width: usize, top: bool, signal: Signal, theme: &Theme) -> Line<'static> {
+    let (left, right) = if top { ("╭", "╮") } else { ("╰", "╯") };
+    let fill = "─".repeat(width.saturating_sub(2));
+    Line::styled(format!("{left}{fill}{right}"), theme.edge(signal))
+}
+
+/// Closes the card opened at `start` (its top edge): every line since gets
+/// the ring at both sides and the wash behind it, as the web tints a card
+/// that needs someone whole; a selected line keeps its own highlight.
+fn tint_card(
+    lines: &mut Vec<Line<'static>>,
+    start: usize,
+    width: usize,
+    signal: Signal,
+    theme: &Theme,
+) {
+    let wash = theme.wash(signal);
+    let edge = theme.edge(signal).patch(wash);
+    let inner = width.saturating_sub(4);
+    for line in lines.iter_mut().skip(start + 1) {
+        let fill = line
+            .style
+            .bg
+            .map_or(wash, |bg| ratatui::style::Style::new().bg(bg));
+        let pad = inner.saturating_sub(line.width());
+        let mut spans = vec![Span::styled("│", edge), Span::styled(" ", wash)];
+        spans.extend(line.spans.drain(..).map(|span| {
+            let style = if span.style.bg.is_some() {
+                span.style
+            } else {
+                fill.patch(span.style)
+            };
+            Span::styled(span.content, style)
+        }));
+        spans.push(Span::styled(" ".repeat(pad + 1), fill));
+        spans.push(Span::styled("│", edge));
+        *line = Line::from(spans).style(line.style);
+    }
+    lines.push(card_edge(width, false, signal, theme));
 }
 
 /// `label  value` pairs, labels lined up.
