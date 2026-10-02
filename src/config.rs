@@ -32,6 +32,22 @@ pub struct Config {
     pub limits: Limits,
     pub index: IndexConfig,
     pub sandbox: SandboxConfig,
+    pub tui: TuiConfig,
+}
+
+/// `cww tui`'s own settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TuiConfig {
+    /// Clicks and the wheel. Off leaves the mouse to the terminal, for
+    /// selecting text without holding Shift.
+    pub mouse: bool,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self { mouse: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

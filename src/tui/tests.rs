@@ -375,7 +375,7 @@ fn renders_at_any_size_without_panicking() {
     apps.push(a.clone());
     a.update(char('d'));
     apps.push(a.clone());
-    a.modal = Some(Modal::Help);
+    a.modal = Some(Modal::Help { scroll: 0 });
     apps.push(a.clone());
     a.modal = None;
     a.update(char('l'));
@@ -407,8 +407,14 @@ fn quits_on_q_and_ctrl_c() {
     let mut app = app();
     assert_eq!(app.update(char('q')), vec![Effect::Quit]);
     let mut app = self::app();
-    let ctrl_c = Msg::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-    assert_eq!(app.update(ctrl_c), vec![Effect::Quit]);
+    let ctrl_c = || Msg::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.update(ctrl_c()).is_empty(), "once only warns");
+    assert!(!app.quit);
+    assert!(app.notice.as_ref().unwrap().text.contains("again to quit"));
+    // Another key in between starts over.
+    app.update(key(KeyCode::Down));
+    assert!(app.update(ctrl_c()).is_empty());
+    assert_eq!(app.update(ctrl_c()), vec![Effect::Quit]);
     assert!(app.quit);
 }
 
@@ -1238,10 +1244,16 @@ fn a_streamed_answer_builds_up_then_the_chat_is_read_back() {
     }
     assert_eq!(
         app.update(key(KeyCode::Enter)),
-        vec![Effect::Chat(ChatCommand::Send {
-            chat: None,
-            text: "q3 budget?".into()
-        })]
+        vec![
+            Effect::Remember("q3 budget?".into()),
+            Effect::Chat(ChatCommand::Send {
+                chat: None,
+                text: "q3 budget?".into(),
+                model: None,
+                project: None,
+                attachments: vec![],
+            })
+        ]
     );
     assert!(app.chat.working());
     assert_eq!(app.chat.pending_question.as_deref(), Some("q3 budget?"));
@@ -1465,4 +1477,897 @@ fn chat_cards_say_what_to_do() {
         let screen = render_to_string(&app, 100, 30);
         assert!(screen.contains(title), "{code}: {screen}");
     }
+}
+
+// ------------------------------------------- composer, commands, prompts
+
+fn ctrl(c: char) -> Msg {
+    Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+}
+
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.update(char(c));
+    }
+}
+
+/// Draw the app, so the mouse knows what's where.
+fn draw(app: &mut App) {
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut hits = Hits::default();
+    terminal
+        .draw(|frame| {
+            hits = super::ui::render_hits(frame, app, &Theme::new(Depth::TrueColor), NOW);
+        })
+        .unwrap();
+    app.hits = hits;
+}
+
+fn mouse(app: &mut App, kind: crossterm::event::MouseEventKind, x: u16, y: u16) -> Vec<Effect> {
+    draw(app);
+    app.update(Msg::Mouse(crossterm::event::MouseEvent {
+        kind,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    }))
+}
+
+fn click(app: &mut App, x: u16, y: u16) -> Vec<Effect> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    mouse(app, MouseEventKind::Down(MouseButton::Left), x, y)
+}
+
+/// Where `text` is on screen, as (column, row).
+fn find(app: &App, text: &str) -> (u16, u16) {
+    let screen = render_to_string(app, 100, 30);
+    for (y, line) in screen.lines().enumerate() {
+        if let Some(byte) = line.find(text) {
+            return (line[..byte].chars().count() as u16, y as u16);
+        }
+    }
+    panic!("{text:?} isn't on screen:\n{screen}");
+}
+
+fn every_action() -> Option<super::chat::Can> {
+    Some(super::chat::Can {
+        retry: true,
+        branch: true,
+        rename: true,
+        delete: true,
+        share: true,
+    })
+}
+
+/// The budget chat, open, read, with what the server allows.
+fn budget_open(app: &mut App, can: Option<super::chat::Can>) {
+    open_budget(app);
+    let mut transcript = budget_transcript("idle");
+    transcript.chat.can = can;
+    transcript.chat.model = Some(super::chat::ModelRef {
+        id: "12".into(),
+        name: "Gemini 3.8 Flash".into(),
+    });
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(transcript),
+    }));
+}
+
+fn models() -> super::chat::Models {
+    use super::chat::{Model, Models};
+    Models {
+        default_model_id: Some("12".into()),
+        models: vec![
+            Model {
+                id: "12".into(),
+                name: "Gemini 3.8 Flash".into(),
+                provider: "vertexai".into(),
+                rate: Some("About 3 credits per answer".into()),
+                ..Model::default()
+            },
+            Model {
+                id: "15".into(),
+                name: "GPT-6 Sol".into(),
+                provider: "azure".into(),
+                rate: Some("About 12 credits per answer".into()),
+                ..Model::default()
+            },
+            Model {
+                id: "16".into(),
+                name: "Claude Opus".into(),
+                provider: "anthropic".into(),
+                selectable: false,
+                reason: Some(
+                    "You're out of credits. Add credits in Settings to keep going.".into(),
+                ),
+                ..Model::default()
+            },
+        ],
+    }
+}
+
+#[test]
+fn snapshot_chat_slash_menu() {
+    let mut app = app();
+    budget_open(&mut app, every_action());
+    type_text(&mut app, "/re");
+    let names: Vec<&str> = app.menu().iter().map(|c| c.name).collect();
+    assert_eq!(names, ["resume", "retry", "rename"], "what fits here");
+    assert_snapshot("chat_slash_menu", &app);
+
+    // Down, then Tab completes; Enter on one that needs a title leaves room.
+    app.update(key(KeyCode::Down));
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.chat.input, "/retry");
+    app.chat.input.clear();
+    type_text(&mut app, "/sea");
+    assert!(app.update(key(KeyCode::Enter)).is_empty());
+    assert_eq!(app.chat.input, "/search ");
+    assert!(app.menu().is_empty(), "closed once there's an argument");
+
+    // Esc closes the list; typing opens it again.
+    app.chat.input.clear();
+    type_text(&mut app, "/");
+    assert!(!app.menu().is_empty());
+    app.update(key(KeyCode::Esc));
+    assert!(app.menu().is_empty());
+    assert_eq!(app.focus, Focus::Composer, "esc only closed the list");
+    type_text(&mut app, "n");
+    assert_eq!(app.menu()[0].name, "new");
+}
+
+#[test]
+fn commands_run_from_the_composer() {
+    let mut app = app();
+    budget_open(&mut app, None);
+    // Not offered on an older server, and says so when typed.
+    type_text(&mut app, "/re");
+    let names: Vec<&str> = app.menu().iter().map(|c| c.name).collect();
+    assert_eq!(names, ["resume"]);
+    app.chat.input.clear();
+    type_text(&mut app, "/retry");
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Remember("/retry".into())]
+    );
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("can't retry chats from here yet")
+    );
+
+    type_text(&mut app, "/frobnicate");
+    app.update(key(KeyCode::Enter));
+    assert!(app.notice.as_ref().unwrap().text.contains("no /frobnicate"));
+    assert_eq!(app.chat.input, "/frobnicate", "kept to fix");
+    app.chat.input.clear();
+
+    // `//` asks something that starts with a slash.
+    type_text(&mut app, "//etc/hosts?");
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Send {
+        chat: Some(42),
+        text: "/etc/hosts?".into(),
+        model: None,
+        project: None,
+        attachments: vec![],
+    })));
+
+    let mut app = self::app();
+    chats_ready(&mut app);
+    app.update(char('i'));
+    type_text(&mut app, "/search pla");
+    let effects = app.update(key(KeyCode::Enter));
+    assert_eq!(effects, vec![Effect::Remember("/search pla".into())]);
+    assert_eq!(app.focus, Focus::Chats);
+    assert_eq!(app.chat.visible().len(), 2);
+
+    // /new, /log, /folders, /help and /exit.
+    app.update(key(KeyCode::Esc));
+    app.update(char('i'));
+    type_text(&mut app, "/log");
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.view, View::Log);
+    app.update(key(KeyCode::Esc));
+    app.focus = Focus::Composer;
+    type_text(&mut app, "/folders");
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.focus, Focus::Roots);
+    app.focus = Focus::Composer;
+    type_text(&mut app, "/help");
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.modal, Some(Modal::Help { scroll: 0 }));
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("shift-drag"), "{screen}");
+    app.update(key(KeyCode::Down));
+    assert_eq!(app.modal, Some(Modal::Help { scroll: 1 }), "it scrolls");
+    app.update(char('x'));
+    assert_eq!(app.modal, None);
+    type_text(&mut app, "/status");
+    app.update(key(KeyCode::Enter));
+    assert_eq!(
+        app.notice.as_ref().unwrap().text,
+        "Connected to chatwithwork.com as device 42 · 1 folder shared · answering · cww 0.1.0"
+    );
+    type_text(&mut app, "/quit");
+    assert!(app.update(key(KeyCode::Enter)).contains(&Effect::Quit));
+}
+
+#[test]
+fn folder_and_pairing_commands_confirm_first() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(char('i'));
+    type_text(&mut app, "/unshare work docs");
+    app.update(key(KeyCode::Enter));
+    assert!(matches!(app.modal, Some(Modal::ConfirmRemove { ref id, .. }) if id == "work-docs"));
+    app.update(char('n'));
+    app.focus = Focus::Composer;
+    type_text(&mut app, "/share ~/Projects");
+    assert!(
+        app.update(key(KeyCode::Enter))
+            .contains(&Effect::Daemon(DaemonCommand::AddRoot {
+                path: "~/Projects".into(),
+                label: None,
+                i_know: false,
+            }))
+    );
+    type_text(&mut app, "/pause");
+    assert!(
+        app.update(key(KeyCode::Enter))
+            .contains(&Effect::Daemon(DaemonCommand::Pause))
+    );
+    type_text(&mut app, "/logout");
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.modal, Some(Modal::ConfirmLogout));
+    assert_eq!(
+        app.update(char('y')),
+        vec![Effect::Daemon(DaemonCommand::Logout)]
+    );
+}
+
+#[test]
+fn up_recalls_questions_and_text_takes_several_lines() {
+    let mut app = app().with_history(vec!["first".into(), "second".into()]);
+    chats_ready(&mut app);
+    app.update(char('n'));
+    type_text(&mut app, "draft");
+    app.update(key(KeyCode::Up));
+    assert_eq!(app.chat.input, "second");
+    app.update(key(KeyCode::Up));
+    assert_eq!(app.chat.input, "first");
+    app.update(key(KeyCode::Down));
+    app.update(key(KeyCode::Down));
+    assert_eq!(app.chat.input, "draft", "back to what was typed");
+
+    // Shift-Enter, Alt-Enter, Ctrl-J and a trailing backslash break lines.
+    app.chat.input.clear();
+    type_text(&mut app, "one");
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)));
+    type_text(&mut app, "two");
+    app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)));
+    type_text(&mut app, "three");
+    app.update(ctrl('j'));
+    type_text(&mut app, "four\\");
+    app.update(key(KeyCode::Enter));
+    type_text(&mut app, "five");
+    assert_eq!(app.chat.input, "one\ntwo\nthree\nfour\nfive");
+    // Up moves between the lines before it reaches the history.
+    app.update(key(KeyCode::Up));
+    assert_eq!(app.chat.input, "one\ntwo\nthree\nfour\nfive");
+    assert_snapshot("chat_multiline", &app);
+
+    // Pasted lines stay lines.
+    app.chat.input.clear();
+    app.update(Msg::Paste("a\r\nb".into()));
+    assert_eq!(app.chat.input, "a\nb");
+
+    // Ctrl-C clears what's typed rather than quitting.
+    assert!(app.update(ctrl('c')).is_empty());
+    assert!(app.chat.input.is_empty());
+    assert!(!app.quit_armed);
+    assert_eq!(app.update(ctrl('l')), vec![Effect::Redraw]);
+
+    // What's sent is remembered, here and in the file.
+    type_text(&mut app, "third");
+    let effects = app.update(key(KeyCode::Enter));
+    assert_eq!(effects[0], Effect::Remember("third".into()));
+    assert_eq!(app.chat.history.entries().last().unwrap(), "third");
+}
+
+#[test]
+fn snapshot_chat_model_picker() {
+    let mut app = app();
+    budget_open(&mut app, every_action());
+    type_text(&mut app, "/model");
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![
+            Effect::Remember("/model".into()),
+            Effect::Chat(ChatCommand::Models)
+        ]
+    );
+    assert_eq!(app.chat.models, ModelList::Loading);
+    app.update(Msg::Chat(ChatMsg::Models(Ok(models()))));
+    assert_snapshot("chat_model_picker", &app);
+
+    // One that can't be used says why and stays open.
+    type_text(&mut app, "opus");
+    app.update(key(KeyCode::Enter));
+    assert!(app.notice.as_ref().unwrap().text.contains("out of credits"));
+    assert!(app.chat.picker.is_some());
+    for _ in 0..4 {
+        app.update(key(KeyCode::Backspace));
+    }
+    app.update(key(KeyCode::Down));
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.chat.picker, None);
+    assert_eq!(app.chat.model_name(), Some("GPT-6 Sol"));
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("#42 · GPT-6 Sol"), "{screen}");
+
+    // The next question asks with it; a refusal goes back to the chat's own.
+    type_text(&mut app, "And Q4?");
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Send {
+        chat: Some(42),
+        text: "And Q4?".into(),
+        model: Some("15".into()),
+        project: None,
+        attachments: vec![],
+    })));
+    app.update(Msg::Chat(ChatMsg::Sent {
+        chat: Some(42),
+        result: Err(Failure::new(
+            "model_unavailable",
+            "That model isn't available. Pick another one.",
+        )),
+    }));
+    assert_eq!(app.chat.model, None);
+    assert_eq!(app.chat.input, "And Q4?");
+
+    // `/model gemini` picks it at once.
+    app.chat.input.clear();
+    type_text(&mut app, "/model gemini");
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Remember("/model gemini".into())]
+    );
+    assert_eq!(app.chat.model_name(), Some("Gemini 3.8 Flash"));
+}
+
+#[test]
+fn an_older_server_has_no_model_to_pick() {
+    let mut app = app();
+    budget_open(&mut app, None);
+    type_text(&mut app, "/model");
+    app.update(key(KeyCode::Enter));
+    app.update(Msg::Chat(ChatMsg::Models(Err(Failure::new(
+        "unsupported",
+        "This Chat with Work server doesn't let you pick a model from here yet. Chats use your default model.",
+    )))));
+    assert_eq!(app.chat.picker, None);
+    assert!(matches!(app.chat.models, ModelList::Unavailable(_)));
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("doesn't let you pick")
+    );
+    // Asked again: the sentence, and nothing sent.
+    type_text(&mut app, "/model");
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        Vec::<Effect>::new(),
+        "already remembered"
+    );
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("doesn't let you pick")
+    );
+}
+
+#[test]
+fn projects_and_chats_are_picked_from_lists() {
+    let mut app = app();
+    budget_open(&mut app, every_action());
+    type_text(&mut app, "/project falcon");
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(
+        effects.contains(&Effect::Chat(ChatCommand::Follow(None))),
+        "a new chat"
+    );
+    assert_eq!(app.chat.open, None);
+    let screen = render_to_string(&app, 100, 30);
+    assert!(
+        screen.contains("New chat") && screen.contains("Falcon"),
+        "{screen}"
+    );
+    type_text(&mut app, "Plan?");
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Send {
+        chat: None,
+        text: "Plan?".into(),
+        model: None,
+        project: Some(3),
+        attachments: vec![],
+    })));
+
+    let mut app = self::app();
+    budget_open(&mut app, every_action());
+    type_text(&mut app, "/resume");
+    app.update(key(KeyCode::Enter));
+    type_text(&mut app, "hiring");
+    assert_snapshot("chat_resume_picker", &app);
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![
+            Effect::Chat(ChatCommand::Open(27)),
+            Effect::Chat(ChatCommand::Follow(Some(27)))
+        ]
+    );
+}
+
+fn approval() -> super::chat::Approval {
+    super::chat::Approval {
+        id: 31,
+        service: "Slack".into(),
+        effect: "write".into(),
+        decidable: true,
+        summary: "Post a message to #general".into(),
+        details: vec![
+            super::chat::Detail {
+                label: "Channel".into(),
+                value: "#general".into(),
+            },
+            super::chat::Detail {
+                label: "Message".into(),
+                value: "We shipped!".into(),
+            },
+        ],
+        allow_for_rest_of_chat: true,
+        waiting_for: None,
+    }
+}
+
+fn waiting(
+    app: &mut App,
+    approvals: Vec<super::chat::Approval>,
+    questions: Vec<super::chat::Question>,
+) {
+    open_budget(app);
+    let mut transcript = budget_transcript("idle");
+    transcript.approvals = approvals;
+    transcript.questions = questions;
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(transcript),
+    }));
+}
+
+#[test]
+fn snapshot_chat_tool_approval() {
+    let mut app = app();
+    waiting(&mut app, vec![approval()], vec![]);
+    assert_snapshot("chat_tool_approval", &app);
+
+    // Typing doesn't land in the composer, but a command does.
+    app.update(char('x'));
+    assert!(app.chat.input.is_empty());
+    type_text(&mut app, "/op");
+    assert_eq!(app.menu()[0].name, "open");
+    app.update(ctrl('c'));
+    app.update(key(KeyCode::Down));
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Chat(ChatCommand::Approve {
+            chat: 42,
+            tool_call: 31,
+            for_rest_of_chat: true
+        })]
+    );
+    assert!(app.update(char('y')).is_empty(), "one answer at a time");
+    let mut busy = summary(42, "Q3 budget", "2026-09-25T08:14:03Z");
+    busy.state = "processing".into();
+    assert_eq!(
+        app.update(Msg::Chat(ChatMsg::Decided {
+            chat: 42,
+            result: Ok(busy)
+        })),
+        vec![Effect::Chat(ChatCommand::Open(42))]
+    );
+    assert!(!app.chat.deciding);
+
+    // Denied with what to do instead.
+    let mut app = self::app();
+    waiting(&mut app, vec![approval()], vec![]);
+    app.update(char('4'));
+    assert!(app.chat.reason);
+    type_text(&mut app, "Post in #launch");
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Chat(ChatCommand::Deny {
+            chat: 42,
+            tool_call: 31,
+            reason: Some("Post in #launch".into())
+        })]
+    );
+    let mut app = self::app();
+    waiting(&mut app, vec![approval()], vec![]);
+    assert_eq!(
+        app.update(char('n')),
+        vec![Effect::Chat(ChatCommand::Deny {
+            chat: 42,
+            tool_call: 31,
+            reason: None
+        })]
+    );
+
+    // Someone else's to decide: only whose it is.
+    let mut app = self::app();
+    let mut theirs = approval();
+    theirs.decidable = false;
+    theirs.waiting_for = Some("Ada".into());
+    waiting(&mut app, vec![theirs], vec![]);
+    let screen = render_to_string(&app, 100, 30);
+    assert!(
+        screen.contains("Waiting for Ada to approve a change in Slack"),
+        "{screen}"
+    );
+    assert_eq!(app.chat.pending_decision(), None);
+}
+
+fn question() -> super::chat::Question {
+    use super::chat::{Field, Question};
+    Question {
+        id: 32,
+        service: "Notion".into(),
+        decidable: true,
+        message: "Which environment should the report cover?".into(),
+        kind: "form".into(),
+        fields: vec![
+            Field {
+                name: "environment".into(),
+                title: "Environment".into(),
+                kind: "string".into(),
+                required: true,
+                choices: Some(vec!["staging".into(), "production".into()]),
+                ..Field::default()
+            },
+            Field {
+                name: "days".into(),
+                title: "Days".into(),
+                kind: "integer".into(),
+                ..Field::default()
+            },
+            Field {
+                name: "include_drafts".into(),
+                title: "Include drafts".into(),
+                kind: "boolean".into(),
+                default: Some(serde_json::json!(false)),
+                ..Field::default()
+            },
+        ],
+        note: Some(
+            "Only Notion sees your answer. Never enter a password here; sign in on the \
+             service's own page instead."
+                .into(),
+        ),
+        ..Question::default()
+    }
+}
+
+#[test]
+fn snapshot_chat_tool_question() {
+    let mut app = app();
+    waiting(&mut app, vec![], vec![question()]);
+    assert_eq!(app.chat.form.values, ["", "", "no"], "the defaults");
+    app.update(key(KeyCode::Right));
+    app.update(key(KeyCode::Right));
+    assert_eq!(app.chat.form.values[0], "production");
+    app.update(key(KeyCode::Down));
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.chat.form.editing, Some(1));
+    type_text(&mut app, "30");
+    assert_snapshot("chat_tool_question", &app);
+    app.update(key(KeyCode::Enter));
+    assert_eq!(app.chat.form.values[1], "30");
+    assert_eq!(app.chat.form.row, 2, "on to the next");
+    app.update(char(' '));
+    app.update(key(KeyCode::Down));
+    let effects = app.update(key(KeyCode::Enter));
+    assert_eq!(
+        effects,
+        vec![Effect::Chat(ChatCommand::Answer {
+            chat: 42,
+            tool_call: 32,
+            input: Some(serde_json::json!({
+                "environment": "production",
+                "days": "30",
+                "include_drafts": true
+            }))
+        })]
+    );
+
+    // Declined.
+    let mut app = self::app();
+    waiting(&mut app, vec![], vec![question()]);
+    for _ in 0..4 {
+        app.update(key(KeyCode::Down));
+    }
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Chat(ChatCommand::Decline {
+            chat: 42,
+            tool_call: 32
+        })]
+    );
+
+    // A page to open, then say it's done.
+    let mut app = self::app();
+    let mut page = question();
+    page.kind = "url".into();
+    page.fields.clear();
+    page.url = Some("https://notion.so/connect".into());
+    page.host = Some("notion.so".into());
+    waiting(&mut app, vec![], vec![page]);
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("Open notion.so in the browser"), "{screen}");
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Chat(ChatCommand::OpenUrl(
+            "https://notion.so/connect".into()
+        ))]
+    );
+    app.update(key(KeyCode::Down));
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::Chat(ChatCommand::Answer {
+            chat: 42,
+            tool_call: 32,
+            input: None
+        })]
+    );
+}
+
+#[test]
+fn files_go_with_the_next_question() {
+    let mut app = app();
+    budget_open(&mut app, every_action());
+    type_text(&mut app, "/attach ~/notes.txt");
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![
+            Effect::Remember("/attach ~/notes.txt".into()),
+            Effect::Chat(ChatCommand::Upload("~/notes.txt".into()))
+        ]
+    );
+    type_text(&mut app, "Summarize");
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(effects.is_empty(), "still uploading");
+    assert!(
+        app.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("still uploading")
+    );
+    app.update(Msg::Chat(ChatMsg::Uploaded {
+        path: "~/notes.txt".into(),
+        result: Ok(super::chat::Uploaded {
+            signed_id: "signed-1".into(),
+            filename: "notes.txt".into(),
+            byte_size: 2048,
+            content_type: "text/plain".into(),
+        }),
+    }));
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("+ notes.txt · 2.0 KB"), "{screen}");
+    let effects = app.update(key(KeyCode::Enter));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Send {
+        chat: Some(42),
+        text: "Summarize".into(),
+        model: None,
+        project: None,
+        attachments: vec!["signed-1".into()],
+    })));
+    assert!(app.chat.attachments.is_empty());
+
+    // A refused file says why and is gone.
+    type_text(&mut app, "/attach logo.svg");
+    app.update(key(KeyCode::Enter));
+    app.update(Msg::Chat(ChatMsg::Uploaded {
+        path: "logo.svg".into(),
+        result: Err(Failure::new(
+            "attachment_refused",
+            "logo.svg has a blocked file type",
+        )),
+    }));
+    assert!(app.chat.attachments.is_empty());
+    assert_eq!(
+        app.notice.as_ref().unwrap().text,
+        "logo.svg has a blocked file type"
+    );
+}
+
+#[test]
+fn chat_actions_ask_the_server() {
+    let mut app = app();
+    budget_open(&mut app, every_action());
+    let run = |app: &mut App, line: &str| {
+        app.focus = Focus::Composer;
+        app.chat.input.clear();
+        type_text(app, line);
+        app.update(key(KeyCode::Enter))
+            .into_iter()
+            .filter(|e| !matches!(e, Effect::Remember(_)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        run(&mut app, "/retry"),
+        vec![Effect::Chat(ChatCommand::Act {
+            chat: 42,
+            action: ChatAction::Retry
+        })]
+    );
+    assert!(run(&mut app, "/rename").is_empty());
+    assert_eq!(app.chat.input, "/rename Q3 budget", "the title to edit");
+    assert_eq!(
+        run(&mut app, "/rename Q3 budget, final"),
+        vec![Effect::Chat(ChatCommand::Act {
+            chat: 42,
+            action: ChatAction::Rename("Q3 budget, final".into())
+        })]
+    );
+    assert!(run(&mut app, "/delete").is_empty());
+    assert!(matches!(
+        app.modal,
+        Some(Modal::ConfirmDelete { chat: 42, .. })
+    ));
+    assert_eq!(
+        app.update(char('y')),
+        vec![Effect::Chat(ChatCommand::Act {
+            chat: 42,
+            action: ChatAction::Delete
+        })]
+    );
+    let effects = app.update(Msg::Chat(ChatMsg::Acted {
+        chat: 42,
+        action: ChatAction::Delete,
+        result: Ok(Acted::Deleted),
+    }));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Follow(None))));
+    assert_eq!(app.chat.open, None);
+    assert!(app.chat.list.chats.iter().all(|c| c.number != 42));
+
+    let mut app = self::app();
+    budget_open(&mut app, every_action());
+    run(&mut app, "/share-chat");
+    let mut shared_chat = summary(42, "Q3 budget", "2026-09-25T08:14:03Z");
+    shared_chat.share = Some(super::chat::ShareLink {
+        url: "https://chatwithwork.com/shared/abc".into(),
+        expires_at: None,
+    });
+    let effects = app.update(Msg::Chat(ChatMsg::Acted {
+        chat: 42,
+        action: ChatAction::Share,
+        result: Ok(Acted::Shared(super::chat::Shared {
+            url: "https://chatwithwork.com/shared/abc".into(),
+            expires_at: None,
+            chat: shared_chat,
+        })),
+    }));
+    assert_eq!(
+        effects,
+        vec![Effect::Copy("https://chatwithwork.com/shared/abc".into())]
+    );
+    assert_eq!(
+        run(&mut app, "/unshare-chat"),
+        vec![Effect::Chat(ChatCommand::Act {
+            chat: 42,
+            action: ChatAction::Unshare
+        })]
+    );
+    assert_eq!(
+        run(&mut app, "/copy"),
+        vec![Effect::Copy(
+            "The Q3 budget is **€40k**, signed off by *Ada* on 12 September.\n\n\
+             - Marketing: €18k\n- Engineering: `€22k`\n\n\
+             Details are in [the plan](https://drive.google.com/file/d/q3)."
+                .into()
+        )]
+    );
+    let branch = summary(44, "Branch of Q3 budget", "2026-09-25T08:20:00Z");
+    let effects = app.update(Msg::Chat(ChatMsg::Acted {
+        chat: 42,
+        action: ChatAction::Branch,
+        result: Ok(Acted::Chat(branch)),
+    }));
+    assert!(effects.contains(&Effect::Chat(ChatCommand::Open(44))));
+    assert_eq!(app.chat.open, Some(44));
+}
+
+#[test]
+fn the_mouse_selects_opens_and_scrolls() {
+    use crossterm::event::MouseEventKind;
+    let mut app = app();
+    chats_ready(&mut app);
+    // A chat in the sidebar.
+    let (x, y) = find(&app, "Hiring plan");
+    assert_eq!(
+        click(&mut app, x, y),
+        vec![
+            Effect::Chat(ChatCommand::Open(27)),
+            Effect::Chat(ChatCommand::Follow(Some(27)))
+        ]
+    );
+    // The audit log tab, and back.
+    let (x, y) = find(&app, "AUDIT LOG");
+    click(&mut app, x + 1, y);
+    assert_eq!(app.view, View::Log);
+    let (x, y) = find(&app, "CHAT");
+    click(&mut app, x, y);
+    assert_eq!(app.view, View::Chat);
+    // A folder.
+    let (x, y) = find(&app, "Work docs");
+    click(&mut app, x, y);
+    assert_eq!(app.focus, Focus::Roots);
+    // The composer, then a row of the slash list.
+    let (x, y) = find(&app, "Reply…");
+    click(&mut app, x, y);
+    assert_eq!(app.focus, Focus::Composer);
+    type_text(&mut app, "/lo");
+    let (x, y) = find(&app, "/log");
+    click(&mut app, x, y);
+    assert_eq!(app.view, View::Log);
+
+    // The wheel scrolls the conversation, and links open.
+    let mut app = self::app();
+    budget_open(&mut app, every_action());
+    let (x, y) = find(&app, "Marketing");
+    mouse(&mut app, MouseEventKind::ScrollUp, x, y);
+    assert_eq!(app.chat.scroll, 3);
+    mouse(&mut app, MouseEventKind::ScrollDown, x, y);
+    assert_eq!(app.chat.scroll, 0);
+    let (x, y) = find(&app, "https://drive.google.com/file/d/q3");
+    assert_eq!(
+        click(&mut app, x, y),
+        vec![Effect::Chat(ChatCommand::OpenUrl(
+            "https://drive.google.com/file/d/q3".into()
+        ))]
+    );
+
+    // The approval prompt's answers.
+    let mut app = self::app();
+    waiting(&mut app, vec![approval()], vec![]);
+    let (x, y) = find(&app, "3. Deny");
+    assert_eq!(
+        click(&mut app, x, y),
+        vec![Effect::Chat(ChatCommand::Deny {
+            chat: 42,
+            tool_call: 31,
+            reason: None
+        })]
+    );
+
+    // A picker's rows.
+    let mut app = self::app();
+    budget_open(&mut app, every_action());
+    type_text(&mut app, "/resume");
+    app.update(key(KeyCode::Enter));
+    let (x, y) = find(&app, "Vendor contracts");
+    assert_eq!(
+        click(&mut app, x, y),
+        vec![
+            Effect::Chat(ChatCommand::Open(31)),
+            Effect::Chat(ChatCommand::Follow(Some(31)))
+        ]
+    );
 }

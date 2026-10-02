@@ -363,6 +363,18 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
                 true,
             ))
         }
+        DaemonCommand::Logout => {
+            let was_paired = crate::auth::logout(paths)?;
+            // The daemon drops its connection once it reads the change.
+            let running = control::request(&socket, ControlRequest::Reload)?.is_some();
+            let text = if was_paired {
+                "Forgot the pairing. Revoke this computer in Chat with Work as well, under \
+                 Settings, Computers."
+            } else {
+                "This computer wasn't paired."
+            };
+            Ok((text.into(), !running))
+        }
         DaemonCommand::Retry | DaemonCommand::Pair | DaemonCommand::CancelPairing => {
             Ok((String::new(), false))
         }

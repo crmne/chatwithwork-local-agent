@@ -1,9 +1,9 @@
  Chat with Work  LOCAL AGENT   │  CHAT   AUDIT LOG                                          ● LIVE
                                │────────────────────────────────────────────────────────────────────
  CHATS                       5 │
-  + New chat                   │  Q3 budget                                                    #42
+  + New chat                   │  Q3 budget                                 #42 · Gemini 3.8 Flash
   TODAY                        │
-   Q3 budget                 ⠋ │                    What did we budget for Q3, and who signed it
+   Q3 budget                   │                    What did we budget for Q3, and who signed it
    Launch plan for Falcon      │                    off?
   YESTERDAY                    │
    Onboarding checklist        │  ▸ Searched Drive and Carmine's MacBook · 2 searches, read 1 file
@@ -18,13 +18,13 @@
                                │  SOURCES
                                │  [1] Q3 plan.pdf  https://drive.google.com/file/d/q3
                                │
-                               │                                                         And Q4?
                                │
- ROOTS                       1 │  ⠋ Searching Carmine's MacBook · Reading plans/q4.md · 3 of 5
-  ● Work docs                  │    ○ Searching for “q4 budget”…
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Writing…  esc stops                                          │
+                               │────────────────────────────────────────────────────────────────────
+ ROOTS                       1 │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
+  ● Work docs                  │ ╭────────────────────────────────────────────────────────────────╮
+    work-docs · 1,532 files    │ │ ❯ Model:                                                       │
+ DAEMON                        │ │ ▌Gemini 3.8 Flash  current · About 3 credits per answer        │
+ ● connected       since 08:14 │ │  GPT-6 Sol · About 12 credits per answer                       │
+   chatwithwork.com · #42      │ │  Claude Opus · You're out of credits. Add credits in Settings… │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- enter send   / commands   shift-enter new line   ↑ history   esc stop   tab focus   ctrl-c clear
+ type to filter   ↑↓ select   enter pick   esc close

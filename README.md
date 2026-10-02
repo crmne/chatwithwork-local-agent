@@ -139,13 +139,52 @@ Run in a terminal, `cww` opens a terminal UI; piped, it prints the help. On the 
 | `↑` `↓`, `j` `k`, `Enter` | Select and open a chat |
 | `n` | New chat |
 | `/` | Search chats |
-| `Enter`, `Esc` | In the composer: send; stop an answer being written, or go back to the chats |
 | `e` | Show every tool step under its activity line |
 | `o` | Open the chat in the browser, or ask to use your chats here |
 | `l` | Switch between the chat view and the audit log (`PgUp`, `PgDn`, `End` to follow) |
 | `r` | Look for the daemon again |
-| `?` | All the keys |
-| `q`, `Ctrl-C` | Quit |
+| `?` | All the keys and commands |
+| `q` | Quit |
+| `Ctrl-C` | Clear what's typed; with nothing to clear, twice in a row quits |
+| `Ctrl-L` | Draw the screen again |
+
+In the composer, keys work as in Claude Code:
+
+| Key | Does |
+|---|---|
+| `Enter` | Send, or run a `/` command |
+| `Shift-Enter`, `Alt-Enter`, `Ctrl-J`, or `\` then `Enter` | A new line (`Shift-Enter` where the terminal tells it apart from `Enter`) |
+| `↑` `↓` | Move between lines; from the first or last line, earlier questions |
+| `←` `→`, `Home` `End`, `Ctrl-A` `Ctrl-E` | Move along the line |
+| `Ctrl-U`, `Ctrl-K`, `Ctrl-W` | Delete to the start of the line, to its end, or the word before |
+| `Esc` | Close the command list; stop an answer being written; or go back to the chats |
+
+Typing `/` lists the commands and narrows them as you type; `↑` `↓` select, `Tab` completes and `Enter` runs one. `//` at the start asks something that begins with a slash.
+
+| Command | Does |
+|---|---|
+| `/new` (`/clear`) | Start a new chat |
+| `/resume` (`/chats`) | Pick a recent chat from a list you can filter |
+| `/search <text>` | Search your chats in the sidebar |
+| `/model [name]` | Pick the model for this chat, or the next new one, from what your plan offers; models you can't use now say why |
+| `/project [name]` | Start the next chat in a project (`/project none` for none) |
+| `/attach <path>`, `/detach` | Attach a file to your next question (up to 25 MB), or remove the attached files |
+| `/copy` | Copy the last answer to the clipboard |
+| `/open` | Open the chat in the browser |
+| `/retry`, `/branch`, `/rename [title]`, `/delete` | Answer the last question again, continue the chat in a new one, rename it, or delete it (after asking), where Chat with Work allows it |
+| `/share-chat`, `/unshare-chat` | Make a public link to the chat and copy it, or stop sharing it |
+| `/steps` | Show or hide every tool step |
+| `/folders`, `/share [path]`, `/unshare [folder]` | Go to your shared folders, share one, or stop sharing one (after asking) |
+| `/pause`, `/resume-sharing` | Refuse Chat with Work's requests for now, or answer them again |
+| `/log`, `/status` | Show the audit log, or say how this computer is connected |
+| `/login`, `/logout` | Pair this computer, or forget its pairing (after asking) |
+| `/help`, `/exit` (`/quit`) | All the keys and commands; quit |
+
+When an answer stops at a change that needs your approval (posting to Slack, creating an issue), the chat shows what it will do and asks: `↑` `↓` and `Enter`, or `y` to approve, `a` to approve it for the rest of the chat where that's allowed, `n` to deny, or deny and say what to do instead. When a connected service asks you something while its tool runs, the chat shows its question as a small form: `↑` `↓` move between the fields, `←` `→` go through a field's choices, `Enter` types a value, then Send or Decline; a service that needs you to open a page offers to open it in the browser. In a project chat, it says whose answer the chat waits for.
+
+The mouse works too: click a chat, a folder, a tab, the composer, a command, a picker's row, an answer to an approval, or a link in an answer; the wheel scrolls the chat, the lists and the audit log. While the TUI has the mouse, hold `Shift` (or your terminal's own modifier, such as `Option` in iTerm2) and drag to select text, or set `[tui] mouse = false` in `config.toml` to leave the mouse to the terminal.
+
+Questions you ask, and the commands you run, are kept in `~/.local/state/cww/history` (only readable by you, the newest 500) so `↑` recalls them in the next run. Files you attach are read by `cww` itself, not the sandboxed daemon, and uploaded through the daemon only when you attach them; the clipboard gets text through your terminal (OSC 52), so it also works over SSH where the terminal allows it.
 
 A first run is three keys: `c` to pair, `s` to start the daemon if the installer didn't, and `y` to share your Documents folder, which it offers when nothing is shared and never shares on its own. Until the daemon runs, the UI works from `config.toml` and the audit file, and changes are saved there, like the `cww roots` commands. `CWW_SERVER=https://chat.example.com cww` pairs with a self-hosted server.
 
@@ -224,6 +263,9 @@ rescan_secs = 1800    # full rescan interval, only when watching is off or unava
 
 [sandbox]
 enabled = true        # Landlock on Linux, Seatbelt on macOS
+
+[tui]
+mouse = true          # clicks and the wheel in cww tui; false leaves the mouse to the terminal
 ```
 
 Run `cww reload` after editing the file. The `cww roots` commands reload the daemon for you.
@@ -233,6 +275,7 @@ Run `cww reload` after editing the file. The `cww roots` commands reload the dae
 | `~/.config/cww/` | `config.toml`, and `secrets.json` if no keychain is available |
 | `~/.local/share/cww/index/` | The search index (`0700`) |
 | `~/.local/state/cww/audit.jsonl` | The audit log (`0600`, rotated at 10 MB, never uploaded) |
+| `~/.local/state/cww/history` | The questions and commands typed in `cww tui`, for `↑` (`0600`, never uploaded) |
 | `$XDG_RUNTIME_DIR/cww/cww.sock` | The control socket for the CLI (`0600`) |
 
 The same layout is used on macOS. On Windows everything lives under `%LOCALAPPDATA%\cww` (`config`, `data`, `state`), and the control channel is a named pipe. `CWW_HOME=/some/dir` puts all of it under one directory.

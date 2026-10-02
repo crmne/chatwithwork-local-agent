@@ -3,28 +3,28 @@
  CHATS                       5 │
   + New chat                   │  Q3 budget                                                    #42
   TODAY                        │
-   Q3 budget                 ⠋ │                    What did we budget for Q3, and who signed it
-   Launch plan for Falcon      │                    off?
-  YESTERDAY                    │
-   Onboarding checklist        │  ▸ Searched Drive and Carmine's MacBook · 2 searches, read 1 file
+   Q3 budget                   │  The Q3 budget is €40k, signed off by Ada on 12 September.
+   Launch plan for Falcon      │
+  YESTERDAY                    │  • Marketing: €18k
+   Onboarding checklist        │  • Engineering: €22k
   EARLIER                      │
-   Vendor contracts            │  The Q3 budget is €40k, signed off by Ada on 12 September.
+   Vendor contracts            │  Details are in the plan[1].
    Hiring plan                 │
-                               │  • Marketing: €18k
-                               │  • Engineering: €22k
-                               │
-                               │  Details are in the plan[1].
-                               │
                                │  SOURCES
                                │  [1] Q3 plan.pdf  https://drive.google.com/file/d/q3
                                │
-                               │                                                         And Q4?
-                               │
- ROOTS                       1 │  ⠋ Searching Carmine's MacBook · Reading plans/q4.md · 3 of 5
-  ● Work docs                  │    ○ Searching for “q4 budget”…
+                               │  ● Notion asks
+                               │    Which environment should the report cover?
+                               │    Environment     production
+                               │    Days            typing below…
+                               │    Include drafts  no
+                               │    Send
+                               │    Decline
+ ROOTS                       1 │    Only Notion sees your answer. Never enter a password here;
+  ● Work docs                  │    sign in on the service's own page instead.
     work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
  DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
  ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ Writing…  esc stops                                          │
+   chatwithwork.com · #42      │ │ ❯ 30                                                           │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
- enter send   / commands   shift-enter new line   ↑ history   esc stop   tab focus   ctrl-c clear
+ enter keep it   esc cancel

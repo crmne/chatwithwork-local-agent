@@ -1,6 +1,6 @@
 # Chats in the terminal
 
-Status: **built.** `cww tui` lists your chats, reads them, asks questions and follows answers as they're written. This page explains the design; the wire details are in [PROTOCOL.md, section 12](PROTOCOL.md#12-chats-for-the-terminal-ui) (daemon to server) and [CONTROL.md, "Chats"](CONTROL.md#chats) (terminal to daemon).
+Status: **built.** `cww tui` lists your chats, reads them, asks questions and follows answers as they're written, with the web's model choice, attachments, approvals, questions from connected services, and retry, branch, rename, delete and share. This page explains the design; the wire details are in [PROTOCOL.md, section 12](PROTOCOL.md#12-chats-for-the-terminal-ui) (daemon to server) and [CONTROL.md, "Chats"](CONTROL.md#chats) (terminal to daemon).
 
 ## The terminal never holds a token
 
@@ -23,6 +23,16 @@ The daemon already holds a WebSocket to the server. To follow a chat, it subscri
 
 The sidebar lists chats by day (Today, Yesterday, Earlier) under "New chat", and `/` searches them. The conversation looks like the web's: your questions as bubbles on the right, the tool work as one activity line ("Searched Drive and Slack · 3 searches", live while it runs, `e` shows every step and the files it found), answers in Markdown with bold, lists and code, and their sources and links as numbered footnotes with titles and URLs. The composer has the rainbow edge, flowing while an answer is written, dimmed with the reason when you can't ask (out of credits, nothing connected), and plain bold or dim without colour. When the daemon isn't running, the computer isn't paired, or chats aren't allowed, the screen says what to do.
 
+## The composer works like Claude Code's
+
+Slash commands, listed as you type `/`, do what the web's buttons and menus do: `/model` picks from the models your plan offers (each with its rate, and the reason when one can't be used now), `/project` starts the next chat in a project, `/attach` sends a file with the next question, and `/retry`, `/branch`, `/rename`, `/delete` and `/share-chat` act on the open chat where the server's `can` allows them. Questions keep their history between runs, and the composer takes several lines.
+
+When an answer stops for you, the chat asks right there, in place of the web's cards: approve or deny a change (with what to do instead), or fill in a connected service's question and send or decline it. Only the person who drove that turn decides; others see whose answer the chat waits for.
+
+Files are read by the TUI, not the daemon: the daemon is sandboxed to the shared folders, so the TUI sends a file's bytes over the control socket and the daemon uploads them, once, when you attach it.
+
+A server from before these calls answers them with a sentence saying what it can't do yet; the chats work as before.
+
 ## Left out for now
 
-Attachments, choosing a model (new chats use your default model), starting a chat in a project, retrying, branching, sharing, renaming and deleting chats. They're all in the browser.
+A tool's own view (MCP Apps) is still only in the browser.

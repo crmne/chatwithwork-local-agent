@@ -7,12 +7,18 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
-use super::chat::{AccessRequest, ChatList, ChatSummary, Entry, Failure, Live, Transcript};
+use super::chat::{
+    AccessRequest, Approval, ChatList, ChatSummary, Entry, Failure, Live, Model, Models, Project,
+    Shared, Transcript, Uploaded,
+};
+use super::commands::{self, Cmd, Command};
+use super::composer::{Composer, History};
 use crate::audit::AuditEntry;
 use crate::control::PROTOCOL_VERSION;
 
@@ -181,7 +187,17 @@ pub enum Modal {
         path: String,
         reason: String,
     },
-    Help,
+    /// `/delete`: deleting a chat can't be undone.
+    ConfirmDelete {
+        chat: u64,
+        title: String,
+    },
+    /// `/logout`: forgetting the pairing.
+    ConfirmLogout,
+    /// Keys and commands, scrolled down by `scroll` lines.
+    Help {
+        scroll: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +226,8 @@ pub enum DaemonCommand {
     CancelPairing,
     /// `cww daemon install`: register and start the background service.
     InstallService,
+    /// `cww logout`: forget the pairing.
+    Logout,
 }
 
 /// A pairing started from the TUI.
@@ -253,8 +271,46 @@ pub enum ChatCommand {
     Send {
         chat: Option<u64>,
         text: String,
+        /// A model picked with `/model`.
+        model: Option<String>,
+        /// A project for a new chat, picked with `/project`.
+        project: Option<u64>,
+        /// Uploaded files, by `signed_id`.
+        attachments: Vec<String>,
     },
     Cancel(u64),
+    /// The models to pick from.
+    Models,
+    /// Approve a change the answer stopped at.
+    Approve {
+        chat: u64,
+        tool_call: u64,
+        for_rest_of_chat: bool,
+    },
+    /// Deny it, maybe saying what to do instead.
+    Deny {
+        chat: u64,
+        tool_call: u64,
+        reason: Option<String>,
+    },
+    /// Answer a question from a tool's server: the form's values, or
+    /// nothing for a page that was visited.
+    Answer {
+        chat: u64,
+        tool_call: u64,
+        input: Option<serde_json::Value>,
+    },
+    Decline {
+        chat: u64,
+        tool_call: u64,
+    },
+    /// Read a file and upload it for the next question.
+    Upload(String),
+    /// Retry, branch, rename, delete or share a chat.
+    Act {
+        chat: u64,
+        action: ChatAction,
+    },
     /// Ask the owner to allow chats, then check back until they answer.
     RequestAccess,
     /// Check back until the owner answers a request made earlier.
@@ -264,9 +320,35 @@ pub enum ChatCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    /// The latest question, answered again.
+    Retry,
+    /// The whole conversation, in a new chat.
+    Branch,
+    Rename(String),
+    Delete,
+    Share,
+    Unshare,
+}
+
+/// What a chat action answered.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Acted {
+    Chat(ChatSummary),
+    Deleted,
+    Shared(Shared),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     Daemon(DaemonCommand),
     Chat(ChatCommand),
+    /// Put text on the clipboard (OSC 52).
+    Copy(String),
+    /// Ctrl-L: draw the whole screen again.
+    Redraw,
+    /// Keep a question in the history file.
+    Remember(String),
     Quit,
 }
 
@@ -313,6 +395,22 @@ pub enum ChatMsg {
         chat: u64,
         failure: Failure,
     },
+    Models(Result<Models, Failure>),
+    /// A change was approved or denied.
+    Decided {
+        chat: u64,
+        result: Result<ChatSummary, Failure>,
+    },
+    /// A file for the next question was uploaded, or not.
+    Uploaded {
+        path: String,
+        result: Result<Uploaded, Failure>,
+    },
+    Acted {
+        chat: u64,
+        action: ChatAction,
+        result: Result<Acted, Failure>,
+    },
 }
 
 // One message at a time goes through the channel; a read chat is the big one.
@@ -320,6 +418,8 @@ pub enum ChatMsg {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
     Key(KeyEvent),
+    /// A click or the wheel, on what the last frame drew there.
+    Mouse(MouseEvent),
     Paste(String),
     Resize,
     Daemon(DaemonMsg),
@@ -378,7 +478,32 @@ pub struct ChatPane {
     pub progress: Option<String>,
     /// The question just sent, until the chat shows it.
     pub pending_question: Option<String>,
-    pub input: String,
+    pub input: Composer,
+    /// Questions asked before, for Up and Down.
+    pub history: History,
+    /// The selected row of the slash command list.
+    pub menu: usize,
+    /// Esc closed the list; it opens again when the text changes.
+    pub menu_closed: bool,
+    /// A list to pick from (`/resume`, `/model`, `/project`).
+    pub picker: Option<Picker>,
+    pub models: ModelList,
+    /// The model picked with `/model`, for the chat it was picked in.
+    pub model: Option<ModelChoice>,
+    /// The project the next new chat starts in.
+    pub project: Option<Project>,
+    /// Files for the next question.
+    pub attachments: Vec<Attached>,
+    /// The selected answer to the change waiting for approval.
+    pub decision: usize,
+    /// Which change `decision` is for.
+    pub decision_for: Option<u64>,
+    /// A decision is on its way.
+    pub deciding: bool,
+    /// Typing what to do instead of the denied change.
+    pub reason: bool,
+    /// The answers to the question waiting, as they're filled in.
+    pub form: Form,
     pub sending: bool,
     pub stopping: bool,
     pub error: Option<String>,
@@ -403,13 +528,202 @@ impl Default for ChatPane {
             streamed: BTreeMap::new(),
             progress: None,
             pending_question: None,
-            input: String::new(),
+            input: Composer::default(),
+            history: History::default(),
+            menu: 0,
+            menu_closed: false,
+            picker: None,
+            models: ModelList::Unknown,
+            model: None,
+            project: None,
+            attachments: Vec::new(),
+            decision: 0,
+            decision_for: None,
+            deciding: false,
+            reason: false,
+            form: Form::default(),
             sending: false,
             stopping: false,
             error: None,
             scroll: 0,
             show_steps: false,
         }
+    }
+}
+
+/// What `/model` can offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelList {
+    Unknown,
+    Loading,
+    Ready(Models),
+    /// This server or daemon can't offer a choice, as this sentence says.
+    Unavailable(String),
+}
+
+/// A model picked with `/model`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// The chat it was picked in; `None` for the next new chat.
+    pub chat: Option<u64>,
+    pub id: String,
+    pub name: String,
+}
+
+/// A file for the next question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attached {
+    pub path: String,
+    pub name: String,
+    /// Its `signed_id` and size once uploaded.
+    pub uploaded: Option<(String, u64)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picker {
+    pub kind: PickerKind,
+    pub query: String,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerKind {
+    Chats,
+    Models,
+    Projects,
+}
+
+/// One row of a picker.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PickItem<'a> {
+    Chat(&'a ChatSummary),
+    Model(&'a Model),
+    /// `None` is "no project".
+    Project(Option<&'a Project>),
+}
+
+/// The answers to a change waiting for approval, as the prompt lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    Approve,
+    /// Approve, and don't ask again for this tool in this chat.
+    ApproveAll,
+    Deny,
+    /// Deny, and say what to do instead.
+    DenyWithReason,
+}
+
+/// A question's form, as it's filled in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Form {
+    /// The question it answers.
+    pub question: Option<u64>,
+    /// Each field's value, as typed or picked; empty leaves it out.
+    pub values: Vec<String>,
+    /// The selected row.
+    pub row: usize,
+    /// The field being typed in the composer.
+    pub editing: Option<usize>,
+}
+
+impl Form {
+    /// The values to send, by field name, typed as the fields ask.
+    pub fn input(&self, question: &super::chat::Question) -> serde_json::Value {
+        let mut input = serde_json::Map::new();
+        for (field, value) in question.fields.iter().zip(&self.values) {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            let json = match field.kind.as_str() {
+                "boolean" => serde_json::Value::Bool(value == "yes"),
+                "array" => value
+                    .split(',')
+                    .map(|v| serde_json::Value::String(v.trim().to_string()))
+                    .filter(|v| v.as_str() != Some(""))
+                    .collect(),
+                // Numbers go as typed: the server reads them as a form does.
+                _ => serde_json::Value::String(value.to_string()),
+            };
+            input.insert(field.name.clone(), json);
+        }
+        serde_json::Value::Object(input)
+    }
+}
+
+/// A row of a question's form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormRow {
+    Field(usize),
+    /// A page to visit: open it in the browser.
+    OpenPage,
+    /// Send the answer (for a page: it was visited).
+    Send,
+    Decline,
+}
+
+/// A field picked from a list: its choices, or yes and no.
+pub fn field_has_choices(field: &super::chat::Field) -> bool {
+    !field_options(field).is_empty() && field.kind != "array"
+}
+
+/// What a field can be set to with Left and Right.
+pub fn field_options(field: &super::chat::Field) -> Vec<String> {
+    if field.kind == "boolean" {
+        return vec!["yes".into(), "no".into()];
+    }
+    match &field.choices {
+        Some(choices) if field.kind != "array" => {
+            let mut options = choices.clone();
+            if !field.required {
+                options.push(String::new());
+            }
+            options
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// What the mouse can click or scroll, where the last frame drew it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hit {
+    Tab(View),
+    NewChat,
+    Chat(u64),
+    /// The chat list, for the wheel.
+    Chats,
+    Root(usize),
+    Composer,
+    /// A row of the slash command list.
+    Menu(usize),
+    Pick(usize),
+    /// A row of the approval prompt.
+    Choice(usize),
+    /// A row of a question's form.
+    Ask(usize),
+    Link(String),
+    Transcript,
+    Log,
+}
+
+/// Where things are on screen, from the last frame drawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Hits(Vec<(Rect, Hit)>);
+
+impl Hits {
+    pub fn add(&mut self, rect: Rect, hit: Hit) {
+        if rect.width > 0 && rect.height > 0 {
+            self.0.push((rect, hit));
+        }
+    }
+
+    /// What's at a cell: the last thing drawn there wins.
+    pub fn at(&self, x: u16, y: u16) -> Option<&Hit> {
+        self.0
+            .iter()
+            .rev()
+            .find(|(rect, _)| rect.contains(ratatui::layout::Position::new(x, y)))
+            .map(|(_, hit)| hit)
     }
 }
 
@@ -464,6 +778,147 @@ impl ChatPane {
         self.sending || self.open_summary().is_some_and(ChatSummary::processing)
     }
 
+    /// The change this person can decide now in the open chat.
+    pub fn pending_decision(&self) -> Option<&Approval> {
+        self.transcript
+            .as_ref()
+            .filter(|t| Some(t.chat.number) == self.open && !t.chat.processing())
+            .and_then(Transcript::next_decision)
+    }
+
+    /// The question from a tool's server this person can answer now, once
+    /// no change waits for them first.
+    pub fn pending_question(&self) -> Option<&super::chat::Question> {
+        if self.pending_decision().is_some() {
+            return None;
+        }
+        self.transcript
+            .as_ref()
+            .filter(|t| Some(t.chat.number) == self.open && !t.chat.processing())
+            .and_then(Transcript::next_question)
+    }
+
+    /// The rows of a question's form: each field, then send and decline;
+    /// for a page, open it, then done and decline.
+    pub fn question_rows(question: &super::chat::Question) -> Vec<FormRow> {
+        let mut rows: Vec<FormRow> = if question.is_url() {
+            vec![FormRow::OpenPage]
+        } else {
+            (0..question.fields.len()).map(FormRow::Field).collect()
+        };
+        rows.extend([FormRow::Send, FormRow::Decline]);
+        rows
+    }
+
+    /// The answers the prompt offers for `approval`.
+    pub fn choices(approval: &Approval) -> Vec<Choice> {
+        let mut choices = vec![Choice::Approve];
+        if approval.allow_for_rest_of_chat {
+            choices.push(Choice::ApproveAll);
+        }
+        choices.extend([Choice::Deny, Choice::DenyWithReason]);
+        choices
+    }
+
+    /// The model the next question is asked with, by name: the one picked
+    /// for this chat, else the chat's own.
+    pub fn model_name(&self) -> Option<&str> {
+        match &self.model {
+            Some(choice) if choice.chat == self.open => Some(&choice.name),
+            _ => self
+                .open_summary()
+                .and_then(|c| c.model.as_ref())
+                .map(|m| m.name.as_str()),
+        }
+    }
+
+    /// The model picked for the next question here, if any.
+    fn model_for_question(&self) -> Option<String> {
+        self.model
+            .as_ref()
+            .filter(|choice| choice.chat == self.open)
+            .map(|choice| choice.id.clone())
+    }
+
+    /// The rows the open picker shows, filtered by its query.
+    pub fn pick_items(&self) -> Vec<PickItem<'_>> {
+        let Some(picker) = &self.picker else {
+            return Vec::new();
+        };
+        let query = picker.query.trim().to_lowercase();
+        let has = |text: &str| query.is_empty() || text.to_lowercase().contains(&query);
+        match picker.kind {
+            PickerKind::Chats => self
+                .list
+                .chats
+                .iter()
+                .filter(|c| {
+                    has(&c.title)
+                        || c.number.to_string() == query.trim_start_matches('#')
+                        || c.project.as_ref().is_some_and(|p| has(&p.name))
+                })
+                .map(PickItem::Chat)
+                .collect(),
+            PickerKind::Models => match &self.models {
+                ModelList::Ready(models) => models
+                    .models
+                    .iter()
+                    .filter(|m| has(&m.name) || has(&m.provider) || m.id == query)
+                    .map(PickItem::Model)
+                    .collect(),
+                _ => Vec::new(),
+            },
+            PickerKind::Projects => {
+                let mut items = Vec::new();
+                if query.is_empty() || "no project".contains(&query) {
+                    items.push(PickItem::Project(None));
+                }
+                items.extend(
+                    self.list
+                        .projects
+                        .iter()
+                        .filter(|p| has(&p.name))
+                        .map(|p| PickItem::Project(Some(p))),
+                );
+                items
+            }
+        }
+    }
+
+    /// The model the open chat (or a new one) uses now, to mark it.
+    pub fn current_model_id(&self) -> Option<&str> {
+        match &self.model {
+            Some(choice) if choice.chat == self.open => Some(&choice.id),
+            _ => match self.open_summary() {
+                Some(chat) => chat.model.as_ref().map(|m| m.id.as_str()),
+                None if self.open.is_none() => match &self.models {
+                    ModelList::Ready(models) => models.default_model_id.as_deref(),
+                    _ => None,
+                },
+                None => None,
+            },
+        }
+    }
+
+    /// The last answer, as Markdown.
+    pub fn last_answer(&self) -> Option<&str> {
+        let read = self.transcript.as_ref().and_then(|t| {
+            t.entries.iter().rev().find_map(|e| match e {
+                Entry::Assistant { content, .. } if !content.trim().is_empty() => {
+                    Some(content.as_str())
+                }
+                _ => None,
+            })
+        });
+        let streamed = self
+            .streamed
+            .values()
+            .next_back()
+            .map(String::as_str)
+            .filter(|t| !t.trim().is_empty());
+        streamed.or(read)
+    }
+
     /// Why a question can't be asked right now, as the composer says it.
     pub fn locked_reason(&self) -> Option<&str> {
         if self.open.is_some() {
@@ -496,6 +951,10 @@ pub struct App {
     /// For showing times in local time.
     pub utc_offset: UtcOffset,
     pub quit: bool,
+    /// Ctrl-C was pressed once with nothing to clear: again quits.
+    pub quit_armed: bool,
+    /// What the last frame drew where, for the mouse.
+    pub hits: Hits,
 }
 
 impl App {
@@ -515,7 +974,15 @@ impl App {
             chat: ChatPane::default(),
             utc_offset,
             quit: false,
+            quit_armed: false,
+            hits: Hits::default(),
         }
+    }
+
+    /// With the questions asked in earlier runs, for Up.
+    pub fn with_history(mut self, history: Vec<String>) -> Self {
+        self.chat.history = History::new(history);
+        self
     }
 
     /// Effects to run once, at start. Chats wait for the daemon's status.
@@ -526,6 +993,7 @@ impl App {
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Key(key) => self.key(key),
+            Msg::Mouse(event) => self.mouse(event),
             Msg::Paste(text) => {
                 self.paste(&text);
                 Vec::new()
@@ -603,8 +1071,14 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> Vec<Effect> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
-            self.quit = true;
-            return vec![Effect::Quit];
+            return self.ctrl_c();
+        }
+        if self.quit_armed {
+            self.quit_armed = false;
+            self.notice = None;
+        }
+        if ctrl && key.code == KeyCode::Char('l') {
+            return vec![Effect::Redraw];
         }
         self.notice = None;
         if let Some(modal) = self.modal.take() {
@@ -682,7 +1156,7 @@ impl App {
                 }
                 return effects;
             }
-            KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            KeyCode::Char('?') => self.modal = Some(Modal::Help { scroll: 0 }),
             KeyCode::Char('/') if self.focus == Focus::Chats && self.chat.ready() => {
                 self.chat.search = Some(String::new());
                 self.chat.selected = usize::from(!self.chat.list.chats.is_empty());
@@ -790,16 +1264,108 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {}
                 _ => self.modal = Some(Modal::ConfirmBroad { path, reason }),
             },
-            Modal::Help => {}
+            Modal::ConfirmDelete { chat, title } => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.notice(super::theme::Signal::Idle, &format!("Deleting {title}…"));
+                    return vec![Effect::Chat(ChatCommand::Act {
+                        chat,
+                        action: ChatAction::Delete,
+                    })];
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {}
+                _ => self.modal = Some(Modal::ConfirmDelete { chat, title }),
+            },
+            Modal::ConfirmLogout => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.notice(super::theme::Signal::Idle, "Forgetting the pairing…");
+                    return vec![Effect::Daemon(DaemonCommand::Logout)];
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {}
+                _ => self.modal = Some(Modal::ConfirmLogout),
+            },
+            Modal::Help { scroll } => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.modal = Some(Modal::Help {
+                        scroll: scroll.saturating_sub(1),
+                    });
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.modal = Some(Modal::Help { scroll: scroll + 1 });
+                }
+                KeyCode::PageUp => {
+                    self.modal = Some(Modal::Help {
+                        scroll: scroll.saturating_sub(10),
+                    });
+                }
+                KeyCode::PageDown => {
+                    self.modal = Some(Modal::Help {
+                        scroll: scroll + 10,
+                    })
+                }
+                _ => {}
+            },
         }
         Vec::new()
     }
 
+    /// Ctrl-C clears what's typed; with nothing to clear, pressing it twice
+    /// in a row quits.
+    fn ctrl_c(&mut self) -> Vec<Effect> {
+        let chat = &mut self.chat;
+        let typed = !chat.input.is_empty() || chat.picker.is_some() || chat.reason;
+        if self.focus == Focus::Composer && typed && self.modal.is_none() {
+            chat.input.clear();
+            chat.picker = None;
+            chat.reason = false;
+            chat.menu_closed = false;
+            chat.history.reset();
+            self.quit_armed = false;
+            self.notice = None;
+            return Vec::new();
+        }
+        if self.quit_armed {
+            self.quit = true;
+            return vec![Effect::Quit];
+        }
+        self.quit_armed = true;
+        self.notice(super::theme::Signal::Idle, "Press ctrl-c again to quit.");
+        Vec::new()
+    }
+
     fn composer_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if self.chat.picker.is_some() {
+            return self.picker_key(key);
+        }
+        if let Some(effects) = self.decision_key(key) {
+            return effects;
+        }
+        if let Some(effects) = self.question_key(key) {
+            return effects;
+        }
+        if let Some(effects) = self.menu_key(key) {
+            return effects;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let reason = self.chat.reason;
+        let editing = self.chat.form.editing.is_some();
+        let stop = self.chat.working() && !self.chat.stopping;
+        let input = &mut self.chat.input;
+        let before = input.text().to_string();
         match key.code {
+            KeyCode::Esc if reason => {
+                self.chat.reason = false;
+                self.chat.input.clear();
+                return Vec::new();
+            }
+            KeyCode::Esc if editing => {
+                self.chat.form.editing = None;
+                self.chat.input.clear();
+                return Vec::new();
+            }
             // Esc stops an answer being written, like the web's stop button.
-            KeyCode::Esc if self.chat.working() && !self.chat.stopping => {
+            KeyCode::Esc if stop => {
                 if let Some(chat) = self.chat.open {
                     self.chat.stopping = true;
                     self.notice(super::theme::Signal::Idle, "Stopping the answer…");
@@ -815,54 +1381,1078 @@ impl App {
             }
             KeyCode::Tab => self.cycle_focus(true),
             KeyCode::BackTab => self.cycle_focus(false),
-            KeyCode::Enter => return self.send(),
+            // A new line: Shift-Enter where the terminal tells it apart,
+            // Alt-Enter and Ctrl-J everywhere.
+            KeyCode::Enter if shift || alt => input.insert('\n'),
+            KeyCode::Char('j') if ctrl => input.insert('\n'),
+            // A trailing backslash continues on a new line, as in a shell.
+            KeyCode::Enter
+                if input.text().ends_with('\\') && input.cursor() == input.text().len() =>
+            {
+                input.backspace();
+                input.insert('\n');
+            }
+            KeyCode::Enter if reason => return self.deny_with_reason(),
+            KeyCode::Enter if editing => {
+                self.save_field();
+                return Vec::new();
+            }
+            KeyCode::Enter => return self.submit(),
+            KeyCode::Up => {
+                if !input.up() {
+                    if let Some(earlier) = self.chat.history.back(input.text()) {
+                        let earlier = earlier.to_string();
+                        self.chat.input.set(earlier);
+                    }
+                    return Vec::new();
+                }
+            }
+            KeyCode::Down => {
+                if !input.down() {
+                    if let Some(later) = self.chat.history.forward() {
+                        self.chat.input.set(later);
+                    }
+                    return Vec::new();
+                }
+            }
+            KeyCode::Left => input.left(),
+            KeyCode::Right => input.right(),
+            KeyCode::Home => input.home(),
+            KeyCode::End => input.end(),
+            KeyCode::Char('a') if ctrl => input.home(),
+            KeyCode::Char('e') if ctrl => input.end(),
+            KeyCode::Char('b') if ctrl => input.left(),
+            KeyCode::Char('f') if ctrl => input.right(),
+            KeyCode::Char('k') if ctrl => input.kill_after(),
+            KeyCode::Char('u') if ctrl => input.kill_before(),
+            KeyCode::Char('w') if ctrl => input.delete_word(),
+            KeyCode::Char('h') if ctrl => input.backspace(),
+            KeyCode::Char('d') if ctrl => input.delete(),
             KeyCode::PageUp => self.scroll_transcript(10),
             KeyCode::PageDown => self.scroll_transcript(-10),
-            KeyCode::Backspace => {
-                self.chat.input.pop();
+            KeyCode::Backspace => input.backspace(),
+            KeyCode::Delete => input.delete(),
+            KeyCode::Char(c) if !ctrl => input.insert(c),
+            _ => {}
+        }
+        if self.chat.input.text() != before {
+            self.typed();
+        }
+        Vec::new()
+    }
+
+    /// The text changed: the slash list opens again at its top, and Up
+    /// starts from the newest question again.
+    fn typed(&mut self) {
+        self.chat.menu = 0;
+        self.chat.menu_closed = false;
+        self.chat.history.reset();
+    }
+
+    /// The slash commands that match what's typed, while the list is open.
+    pub fn menu(&self) -> Vec<&'static Command> {
+        let chat = &self.chat;
+        if self.focus != Focus::Composer
+            || chat.menu_closed
+            || chat.picker.is_some()
+            || chat.reason
+            || chat.form.editing.is_some()
+            || !chat.ready()
+        {
+            return Vec::new();
+        }
+        let Some(name) = chat.input.text().strip_prefix('/') else {
+            return Vec::new();
+        };
+        if name.starts_with('/') || name.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        commands::matching(name, |cmd| self.offers(cmd))
+    }
+
+    /// Whether the slash list offers `cmd` here and now. Typed in full, a
+    /// command it doesn't offer still runs and says why it can't.
+    fn offers(&self, cmd: Cmd) -> bool {
+        let open = self.chat.open_summary();
+        let can = |action: fn(&super::chat::Can) -> bool| open.is_some_and(|c| c.can(action));
+        match cmd {
+            Cmd::Retry => can(|c| c.retry),
+            Cmd::Branch => can(|c| c.branch),
+            Cmd::Rename => can(|c| c.rename),
+            Cmd::Delete => can(|c| c.delete),
+            Cmd::ShareChat => can(|c| c.share),
+            Cmd::UnshareChat => open.is_some_and(|c| c.share.is_some()),
+            Cmd::Copy | Cmd::Open => open.is_some(),
+            Cmd::Detach => !self.chat.attachments.is_empty(),
+            Cmd::Login => self.can_pair(),
+            Cmd::Logout => self.daemon.server().is_some(),
+            Cmd::Pause => self.daemon.paused() == Some(false),
+            Cmd::ResumeSharing => self.daemon.paused() == Some(true),
+            Cmd::Project => !self.chat.list.projects.is_empty(),
+            _ => true,
+        }
+    }
+
+    /// Keys for the open slash list, or `None` to edit as usual.
+    fn menu_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
+        let menu = self.menu();
+        if menu.is_empty() {
+            return None;
+        }
+        let len = menu.len();
+        let selected = self.chat.menu.min(len - 1);
+        match key.code {
+            KeyCode::Up => self.chat.menu = (selected + len - 1) % len,
+            KeyCode::Down => self.chat.menu = (selected + 1) % len,
+            KeyCode::Tab => self.complete(menu[selected]),
+            KeyCode::Enter => return Some(self.run_menu(menu[selected])),
+            KeyCode::Esc => self.chat.menu_closed = true,
+            _ => return None,
+        }
+        Some(Vec::new())
+    }
+
+    /// Put a command's name in the composer, with room for its argument.
+    fn complete(&mut self, command: &Command) {
+        let space = if command.args.is_empty() { "" } else { " " };
+        self.chat.input.set(format!("/{}{space}", command.name));
+        self.chat.menu = 0;
+    }
+
+    /// Enter on a row of the slash list: run it, or complete it when it
+    /// needs something typed after it.
+    fn run_menu(&mut self, command: &'static Command) -> Vec<Effect> {
+        if command.needs_args {
+            self.complete(command);
+            return Vec::new();
+        }
+        self.chat.input.clear();
+        self.typed();
+        let mut effects = self.remember(&format!("/{}", command.name));
+        effects.extend(self.run_command(command.cmd, ""));
+        effects
+    }
+
+    /// Enter: run a command, or ask.
+    fn submit(&mut self) -> Vec<Effect> {
+        let raw = self.chat.input.text().trim().to_string();
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        let Some((name, args)) = commands::parse(&raw) else {
+            // `//` asks something that starts with a slash.
+            let text = raw.strip_prefix('/').unwrap_or(&raw).to_string();
+            return self.send(text, raw);
+        };
+        let Some(command) = commands::find(name) else {
+            self.notice(
+                super::theme::Signal::Attention,
+                &format!(
+                    "There's no /{name} command. /help lists them; start with // to ask \
+                     something that begins with a slash."
+                ),
+            );
+            return Vec::new();
+        };
+        let args = args.to_string();
+        self.chat.input.clear();
+        self.typed();
+        let mut effects = self.remember(&raw);
+        effects.extend(self.run_command(command.cmd, &args));
+        effects
+    }
+
+    /// Keep what was entered for Up, here and in the history file.
+    fn remember(&mut self, entry: &str) -> Vec<Effect> {
+        if self.chat.history.push(entry) {
+            vec![Effect::Remember(entry.to_string())]
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn run_command(&mut self, cmd: Cmd, args: &str) -> Vec<Effect> {
+        use super::theme::Signal;
+        let needs_chats = matches!(
+            cmd,
+            Cmd::New
+                | Cmd::Resume
+                | Cmd::Search
+                | Cmd::Model
+                | Cmd::Project
+                | Cmd::Attach
+                | Cmd::Copy
+                | Cmd::Retry
+                | Cmd::Branch
+                | Cmd::Rename
+                | Cmd::Delete
+                | Cmd::ShareChat
+                | Cmd::UnshareChat
+        );
+        if needs_chats && !self.chat.ready() {
+            self.notice(Signal::Attention, "Chats aren't available here right now.");
+            return Vec::new();
+        }
+        match cmd {
+            Cmd::New => {
+                self.chat.project = None;
+                return self.new_chat();
             }
-            KeyCode::Char('u') if ctrl => self.chat.input.clear(),
-            KeyCode::Char('w') if ctrl => delete_word(&mut self.chat.input),
-            KeyCode::Char(c) if !ctrl => self.chat.input.push(c),
+            Cmd::Resume => self.open_picker(PickerKind::Chats, args),
+            Cmd::Search => {
+                self.focus = Focus::Chats;
+                self.view = View::Chat;
+                self.chat.search = Some(args.to_string());
+                self.chat.selected = usize::from(!self.chat.visible().is_empty());
+            }
+            Cmd::Model => return self.pick_model(args),
+            Cmd::Project => return self.pick_project(args),
+            Cmd::Attach => return self.attach(args),
+            Cmd::Detach => {
+                self.chat.attachments.clear();
+                self.notice(Signal::Idle, "No files attached.");
+            }
+            Cmd::Copy => match self.chat.last_answer() {
+                Some(answer) => {
+                    let answer = answer.to_string();
+                    self.notice(Signal::Positive, "Copied the last answer.");
+                    return vec![Effect::Copy(answer)];
+                }
+                None => self.notice(Signal::Idle, "There's no answer to copy yet."),
+            },
+            Cmd::Open => return self.open_in_browser(),
+            Cmd::Retry
+            | Cmd::Branch
+            | Cmd::Rename
+            | Cmd::Delete
+            | Cmd::ShareChat
+            | Cmd::UnshareChat => {
+                return self.chat_action(cmd, args);
+            }
+            Cmd::Steps => self.chat.show_steps = !self.chat.show_steps,
+            Cmd::Folders => {
+                self.view = View::Chat;
+                self.focus = Focus::Roots;
+            }
+            Cmd::Share if args.is_empty() => {
+                self.modal = Some(Modal::AddRoot {
+                    input: self.default_folder(),
+                });
+            }
+            Cmd::Share => return self.add_root(args.to_string(), None, false),
+            Cmd::Unshare => return self.unshare(args),
+            Cmd::Pause if self.daemon.paused() == Some(true) => {
+                self.notice(
+                    Signal::Idle,
+                    "Already paused. /resume-sharing answers again.",
+                );
+            }
+            Cmd::ResumeSharing if self.daemon.paused() == Some(false) => {
+                self.notice(Signal::Idle, "Already answering Chat with Work.");
+            }
+            Cmd::Pause | Cmd::ResumeSharing => return self.toggle_pause(),
+            Cmd::Log => {
+                self.view = View::Log;
+                self.log_scroll = 0;
+            }
+            Cmd::Status => {
+                let status = self.status_sentence();
+                self.notice(Signal::Idle, &status);
+            }
+            Cmd::Login if self.can_pair() && self.pairing.is_none() => {
+                self.pairing = Some(Pairing::Starting);
+                return vec![Effect::Daemon(DaemonCommand::Pair)];
+            }
+            Cmd::Login if self.pairing.is_some() => {
+                self.notice(Signal::Idle, "Pairing already: approve it in the browser.");
+            }
+            Cmd::Login => match self.daemon.server() {
+                Some(server) => {
+                    let host = host(server);
+                    self.notice(
+                        Signal::Idle,
+                        &format!("Paired with {host} already. /logout first to pair again."),
+                    );
+                }
+                None => self.notice(Signal::Idle, "Start the daemon first: press s."),
+            },
+            Cmd::Logout if self.daemon.server().is_none() => {
+                self.notice(Signal::Idle, "This computer isn't paired.");
+            }
+            Cmd::Logout => self.modal = Some(Modal::ConfirmLogout),
+            Cmd::Help => self.modal = Some(Modal::Help { scroll: 0 }),
+            Cmd::Exit => {
+                self.quit = true;
+                return vec![Effect::Quit];
+            }
+        }
+        Vec::new()
+    }
+
+    /// `/status`: how this computer is connected, in a sentence.
+    fn status_sentence(&self) -> String {
+        let roots = self.daemon.roots().len();
+        let shared = match roots {
+            0 => "nothing shared".to_string(),
+            1 => "1 folder shared".to_string(),
+            n => format!("{n} folders shared"),
+        };
+        match &self.daemon {
+            Daemon::Unknown => "Still looking for the daemon.".into(),
+            Daemon::NotRunning(offline) => {
+                let paired = match &offline.server {
+                    Some(server) => format!("paired with {}", host(server)),
+                    None => "not paired".into(),
+                };
+                format!("The daemon isn't running ({paired}, {shared}).")
+            }
+            Daemon::Running(status) => {
+                let link = match status.connection.connection.as_str() {
+                    "connected" => "Connected to",
+                    "connecting" => "Connecting to",
+                    "offline" => "Can't reach",
+                    "revoked" => "Revoked by",
+                    _ => "Not paired with",
+                };
+                let server = status.server.as_deref().map(host).unwrap_or_default();
+                let mut text = if server.is_empty() {
+                    "Not paired".to_string()
+                } else {
+                    format!("{link} {server}")
+                };
+                if let Some(device) = &status.device_id {
+                    text.push_str(&format!(" as device {device}"));
+                }
+                let answering = if status.paused { "paused" } else { "answering" };
+                format!("{text} · {shared} · {answering} · cww {}", status.version)
+            }
+        }
+    }
+
+    fn open_picker(&mut self, kind: PickerKind, query: &str) {
+        self.view = View::Chat;
+        self.focus = Focus::Composer;
+        self.chat.picker = Some(Picker {
+            kind,
+            query: query.to_string(),
+            selected: 0,
+        });
+    }
+
+    /// `/model`: the list of models, loaded the first time.
+    fn pick_model(&mut self, query: &str) -> Vec<Effect> {
+        use super::theme::Signal;
+        match &self.chat.models {
+            ModelList::Unavailable(why) => {
+                let why = why.clone();
+                self.notice(Signal::Idle, &why);
+                return Vec::new();
+            }
+            ModelList::Ready(models) if !query.is_empty() => {
+                let q = query.to_lowercase();
+                let found: Vec<&Model> = models
+                    .models
+                    .iter()
+                    .filter(|m| m.id == query || m.name.to_lowercase().contains(&q))
+                    .collect();
+                if let [model] = found[..] {
+                    let model = model.clone();
+                    self.choose_model(&model);
+                    return Vec::new();
+                }
+            }
+            _ => {}
+        }
+        self.open_picker(PickerKind::Models, query);
+        if matches!(self.chat.models, ModelList::Unknown) {
+            self.chat.models = ModelList::Loading;
+            return vec![Effect::Chat(ChatCommand::Models)];
+        }
+        Vec::new()
+    }
+
+    fn choose_model(&mut self, model: &Model) {
+        use super::theme::Signal;
+        if !model.selectable {
+            let why = model
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("{} can't be used right now.", model.name));
+            self.notice(Signal::Attention, &why);
+            return;
+        }
+        self.chat.picker = None;
+        self.chat.model = Some(ModelChoice {
+            chat: self.chat.open,
+            id: model.id.clone(),
+            name: model.name.clone(),
+        });
+        let what = if self.chat.open.is_some() {
+            "your next question here"
+        } else {
+            "the new chat"
+        };
+        self.notice(Signal::Positive, &format!("{} answers {what}.", model.name));
+    }
+
+    /// `/project`: the next new chat starts in a project.
+    fn pick_project(&mut self, query: &str) -> Vec<Effect> {
+        use super::theme::Signal;
+        if self.chat.list.projects.is_empty() {
+            self.notice(Signal::Idle, "You aren't in any projects.");
+            return Vec::new();
+        }
+        let q = query.to_lowercase();
+        if q == "none" {
+            self.chat.project = None;
+            self.notice(Signal::Idle, "New chats start outside projects.");
+            return Vec::new();
+        }
+        if !q.is_empty() {
+            let found: Vec<Project> = self
+                .chat
+                .list
+                .projects
+                .iter()
+                .filter(|p| p.name.to_lowercase().contains(&q))
+                .cloned()
+                .collect();
+            if let [project] = &found[..] {
+                return self.choose_project(Some(project.clone()));
+            }
+        }
+        self.open_picker(PickerKind::Projects, query);
+        Vec::new()
+    }
+
+    fn choose_project(&mut self, project: Option<Project>) -> Vec<Effect> {
+        use super::theme::Signal;
+        self.chat.picker = None;
+        let effects = if self.chat.open.is_some() {
+            self.new_chat()
+        } else {
+            Vec::new()
+        };
+        match &project {
+            Some(p) => self.notice(
+                Signal::Positive,
+                &format!("Your next question starts a chat in {}.", p.name),
+            ),
+            None => self.notice(Signal::Idle, "New chats start outside projects."),
+        }
+        self.chat.project = project;
+        effects
+    }
+
+    /// Keys while a picker is open: typing filters it.
+    fn picker_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let len = self.chat.pick_items().len();
+        if key.code == KeyCode::Enter {
+            let selected = self.chat.picker.as_ref().map_or(0, |p| p.selected);
+            return self.pick(selected);
+        }
+        let Some(picker) = self.chat.picker.as_mut() else {
+            return Vec::new();
+        };
+        match key.code {
+            KeyCode::Esc => self.chat.picker = None,
+            KeyCode::Up if len > 0 => picker.selected = (picker.selected + len - 1) % len,
+            KeyCode::Down if len > 0 => picker.selected = (picker.selected + 1) % len,
+            KeyCode::Backspace => {
+                picker.query.pop();
+                picker.selected = 0;
+            }
+            KeyCode::Char('u') if ctrl => {
+                picker.query.clear();
+                picker.selected = 0;
+            }
+            KeyCode::Char(c) if !ctrl => {
+                picker.query.push(c);
+                picker.selected = 0;
+            }
+            KeyCode::PageUp => self.scroll_transcript(10),
+            KeyCode::PageDown => self.scroll_transcript(-10),
             _ => {}
         }
         Vec::new()
     }
 
-    fn send(&mut self) -> Vec<Effect> {
-        let text = self.chat.input.trim().to_string();
-        if text.is_empty() || !self.chat.ready() || self.chat.working() {
+    /// Pick row `index` of the open picker.
+    fn pick(&mut self, index: usize) -> Vec<Effect> {
+        let item = self.chat.pick_items().get(index).copied();
+        let kind = self.chat.picker.as_ref().map(|p| p.kind);
+        match item {
+            Some(PickItem::Chat(chat)) => {
+                let number = chat.number;
+                self.chat.picker = None;
+                self.select_chat(number);
+                self.open_chat(number)
+            }
+            Some(PickItem::Model(model)) => {
+                let model = model.clone();
+                self.choose_model(&model);
+                Vec::new()
+            }
+            Some(PickItem::Project(project)) => {
+                let project = project.cloned();
+                self.choose_project(project)
+            }
+            None => {
+                if kind != Some(PickerKind::Models)
+                    || !matches!(self.chat.models, ModelList::Loading)
+                {
+                    self.chat.picker = None;
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// `/attach <path>`: upload a file for the next question.
+    fn attach(&mut self, path: &str) -> Vec<Effect> {
+        use super::theme::Signal;
+        let path = path.trim().trim_matches(['"', '\'']).to_string();
+        if path.is_empty() {
+            self.notice(
+                Signal::Idle,
+                "Say which file: /attach ~/Documents/notes.pdf",
+            );
+            return Vec::new();
+        }
+        if self.chat.attachments.iter().any(|a| a.path == path) {
+            self.notice(Signal::Idle, "That file is attached already.");
+            return Vec::new();
+        }
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        self.chat.attachments.push(Attached {
+            path: path.clone(),
+            name,
+            uploaded: None,
+        });
+        vec![Effect::Chat(ChatCommand::Upload(path))]
+    }
+
+    /// `/unshare [folder]`: by ID, label or path, else the selected one.
+    fn unshare(&mut self, which: &str) -> Vec<Effect> {
+        if which.is_empty() {
+            self.confirm_remove();
+            return Vec::new();
+        }
+        let found = self.daemon.roots().iter().find(|r| {
+            r.id == which || r.label.eq_ignore_ascii_case(which) || r.local_path == which
+        });
+        match found {
+            Some(root) => {
+                self.modal = Some(Modal::ConfirmRemove {
+                    id: root.id.clone(),
+                    label: root.label.clone(),
+                    path: root.local_path.clone(),
+                });
+            }
+            None => self.notice(
+                super::theme::Signal::Attention,
+                &format!("No shared folder is called {which}."),
+            ),
+        }
+        Vec::new()
+    }
+
+    /// `/retry`, `/branch`, `/rename`, `/delete` and `/share-chat`, where
+    /// the server allows them for the open chat.
+    fn chat_action(&mut self, cmd: Cmd, args: &str) -> Vec<Effect> {
+        use super::theme::Signal;
+        let verb = match cmd {
+            Cmd::Retry => "retry",
+            Cmd::Branch => "branch",
+            Cmd::Rename => "rename",
+            Cmd::Delete => "delete",
+            _ => "share",
+        };
+        let Some(chat) = self.chat.open_summary().cloned() else {
+            self.notice(Signal::Idle, &format!("Open a chat to {verb} it."));
+            return Vec::new();
+        };
+        let allowed = match (cmd, chat.can) {
+            // Stopping works on any chat with a link, whatever else it allows.
+            (Cmd::UnshareChat, _) => Some(chat.share.is_some()),
+            (_, None) => None,
+            (Cmd::Retry, Some(can)) => Some(can.retry),
+            (Cmd::Branch, Some(can)) => Some(can.branch),
+            (Cmd::Rename, Some(can)) => Some(can.rename),
+            (Cmd::Delete, Some(can)) => Some(can.delete),
+            (_, Some(can)) => Some(can.share),
+        };
+        match allowed {
+            None => {
+                self.notice(
+                    Signal::Idle,
+                    &format!("This Chat with Work server can't {verb} chats from here yet."),
+                );
+                return Vec::new();
+            }
+            Some(false) if cmd == Cmd::UnshareChat => {
+                self.notice(Signal::Idle, "This chat has no public link.");
+                return Vec::new();
+            }
+            Some(false) => {
+                self.notice(Signal::Idle, &format!("You can't {verb} this chat."));
+                return Vec::new();
+            }
+            Some(true) => {}
+        }
+        let number = chat.number;
+        let action = match cmd {
+            Cmd::Retry if self.chat.working() => {
+                self.notice(Signal::Idle, "Wait for the answer to finish first.");
+                return Vec::new();
+            }
+            Cmd::Retry => {
+                self.notice(Signal::Idle, "Answering again…");
+                ChatAction::Retry
+            }
+            Cmd::Branch => {
+                self.notice(Signal::Idle, "Branching…");
+                ChatAction::Branch
+            }
+            Cmd::Rename if args.trim().is_empty() => {
+                // Edit the title where it's typed.
+                self.chat.input.set(format!("/rename {}", chat.title));
+                return Vec::new();
+            }
+            Cmd::Rename => ChatAction::Rename(args.trim().to_string()),
+            Cmd::Delete => {
+                self.modal = Some(Modal::ConfirmDelete {
+                    chat: number,
+                    title: chat.title.clone(),
+                });
+                return Vec::new();
+            }
+            Cmd::UnshareChat => {
+                self.notice(Signal::Idle, "Stopping sharing…");
+                ChatAction::Unshare
+            }
+            _ => {
+                self.notice(Signal::Idle, "Sharing…");
+                ChatAction::Share
+            }
+        };
+        vec![Effect::Chat(ChatCommand::Act {
+            chat: number,
+            action,
+        })]
+    }
+
+    /// Keys for the change waiting for approval, or `None` when there's
+    /// none or the key isn't the prompt's.
+    fn decision_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
+        // A slash command can still be typed and run.
+        if self.chat.reason || !self.chat.input.is_empty() || key.code == KeyCode::Char('/') {
+            return None;
+        }
+        let approval = self.chat.pending_decision()?.clone();
+        let choices = ChatPane::choices(&approval);
+        let len = choices.len();
+        let selected = self.chat.decision.min(len - 1);
+        let choice = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.chat.decision = (selected + len - 1) % len;
+                return Some(Vec::new());
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.chat.decision = (selected + 1) % len;
+                return Some(Vec::new());
+            }
+            KeyCode::Enter => choices[selected],
+            KeyCode::Char('y') => Choice::Approve,
+            KeyCode::Char('a') if approval.allow_for_rest_of_chat => Choice::ApproveAll,
+            KeyCode::Char('n') => Choice::Deny,
+            KeyCode::Char(c @ '1'..='9') => *choices.get(c as usize - '1' as usize)?,
+            KeyCode::Esc
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::PageUp
+            | KeyCode::PageDown => return None,
+            // Nothing else is typed while the prompt waits.
+            _ => return Some(Vec::new()),
+        };
+        Some(self.decide(choice))
+    }
+
+    /// Answer the change waiting for approval.
+    pub fn decide(&mut self, choice: Choice) -> Vec<Effect> {
+        let (Some(chat), Some(approval)) = (self.chat.open, self.chat.pending_decision()) else {
+            return Vec::new();
+        };
+        if self.chat.deciding {
+            return Vec::new();
+        }
+        let tool_call = approval.id;
+        let command = match choice {
+            Choice::Approve | Choice::ApproveAll => ChatCommand::Approve {
+                chat,
+                tool_call,
+                for_rest_of_chat: choice == Choice::ApproveAll,
+            },
+            Choice::Deny => ChatCommand::Deny {
+                chat,
+                tool_call,
+                reason: None,
+            },
+            Choice::DenyWithReason => {
+                self.chat.reason = true;
+                self.chat.input.clear();
+                return Vec::new();
+            }
+        };
+        self.chat.deciding = true;
+        vec![Effect::Chat(command)]
+    }
+
+    /// Enter while saying what to do instead: deny with it.
+    fn deny_with_reason(&mut self) -> Vec<Effect> {
+        let (Some(chat), Some(approval)) = (self.chat.open, self.chat.pending_decision()) else {
+            self.chat.reason = false;
+            return Vec::new();
+        };
+        if self.chat.deciding {
+            return Vec::new();
+        }
+        let tool_call = approval.id;
+        let reason = self.chat.input.take().trim().to_string();
+        self.chat.reason = false;
+        self.chat.deciding = true;
+        vec![Effect::Chat(ChatCommand::Deny {
+            chat,
+            tool_call,
+            reason: (!reason.is_empty()).then_some(reason),
+        })]
+    }
+
+    /// Keys for a question from a tool's server, or `None` when there's
+    /// none or the key isn't the form's.
+    fn question_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
+        if self.chat.reason
+            || self.chat.form.editing.is_some()
+            || !self.chat.input.is_empty()
+            || key.code == KeyCode::Char('/')
+        {
+            return None;
+        }
+        let question = self.chat.pending_question()?.clone();
+        let rows = ChatPane::question_rows(&question);
+        let len = rows.len();
+        let row = self.chat.form.row.min(len - 1);
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.chat.form.row = (row + len - 1) % len,
+            KeyCode::Down | KeyCode::Char('j') => self.chat.form.row = (row + 1) % len,
+            KeyCode::Left => self.step_field(&question, row, -1),
+            KeyCode::Right | KeyCode::Char(' ') => self.step_field(&question, row, 1),
+            KeyCode::Enter => return Some(self.activate_row(rows[row])),
+            KeyCode::Esc
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::PageUp
+            | KeyCode::PageDown => return None,
+            _ => {}
+        }
+        Some(Vec::new())
+    }
+
+    /// Enter on a row of the question's form.
+    pub fn activate_row(&mut self, row: FormRow) -> Vec<Effect> {
+        let (Some(chat), Some(question)) = (self.chat.open, self.chat.pending_question().cloned())
+        else {
+            return Vec::new();
+        };
+        if self.chat.deciding {
+            return Vec::new();
+        }
+        self.focus = Focus::Composer;
+        match row {
+            FormRow::Field(i) => {
+                let Some(field) = question.fields.get(i) else {
+                    return Vec::new();
+                };
+                if field_has_choices(field) {
+                    self.step_field(&question, i, 1);
+                } else {
+                    // Type it in the composer; Enter keeps it.
+                    let value = self.chat.form.values.get(i).cloned().unwrap_or_default();
+                    self.chat.form.editing = Some(i);
+                    self.chat.input.set(value);
+                }
+                Vec::new()
+            }
+            FormRow::OpenPage => match question
+                .url
+                .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+            {
+                Some(url) => vec![Effect::Chat(ChatCommand::OpenUrl(url))],
+                None => Vec::new(),
+            },
+            FormRow::Send => {
+                let input = if question.is_url() {
+                    None
+                } else {
+                    Some(self.chat.form.input(&question))
+                };
+                self.chat.deciding = true;
+                vec![Effect::Chat(ChatCommand::Answer {
+                    chat,
+                    tool_call: question.id,
+                    input,
+                })]
+            }
+            FormRow::Decline => {
+                self.chat.deciding = true;
+                vec![Effect::Chat(ChatCommand::Decline {
+                    chat,
+                    tool_call: question.id,
+                })]
+            }
+        }
+    }
+
+    /// Left and Right go through a field's choices (yes and no for a
+    /// yes-or-no field).
+    fn step_field(&mut self, question: &super::chat::Question, row: usize, delta: isize) {
+        let Some(FormRow::Field(i)) = ChatPane::question_rows(question).get(row).copied() else {
+            return;
+        };
+        let field = &question.fields[i];
+        let options = field_options(field);
+        if options.is_empty() {
+            return;
+        }
+        let form = &mut self.chat.form;
+        if form.values.len() < question.fields.len() {
+            form.values.resize(question.fields.len(), String::new());
+        }
+        let at = options.iter().position(|o| *o == form.values[i]);
+        let next = match at {
+            None if delta > 0 => 0,
+            None => options.len() - 1,
+            Some(at) => (at as isize + delta).rem_euclid(options.len() as isize) as usize,
+        };
+        form.values[i] = options[next].clone();
+    }
+
+    /// Enter after typing a field's value: keep it.
+    fn save_field(&mut self) {
+        let Some(i) = self.chat.form.editing.take() else {
+            return;
+        };
+        let value = self.chat.input.take().trim().to_string();
+        let len = self.chat.pending_question().map_or(0, |q| q.fields.len());
+        let form = &mut self.chat.form;
+        if form.values.len() < len {
+            form.values.resize(len, String::new());
+        }
+        if let Some(slot) = form.values.get_mut(i) {
+            *slot = value;
+        }
+        // On to the next row.
+        form.row = i + 1;
+    }
+
+    fn send(&mut self, text: String, entered: String) -> Vec<Effect> {
+        use super::theme::Signal;
+        let files = !self.chat.attachments.is_empty();
+        if (text.is_empty() && !files) || !self.chat.ready() || self.chat.working() {
             return Vec::new();
         }
         if let Some(reason) = self.chat.locked_reason().map(str::to_string) {
-            self.notice(super::theme::Signal::Attention, &reason);
+            self.notice(Signal::Attention, &reason);
             return Vec::new();
         }
+        if let Some(waiting) = self.chat.attachments.iter().find(|a| a.uploaded.is_none()) {
+            let name = waiting.name.clone();
+            self.notice(
+                Signal::Idle,
+                &format!("Wait a moment: {name} is still uploading."),
+            );
+            return Vec::new();
+        }
+        let mut effects = self.remember(&entered);
         self.chat.input.clear();
+        self.typed();
         self.chat.error = None;
         self.chat.sending = true;
         self.chat.pending_question = Some(text.clone());
         self.chat.scroll = 0;
-        vec![Effect::Chat(ChatCommand::Send {
+        let attachments = std::mem::take(&mut self.chat.attachments)
+            .into_iter()
+            .filter_map(|a| a.uploaded.map(|(id, _)| id))
+            .collect();
+        effects.push(Effect::Chat(ChatCommand::Send {
             chat: self.chat.open,
             text,
-        })]
+            model: self.chat.model_for_question(),
+            project: if self.chat.open.is_none() {
+                self.chat.project.as_ref().map(|p| p.id)
+            } else {
+                None
+            },
+            attachments,
+        }));
+        effects
     }
 
     fn paste(&mut self, text: &str) {
-        let text = text.replace(['\r', '\n'], " ");
         match &mut self.modal {
-            Some(Modal::AddRoot { input }) => input.push_str(text.trim()),
+            Some(Modal::AddRoot { input }) => {
+                input.push_str(text.replace(['\r', '\n'], " ").trim())
+            }
             Some(_) => {}
-            None if self.focus == Focus::Composer => self.chat.input.push_str(&text),
+            None if self.focus == Focus::Composer => {
+                if let Some(picker) = self.chat.picker.as_mut() {
+                    picker
+                        .query
+                        .push_str(text.replace(['\r', '\n'], " ").trim());
+                    picker.selected = 0;
+                } else {
+                    // Pasted lines stay lines.
+                    self.chat
+                        .input
+                        .insert_str(&text.replace("\r\n", "\n").replace('\r', "\n"));
+                    self.typed();
+                }
+            }
             None if self.focus == Focus::Chats && self.chat.search.is_some() => {
                 self.chat
                     .search
                     .get_or_insert_default()
-                    .push_str(text.trim());
+                    .push_str(text.replace(['\r', '\n'], " ").trim());
             }
             None => {}
         }
+    }
+
+    /// A click or the wheel, on what the last frame drew there.
+    fn mouse(&mut self, event: MouseEvent) -> Vec<Effect> {
+        let up = match event.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
+            MouseEventKind::Down(MouseButton::Left) => {
+                return self.click(event.column, event.row);
+            }
+            _ => return Vec::new(),
+        };
+        let delta: isize = if up { -1 } else { 1 };
+        if let Some(Modal::Help { scroll }) = self.modal {
+            self.modal = Some(Modal::Help {
+                scroll: scroll.saturating_add_signed(delta * 3),
+            });
+            return Vec::new();
+        }
+        if self.modal.is_some() {
+            return Vec::new();
+        }
+        match self.hits.at(event.column, event.row).cloned() {
+            Some(Hit::Transcript | Hit::Choice(_) | Hit::Ask(_) | Hit::Link(_)) => {
+                self.scroll_transcript(-delta * 3);
+            }
+            Some(Hit::Log) => self.scroll_log(-delta * 3),
+            Some(Hit::Chats | Hit::Chat(_) | Hit::NewChat) => {
+                let len = self.chat.visible().len() + 1;
+                self.chat.selected = self.chat.selected.saturating_add_signed(delta).min(len - 1);
+            }
+            Some(Hit::Root(_)) => {
+                let len = self.daemon.roots().len();
+                if len > 0 {
+                    self.selected_root =
+                        self.selected_root.saturating_add_signed(delta).min(len - 1);
+                }
+            }
+            Some(Hit::Menu(_)) => {
+                let len = self.menu().len();
+                if len > 0 {
+                    self.chat.menu = self.chat.menu.saturating_add_signed(delta).min(len - 1);
+                }
+            }
+            Some(Hit::Pick(_)) => {
+                let len = self.chat.pick_items().len();
+                if let Some(picker) = self.chat.picker.as_mut()
+                    && len > 0
+                {
+                    picker.selected = picker.selected.saturating_add_signed(delta).min(len - 1);
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn click(&mut self, x: u16, y: u16) -> Vec<Effect> {
+        if self.modal.is_some() {
+            return Vec::new();
+        }
+        self.quit_armed = false;
+        let Some(hit) = self.hits.at(x, y).cloned() else {
+            return Vec::new();
+        };
+        self.notice = None;
+        match hit {
+            Hit::Tab(view) => {
+                self.view = view;
+                self.log_scroll = 0;
+            }
+            Hit::NewChat if self.chat.ready() => {
+                self.chat.search = None;
+                return self.new_chat();
+            }
+            Hit::Chat(number) => {
+                self.chat.search = None;
+                self.select_chat(number);
+                return self.open_chat(number);
+            }
+            Hit::Root(i) => {
+                self.focus = Focus::Roots;
+                self.selected_root = i;
+            }
+            Hit::Composer if self.chat.ready() => self.focus = Focus::Composer,
+            Hit::Menu(i) => {
+                if let Some(command) = self.menu().get(i).copied() {
+                    self.chat.menu = i;
+                    return self.run_menu(command);
+                }
+            }
+            Hit::Pick(i) => {
+                if let Some(picker) = self.chat.picker.as_mut() {
+                    picker.selected = i;
+                }
+                return self.pick(i);
+            }
+            Hit::Ask(i) => {
+                if let Some(question) = self.chat.pending_question() {
+                    let rows = ChatPane::question_rows(question);
+                    if let Some(row) = rows.get(i).copied() {
+                        self.chat.form.row = i;
+                        return self.activate_row(row);
+                    }
+                }
+            }
+            Hit::Choice(i) => {
+                if let Some(approval) = self.chat.pending_decision() {
+                    let choices = ChatPane::choices(approval);
+                    if let Some(choice) = choices.get(i).copied() {
+                        self.focus = Focus::Composer;
+                        self.chat.decision = i;
+                        return self.decide(choice);
+                    }
+                }
+            }
+            // A link the answer shows: only web pages open.
+            Hit::Link(url) if url.starts_with("https://") || url.starts_with("http://") => {
+                return vec![Effect::Chat(ChatCommand::OpenUrl(url))];
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     fn cycle_focus(&mut self, forward: bool) {
@@ -921,6 +2511,11 @@ impl App {
         chat.loading = true;
         chat.stale = false;
         chat.following = Following::Starting;
+        chat.picker = None;
+        chat.reason = false;
+        chat.deciding = false;
+        chat.decision_for = None;
+        chat.form = Form::default();
         vec![
             Effect::Chat(ChatCommand::Open(number)),
             Effect::Chat(ChatCommand::Follow(Some(number))),
@@ -943,6 +2538,11 @@ impl App {
         chat.stopping = false;
         chat.following = Following::No;
         chat.selected = 0;
+        chat.picker = None;
+        chat.reason = false;
+        chat.deciding = false;
+        chat.decision_for = None;
+        chat.form = Form::default();
         self.view = View::Chat;
         self.focus = Focus::Composer;
         if followed {
@@ -1319,7 +2919,14 @@ impl App {
                         self.chat.list.chats.insert(0, summary);
                         let mut effects = vec![Effect::Chat(ChatCommand::List)];
                         if chat.is_none() && self.chat.open.is_none() {
-                            // The first question made the chat: follow it.
+                            // The first question made the chat: follow it,
+                            // and the model picked for it goes with it.
+                            if let Some(choice) =
+                                self.chat.model.as_mut().filter(|c| c.chat.is_none())
+                            {
+                                choice.chat = Some(number);
+                            }
+                            self.chat.project = None;
                             self.chat.open = Some(number);
                             self.chat.following = Following::Starting;
                             self.chat.loading = true;
@@ -1336,7 +2943,11 @@ impl App {
                         if let Some(question) = self.chat.pending_question.take()
                             && self.chat.input.is_empty()
                         {
-                            self.chat.input = question;
+                            self.chat.input.set(question);
+                        }
+                        // A model that can't be used: back to the chat's own.
+                        if failure.code == "model_unavailable" {
+                            self.chat.model = None;
                         }
                         if is_access_failure(&failure) {
                             self.chat_failure(failure);
@@ -1410,8 +3021,175 @@ impl App {
                     }
                 }
             }
+            ChatMsg::Models(Ok(models)) => {
+                self.chat.models = ModelList::Ready(models);
+                if let Some(picker) = self.chat.picker.as_mut() {
+                    picker.selected = 0;
+                }
+            }
+            ChatMsg::Models(Err(failure)) => {
+                let why = match failure.code.as_str() {
+                    "unsupported" => Some(failure.message.clone()),
+                    "daemon_outdated" => Some(
+                        "The daemon running now is older than this cww and can't list models. \
+                         Restart it with this version of cww."
+                            .to_string(),
+                    ),
+                    _ => None,
+                };
+                if self.chat.picker.as_ref().map(|p| p.kind) == Some(PickerKind::Models) {
+                    self.chat.picker = None;
+                }
+                match why {
+                    // Chats go on with their models; only the choice is missing.
+                    Some(why) => {
+                        self.notice(Signal::Idle, &why);
+                        self.chat.models = ModelList::Unavailable(why);
+                    }
+                    None => {
+                        self.chat.models = ModelList::Unknown;
+                        self.notice(Signal::Negative, &failure.message);
+                    }
+                }
+            }
+            ChatMsg::Decided { chat, result } => {
+                self.chat.deciding = false;
+                match result {
+                    Ok(summary) => {
+                        self.chat.form = Form::default();
+                        self.chat.decision = 0;
+                        self.update_summary(summary);
+                        return self.refresh_chat(chat);
+                    }
+                    Err(failure) => {
+                        self.notice(Signal::Negative, &failure.message);
+                        if failure.code == "already_decided" || failure.code == "not_found" {
+                            return self.refresh_chat(chat);
+                        }
+                    }
+                }
+            }
+            ChatMsg::Uploaded { path, result } => {
+                let at = self
+                    .chat
+                    .attachments
+                    .iter()
+                    .position(|a| a.path == path && a.uploaded.is_none());
+                match (at, result) {
+                    (Some(at), Ok(uploaded)) => {
+                        let attached = &mut self.chat.attachments[at];
+                        attached.name = uploaded.filename.clone();
+                        attached.uploaded = Some((uploaded.signed_id, uploaded.byte_size));
+                    }
+                    (Some(at), Err(failure)) => {
+                        self.chat.attachments.remove(at);
+                        self.notice(Signal::Negative, &failure.message);
+                    }
+                    // Detached while it uploaded.
+                    (None, _) => {}
+                }
+            }
+            ChatMsg::Acted {
+                chat,
+                action,
+                result,
+            } => return self.acted(chat, action, result),
         }
         Vec::new()
+    }
+
+    /// A chat action finished.
+    fn acted(
+        &mut self,
+        chat: u64,
+        action: ChatAction,
+        result: Result<Acted, Failure>,
+    ) -> Vec<Effect> {
+        use super::theme::Signal;
+        let acted = match result {
+            Ok(acted) => acted,
+            Err(failure) => {
+                self.notice(Signal::Negative, &failure.message);
+                return Vec::new();
+            }
+        };
+        match (action, acted) {
+            (ChatAction::Branch, Acted::Chat(branch)) => {
+                let number = branch.number;
+                self.chat.list.chats.retain(|c| c.number != number);
+                self.chat.list.chats.insert(0, branch);
+                self.notice(Signal::Positive, "Branched into a new chat.");
+                self.select_chat(number);
+                let mut effects = self.open_chat(number);
+                effects.push(Effect::Chat(ChatCommand::List));
+                effects
+            }
+            (ChatAction::Delete, _) => {
+                let title = self
+                    .chat
+                    .list
+                    .chats
+                    .iter()
+                    .find(|c| c.number == chat)
+                    .map(|c| c.title.clone())
+                    .unwrap_or_else(|| format!("#{chat}"));
+                self.chat.list.chats.retain(|c| c.number != chat);
+                let len = self.chat.visible().len();
+                self.chat.selected = self.chat.selected.min(len);
+                self.notice(Signal::Positive, &format!("Deleted {title}."));
+                if self.chat.open == Some(chat) {
+                    return self.new_chat();
+                }
+                Vec::new()
+            }
+            (_, Acted::Shared(shared)) => {
+                let url = shared.url.clone();
+                self.update_summary(shared.chat);
+                self.notice(
+                    Signal::Positive,
+                    &format!("Anyone with the link can read this chat for 30 days. Copied: {url}"),
+                );
+                vec![Effect::Copy(url)]
+            }
+            (action, Acted::Chat(summary)) => {
+                let text = match action {
+                    ChatAction::Retry => "",
+                    ChatAction::Rename(_) => "Renamed.",
+                    ChatAction::Unshare => "The link stopped working.",
+                    _ => "",
+                };
+                if !text.is_empty() {
+                    self.notice(Signal::Positive, text);
+                } else if action == ChatAction::Retry {
+                    self.notice = None;
+                }
+                self.update_summary(summary);
+                self.refresh_chat(chat)
+            }
+            (_, Acted::Deleted) => Vec::new(),
+        }
+    }
+
+    /// A chat as the server last answered with it, in the list and the
+    /// open transcript.
+    fn update_summary(&mut self, summary: ChatSummary) {
+        if let Some(listed) = self
+            .chat
+            .list
+            .chats
+            .iter_mut()
+            .find(|c| c.number == summary.number)
+        {
+            *listed = summary.clone();
+        }
+        if let Some(transcript) = self
+            .chat
+            .transcript
+            .as_mut()
+            .filter(|t| t.chat.number == summary.number)
+        {
+            transcript.chat = summary;
+        }
     }
 
     /// A chat read back: it replaces what streamed in, once it has it.
@@ -1445,6 +3223,23 @@ impl App {
             *listed = transcript.chat.clone();
         }
         chat.error = None;
+        let waiting = transcript
+            .next_decision()
+            .map(|a| a.id)
+            .or_else(|| transcript.next_question().map(|q| q.id));
+        if chat.decision_for != waiting {
+            chat.decision_for = waiting;
+            chat.decision = 0;
+            chat.reason = false;
+            chat.form = Form {
+                question: transcript.next_question().map(|q| q.id),
+                values: transcript
+                    .next_question()
+                    .map(|q| q.fields.iter().map(default_value).collect())
+                    .unwrap_or_default(),
+                ..Form::default()
+            };
+        }
         chat.transcript = Some(transcript);
     }
 
@@ -1462,6 +3257,29 @@ impl App {
             self.focus = Focus::Roots;
         }
     }
+}
+
+/// A field's default, as the form shows it.
+fn default_value(field: &super::chat::Field) -> String {
+    match &field.default {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Bool(b)) => if *b { "yes" } else { "no" }.into(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|i| i.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => String::new(),
+    }
+}
+
+/// `chatwithwork.com`, from `https://chatwithwork.com/`.
+fn host(url: &str) -> String {
+    url.split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// Failures that are about using chats here at all, rather than one call.

@@ -18,13 +18,13 @@
                                │
                                │
                                │
-                               │
-                               │
- ROOTS                       1 │
-  ● Work docs                  │
-    work-docs · 1,532 files    │────────────────────────────────────────────────────────────────────
- DAEMON                        │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
- ● connected       since 08:14 │ ╭────────────────────────────────────────────────────────────────╮
-   chatwithwork.com · #42      │ │ ❯ What changed in Falcon this week?                            │
+                               │────────────────────────────────────────────────────────────────────
+                               │  ACTIVITY  Nothing yet. Requests from Chat with Work show up here
+ ROOTS                       1 │ ╭────────────────────────────────────────────────────────────────╮
+  ● Work docs                  │ │ ❯ one                                                          │
+    work-docs · 1,532 files    │ │   two                                                          │
+ DAEMON                        │ │   three                                                        │
+ ● connected       since 08:14 │ │   four                                                         │
+   chatwithwork.com · #42      │ │   five                                                         │
    answering · cww 0.1.0       │ ╰────────────────────────────────────────────────────────────────╯
  enter send   / commands   shift-enter new line   ↑ history   esc back   tab focus   ctrl-c clear

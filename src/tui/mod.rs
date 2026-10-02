@@ -11,7 +11,10 @@
 
 pub mod app;
 pub mod chat;
+pub mod commands;
+pub mod composer;
 mod daemon;
+mod history;
 pub mod markdown;
 pub mod theme;
 pub mod ui;
@@ -19,7 +22,8 @@ pub mod ui;
 #[cfg(test)]
 mod tests;
 
-use std::io::stdout;
+use std::io::{Write, stdout};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -27,14 +31,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyEventKind, KeyboardEnhancementFlags, MouseButton, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use ratatui::DefaultTerminal;
 use time::{OffsetDateTime, UtcOffset};
 
-use self::app::{App, ChatCommand, ChatMsg, Effect, Msg};
+use self::app::{Acted, App, ChatAction, ChatCommand, ChatMsg, Effect, Msg};
 use self::chat::Chats;
 use self::theme::Theme;
+use crate::config::Config;
 use crate::control::Closer;
 use crate::paths::Paths;
 
@@ -47,21 +56,44 @@ pub fn run(paths: Paths) -> Result<()> {
     // Only safe to ask before any thread starts.
     let utc_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let theme = Theme::detect();
-    let mut app = App::new(utc_offset);
+    let history_file = history::path(&paths);
+    let mut app = App::new(utc_offset).with_history(history::load(&history_file));
+    let mouse = Config::load(&paths).map_or(true, |c| c.tui.mouse);
 
     let (tx, rx) = mpsc::channel();
     let mut terminal = ratatui::init();
     let _ = execute!(stdout(), EnableBracketedPaste);
+    // Shift-Enter, told apart from Enter where the terminal can.
+    let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+        && execute!(
+            stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok();
+    if mouse {
+        let _ = execute!(stdout(), EnableMouseCapture);
+    }
     spawn_input(tx.clone());
     let chats = ChatRunner::new(Chats::new(&paths.socket_path()), tx.clone());
     let link = daemon::Link::spawn(paths, tx.clone());
+    let out = Outputs {
+        link,
+        chats,
+        history: history_file,
+    };
 
     let effects = app.start();
     let mut result = Ok(());
-    if run_effects(effects, &link, &chats) {
-        result = event_loop(&mut terminal, &mut app, &theme, &rx, &link, &chats);
+    if out.run(effects).is_some() {
+        result = event_loop(&mut terminal, &mut app, &theme, &rx, &out);
     }
-    chats.follow(None);
+    out.chats.follow(None);
+    if mouse {
+        let _ = execute!(stdout(), DisableMouseCapture);
+    }
+    if enhanced {
+        let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
     result
@@ -72,12 +104,17 @@ fn event_loop(
     app: &mut App,
     theme: &Theme,
     rx: &mpsc::Receiver<Msg>,
-    link: &daemon::Link,
-    chats: &ChatRunner,
+    out: &Outputs,
 ) -> Result<()> {
+    let mut redraw = false;
     loop {
         let now = OffsetDateTime::now_utc();
-        terminal.draw(|frame| ui::render(frame, app, theme, now))?;
+        if std::mem::take(&mut redraw) {
+            terminal.clear()?;
+        }
+        let mut hits = app::Hits::default();
+        terminal.draw(|frame| hits = ui::render_hits(frame, app, theme, now))?;
+        app.hits = hits;
         let first = match app.next_wakeup(now) {
             Some(wait) => match rx.recv_timeout(wait) {
                 Ok(msg) => Some(msg),
@@ -92,23 +129,52 @@ fn event_loop(
         // Apply a burst of messages before drawing again.
         for msg in first.into_iter().chain(rx.try_iter()) {
             let effects = app.update(msg);
-            if !run_effects(effects, link, chats) {
-                return Ok(());
+            match out.run(effects) {
+                None => return Ok(()),
+                Some(again) => redraw |= again,
             }
         }
     }
 }
 
-/// False when it's time to quit.
-fn run_effects(effects: Vec<Effect>, link: &daemon::Link, chats: &ChatRunner) -> bool {
-    for effect in effects {
-        match effect {
-            Effect::Quit => return false,
-            Effect::Daemon(command) => link.send(command),
-            Effect::Chat(command) => chats.run(command),
+/// Where effects go.
+struct Outputs {
+    link: daemon::Link,
+    chats: ChatRunner,
+    history: PathBuf,
+}
+
+impl Outputs {
+    /// Run effects: `None` when it's time to quit, else whether to draw
+    /// the whole screen again.
+    fn run(&self, effects: Vec<Effect>) -> Option<bool> {
+        let mut redraw = false;
+        for effect in effects {
+            match effect {
+                Effect::Quit => return None,
+                Effect::Daemon(command) => self.link.send(command),
+                Effect::Chat(command) => self.chats.run(command),
+                Effect::Copy(text) => copy(&text),
+                Effect::Redraw => redraw = true,
+                Effect::Remember(entry) => {
+                    if let Err(e) = history::append(&self.history, &entry) {
+                        tracing::debug!("keeping the question: {e:#}");
+                    }
+                }
+            }
         }
+        Some(redraw)
     }
-    true
+}
+
+/// Put text on the clipboard with OSC 52, which terminals pass on to the
+/// system clipboard (over SSH too); those that don't ignore it.
+fn copy(text: &str) {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let mut out = stdout();
+    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
+    let _ = out.flush();
 }
 
 fn spawn_input(tx: Sender<Msg>) {
@@ -117,6 +183,17 @@ fn spawn_input(tx: Sender<Msg>) {
             let msg = match event::read() {
                 // Windows also reports releases.
                 Ok(Event::Key(key)) if key.kind != KeyEventKind::Release => Msg::Key(key),
+                // Clicks and the wheel; moves and drags would only wake it.
+                Ok(Event::Mouse(mouse))
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(MouseButton::Left)
+                            | MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    Msg::Mouse(mouse)
+                }
                 Ok(Event::Paste(text)) => Msg::Paste(text),
                 Ok(Event::Resize(..)) => Msg::Resize,
                 Ok(_) => continue,
@@ -181,11 +258,86 @@ impl ChatRunner {
                     });
                 });
             }
-            ChatCommand::Send { chat, text } => {
+            ChatCommand::Send {
+                chat,
+                text,
+                model,
+                project,
+                attachments,
+            } => {
                 thread::spawn(move || {
+                    let ask = chat::Ask {
+                        chat,
+                        text,
+                        project,
+                        model,
+                        attachments,
+                    };
                     send(ChatMsg::Sent {
                         chat,
-                        result: chats.send(chat, &text),
+                        result: chats.ask(&ask),
+                    });
+                });
+            }
+            ChatCommand::Models => {
+                thread::spawn(move || send(ChatMsg::Models(chats.models())));
+            }
+            ChatCommand::Approve {
+                chat,
+                tool_call,
+                for_rest_of_chat,
+            } => {
+                thread::spawn(move || {
+                    let result = chats.approve(chat, tool_call, for_rest_of_chat);
+                    send(ChatMsg::Decided { chat, result });
+                });
+            }
+            ChatCommand::Deny {
+                chat,
+                tool_call,
+                reason,
+            } => {
+                thread::spawn(move || {
+                    let result = chats.deny(chat, tool_call, reason.as_deref());
+                    send(ChatMsg::Decided { chat, result });
+                });
+            }
+            ChatCommand::Answer {
+                chat,
+                tool_call,
+                input,
+            } => {
+                thread::spawn(move || {
+                    let result = chats.answer(chat, tool_call, input);
+                    send(ChatMsg::Decided { chat, result });
+                });
+            }
+            ChatCommand::Decline { chat, tool_call } => {
+                thread::spawn(move || {
+                    let result = chats.decline(chat, tool_call);
+                    send(ChatMsg::Decided { chat, result });
+                });
+            }
+            ChatCommand::Upload(path) => {
+                thread::spawn(move || {
+                    let result = chats.upload(&expand_home(&path));
+                    send(ChatMsg::Uploaded { path, result });
+                });
+            }
+            ChatCommand::Act { chat, action } => {
+                thread::spawn(move || {
+                    let result = match &action {
+                        ChatAction::Retry => chats.retry(chat, None).map(Acted::Chat),
+                        ChatAction::Branch => chats.branch(chat, None).map(Acted::Chat),
+                        ChatAction::Rename(title) => chats.rename(chat, title).map(Acted::Chat),
+                        ChatAction::Delete => chats.delete(chat).map(|()| Acted::Deleted),
+                        ChatAction::Share => chats.share(chat).map(Acted::Shared),
+                        ChatAction::Unshare => chats.unshare(chat).map(Acted::Chat),
+                    };
+                    send(ChatMsg::Acted {
+                        chat,
+                        action,
+                        result,
                     });
                 });
             }
@@ -264,6 +416,18 @@ impl ChatRunner {
                 let _ = tx.send(Msg::Chat(ChatMsg::FollowFailed { chat, failure }));
             }
         });
+    }
+}
+
+/// `~/notes.pdf` as the shell would read it; a relative path is from where
+/// `cww` was started.
+fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/").or(path.strip_prefix("~\\")) {
+        Some(rest) => crate::paths::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|_| PathBuf::from(path)),
+        None if path == "~" => crate::paths::home_dir().unwrap_or_else(|_| PathBuf::from(path)),
+        None => PathBuf::from(path),
     }
 }
 
