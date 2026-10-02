@@ -85,6 +85,61 @@ pub const DEFAULT_DENY: &[&str] = &[
     "/etc/gshadow",
     "/etc/sudoers",
     "/etc/ssl/private",
+    // Trashes: what was deleted stays deleted
+    ".local/share/Trash",
+    ".Trash",
+    ".Trash-*",
+    ".Trashes",
+    "$Recycle.Bin",
+];
+
+/// Paths that can be read (unless [`DEFAULT_DENY`] hides them) but never
+/// changed: whatever runs on its own when it changes. Version control
+/// internals (git runs `core.fsmonitor` and hooks), shell startup files,
+/// autostart and launch agents, editor workspace settings that run tasks,
+/// and direnv. Users can drop one under `[deny] remove`, like the deny
+/// list.
+pub const DEFAULT_WRITE_DENY: &[&str] = &[
+    // Version control
+    ".git",
+    ".hg",
+    ".svn",
+    ".bzr",
+    ".jj",
+    // Shell startup
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".profile",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".config/fish",
+    ".config/nushell",
+    ".config/powershell",
+    "Microsoft.PowerShell_profile.ps1",
+    // Autostart and services
+    ".config/autostart",
+    ".config/systemd",
+    ".config/environment.d",
+    ".local/share/applications",
+    ".local/share/systemd",
+    "Library/LaunchAgents",
+    "Library/LaunchDaemons",
+    "Library/StartupItems",
+    "AppData/Roaming/Microsoft/Windows/Start Menu",
+    // Editors and tools that run things from a folder's settings
+    ".vscode",
+    ".idea",
+    ".envrc",
+    ".direnv",
+    ".cargo",
+    // Windows folder settings
+    "desktop.ini",
+    "autorun.inf",
 ];
 
 #[derive(Debug, Clone)]
@@ -108,6 +163,8 @@ impl DenyList {
         let own_dirs: Vec<String> = paths
             .all_dirs()
             .iter()
+            .copied()
+            .chain(paths.home_trash.as_deref())
             .map(|p| {
                 let parts: Vec<String> = p
                     .components()
@@ -132,6 +189,22 @@ impl DenyList {
             .chain(config.extra.iter().cloned())
             .chain(own_dirs);
         Self::new(patterns)
+    }
+
+    /// The paths changes may never touch, on top of the deny list: the
+    /// built-in [`DEFAULT_WRITE_DENY`], less what `[deny] remove` drops.
+    pub fn write_from_config(config: &DenyConfig) -> Result<Self> {
+        Self::new(
+            DEFAULT_WRITE_DENY
+                .iter()
+                .filter(|p| {
+                    !config
+                        .remove
+                        .iter()
+                        .any(|r| r.eq_ignore_ascii_case(p.trim_end_matches('/')))
+                })
+                .map(|p| p.to_string()),
+        )
     }
 
     pub fn new(patterns: impl IntoIterator<Item = String>) -> Result<Self> {
@@ -267,5 +340,51 @@ mod tests {
         assert!(!deny.is_denied(Path::new("/w/slides.key")));
         assert!(deny.is_denied(Path::new("/w/.ssh")));
         assert!(deny.is_denied(&paths.index_dir().join("meta.json")));
+        if let Some(trash) = &paths.home_trash {
+            assert!(deny.is_denied(&trash.join("files/old.md")));
+        }
+    }
+
+    #[test]
+    fn trashes_are_private() {
+        let deny = default_list();
+        for path in [
+            "/home/u/.local/share/Trash/files/old.md",
+            "/media/usb/.Trash-1000/files/old.md",
+            "/media/usb/.Trash/1000/files/old.md",
+            "/Users/u/.Trash/old.md",
+            "/Volumes/Backup/.Trashes/501/old.md",
+            "/C:/$Recycle.Bin/S-1-5-21-1/$RABC123.md",
+        ] {
+            assert!(deny.is_denied(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn some_paths_are_never_changed() {
+        let write = DenyList::write_from_config(&DenyConfig::default()).unwrap();
+        for path in [
+            "/home/u/proj/.git/config",
+            "/home/u/proj/.git/hooks/pre-commit",
+            "/home/u/.bashrc",
+            "/home/u/proj/.vscode/tasks.json",
+            "/home/u/.config/autostart/x.desktop",
+            "/Users/u/Library/LaunchAgents/x.plist",
+            "/C:/Users/u/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.txt",
+            "/home/u/proj/.envrc",
+            "/home/u/photos/Desktop.ini",
+        ] {
+            assert!(write.is_denied(Path::new(path)), "{path}");
+        }
+        for path in ["/home/u/proj/src/main.rs", "/home/u/notes/git.md"] {
+            assert!(!write.is_denied(Path::new(path)), "{path}");
+        }
+        let relaxed = DenyList::write_from_config(&DenyConfig {
+            remove: vec![".vscode".into()],
+            ..DenyConfig::default()
+        })
+        .unwrap();
+        assert!(!relaxed.is_denied(Path::new("/home/u/proj/.vscode/settings.json")));
+        assert!(relaxed.is_denied(Path::new("/home/u/proj/.git/config")));
     }
 }

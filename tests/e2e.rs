@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use cww::auth::key::{DeviceKey, verify_proof};
 use cww::auth::secrets::{DEVICE_KEY, REFRESH_TOKEN, SecretStore};
-use cww::config::{Config, Root, ServerConfig};
+use cww::config::{Config, Limits, Root, ServerConfig};
 use cww::control::{self, ControlRequest};
 use cww::paths::Paths;
 
@@ -767,6 +767,7 @@ fn pair(fixture: &Fixture, server: &FakeServer) {
             label: "Work docs".into(),
             path: fixture.base.join("work/docs"),
             follow_symlinks: false,
+            writable: false,
         }],
         ..Config::default()
     };
@@ -1426,6 +1427,7 @@ async fn the_settings_app_manages_folders_over_the_control_channel() {
             path: docs.clone(),
             label: Some("Docs".into()),
             i_know: false,
+            writable: false,
             follow_symlinks: false,
         },
     )
@@ -1476,6 +1478,7 @@ async fn the_settings_app_manages_folders_over_the_control_channel() {
             path: ssh,
             label: None,
             i_know: true,
+            writable: false,
             follow_symlinks: false,
         },
     )
@@ -1487,6 +1490,7 @@ async fn the_settings_app_manages_folders_over_the_control_channel() {
             path: docs.clone(),
             label: None,
             i_know: false,
+            writable: false,
             follow_symlinks: false,
         },
     )
@@ -1572,6 +1576,7 @@ async fn concurrent_config_edits_all_land() {
                 path,
                 label: None,
                 i_know: false,
+                writable: false,
                 follow_symlinks: false,
             },
         )
@@ -2322,6 +2327,507 @@ async fn fetches_the_webs_images_for_clients() {
         );
     }
 
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+}
+
+/// Pair, sharing `docs` with changes allowed (`writable`) and a read-only
+/// `ro` folder next to it.
+fn pair_for_changes(fx: &Fixture, server: &FakeServer, writable: bool, limits: Option<Limits>) {
+    pair(fx, server);
+    let ro = fx.base.join("work/ro");
+    std::fs::create_dir_all(&ro).unwrap();
+    std::fs::write(ro.join("keep.md"), "keep\n").unwrap();
+    let mut config = Config::load(&fx.paths).unwrap();
+    config.roots[0].writable = writable;
+    config.roots.push(Root {
+        id: "ro".into(),
+        label: "Read only".into(),
+        path: ro,
+        follow_symlinks: false,
+        writable: false,
+    });
+    if let Some(limits) = limits {
+        config.limits = limits;
+    }
+    config.save(&fx.paths).unwrap();
+}
+
+async fn connect(server: &mut FakeServer) -> Session {
+    let ws = tokio::time::timeout(Duration::from_secs(20), server.sockets.recv())
+        .await
+        .expect("the daemon connects")
+        .unwrap();
+    Session {
+        ws,
+        next_id: 0,
+        legacy: false,
+    }
+}
+
+fn tool_names(tools: &Value) -> Vec<String> {
+    tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Every change tool over the wire, and every way out of a shared folder
+/// a change could try. The trash lives under the test's own directory
+/// (`Paths::under`), as `$XDG_DATA_HOME/Trash` would.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changes_files_over_the_wire() {
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    pair_for_changes(&fx, &server, true, None);
+    let docs = fx.base.join("work/docs");
+    let outside = fx.base.join("outside");
+    let trash = fx.paths.home_trash.clone().unwrap();
+
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let mut s = connect(&mut server).await;
+
+    // The change tools are listed, with annotations the server can trust
+    // to tell writes from destructive calls.
+    let tools = s.request("tools/list", json!({})).await;
+    assert_eq!(
+        tool_names(&tools),
+        [
+            "roots", "search", "list", "read", "create", "write", "edit", "mkdir", "move", "delete"
+        ]
+    );
+    for tool in tools["result"]["tools"].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        let a = &tool["annotations"];
+        assert_eq!(a["openWorldHint"], false, "{name}");
+        let read_only = ["roots", "search", "list", "read"].contains(&name);
+        assert_eq!(a["readOnlyHint"], read_only, "{name}");
+        let destructive = ["write", "move", "delete"].contains(&name);
+        assert_eq!(a["destructiveHint"], destructive, "{name}");
+        assert_eq!(a["idempotentHint"], read_only || name == "mkdir", "{name}");
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name}");
+    }
+    let meta = |name: &str| {
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()["_meta"]["com.chatwithwork/writeWhen"]
+            .clone()
+    };
+    assert_eq!(meta("write"), json!({ "mode": "append" }));
+    assert_eq!(meta("move"), json!({ "replace": false }));
+    assert_eq!(meta("delete"), Value::Null);
+    let roots = s.call("roots", json!({})).await;
+    assert_eq!(roots["structuredContent"]["roots"][0]["writable"], true);
+    assert_eq!(roots["structuredContent"]["roots"][1]["writable"], false);
+
+    // create, then a dry run of a replace with its diff, then the replace.
+    let made = s
+        .call(
+            "create",
+            json!({ "path": "docs:plans/q4.md", "content": "Q4: ship\n" }),
+        )
+        .await;
+    assert_eq!(made["isError"], false, "{made}");
+    assert_eq!(made["structuredContent"]["effect"], "created");
+    assert_eq!(made["structuredContent"]["kind"], "file");
+    assert_eq!(
+        std::fs::read_to_string(docs.join("plans/q4.md")).unwrap(),
+        "Q4: ship\n"
+    );
+    let preview = s
+        .call(
+            "write",
+            json!({ "path": "docs:plans/q4.md", "content": "Q4: ship it\n", "dry_run": true }),
+        )
+        .await;
+    let p = &preview["structuredContent"];
+    assert_eq!(p["dry_run"], true);
+    assert!(
+        p["diff"]
+            .as_str()
+            .unwrap()
+            .contains("-Q4: ship\n+Q4: ship it\n"),
+        "{preview}"
+    );
+    let sha = p["previous"]["sha256"].as_str().unwrap().to_string();
+    let replaced = s
+        .call(
+            "write",
+            json!({ "path": "docs:plans/q4.md", "content": "Q4: ship it\n", "expected_sha256": sha }),
+        )
+        .await;
+    assert_eq!(
+        replaced["structuredContent"]["effect"], "replaced",
+        "{replaced}"
+    );
+    assert_eq!(replaced["structuredContent"]["previous"]["in_trash"], true);
+    let stale = s
+        .call(
+            "write",
+            json!({ "path": "docs:plans/q4.md", "content": "x", "expected_sha256": sha }),
+        )
+        .await;
+    assert_eq!(error_code(&stale), "conflict");
+
+    // append, edit, mkdir.
+    s.call(
+        "write",
+        json!({ "path": "docs:plans/q4.md", "content": "- hire\n", "mode": "append" }),
+    )
+    .await;
+    let edited = s
+        .call(
+            "edit",
+            json!({ "path": "docs:plans/q4.md", "old_text": "- hire", "new_text": "- hire two" }),
+        )
+        .await;
+    assert_eq!(edited["structuredContent"]["effect"], "edited", "{edited}");
+    assert_eq!(
+        std::fs::read_to_string(docs.join("plans/q4.md")).unwrap(),
+        "Q4: ship it\n- hire two\n"
+    );
+    let folder = s
+        .call(
+            "mkdir",
+            json!({ "path": "docs:archive/2026", "parents": true }),
+        )
+        .await;
+    assert_eq!(
+        folder["structuredContent"]["effect"], "created_folder",
+        "{folder}"
+    );
+
+    // move with and without replace, then delete.
+    let moved = s
+        .call(
+            "move",
+            json!({ "from": "docs:plans/q4.md", "to": "docs:archive/2026/q4.md" }),
+        )
+        .await;
+    assert_eq!(
+        moved["structuredContent"]["from"], "docs:plans/q4.md",
+        "{moved}"
+    );
+    assert_eq!(
+        moved["structuredContent"]["path"],
+        "docs:archive/2026/q4.md"
+    );
+    std::fs::write(docs.join("plans/q4.md"), "newer\n").unwrap();
+    let onto = s
+        .call(
+            "move",
+            json!({ "from": "docs:plans/q4.md", "to": "docs:archive/2026/q4.md" }),
+        )
+        .await;
+    assert_eq!(error_code(&onto), "exists");
+    let replace = s
+        .call(
+            "move",
+            json!({ "from": "docs:plans/q4.md", "to": "docs:archive/2026/q4.md", "replace": true }),
+        )
+        .await;
+    assert_eq!(
+        replace["structuredContent"]["previous"]["in_trash"], true,
+        "{replace}"
+    );
+    let deleted = s.call("delete", json!({ "path": "docs:archive" })).await;
+    assert_eq!(
+        deleted["structuredContent"]["effect"], "trashed",
+        "{deleted}"
+    );
+    assert_eq!(deleted["structuredContent"]["kind"], "dir");
+    assert!(!docs.join("archive").exists());
+    assert_eq!(
+        std::fs::read_to_string(trash.join("files/archive/2026/q4.md")).unwrap(),
+        "newer\n"
+    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let record = std::fs::read_to_string(trash.join("info/archive.trashinfo")).unwrap();
+        assert!(record.starts_with("[Trash Info]\nPath=/"), "{record}");
+    }
+
+    // Every way out of the folder, or around its rules, is refused.
+    for (tool, args, expected) in [
+        (
+            "create",
+            json!({ "path": "docs:../outside/x.txt", "content": "x" }),
+            "invalid_path",
+        ),
+        (
+            "create",
+            json!({ "path": "/etc/x.txt", "content": "x" }),
+            "invalid_path",
+        ),
+        (
+            "create",
+            json!({ "path": "docs:linked/x.txt", "content": "x" }),
+            "denied",
+        ),
+        (
+            "write",
+            json!({ "path": "docs:escape.txt", "content": "x" }),
+            "denied",
+        ),
+        (
+            "write",
+            json!({ "path": "docs:hardlink.txt", "content": "x" }),
+            "denied",
+        ),
+        (
+            "edit",
+            json!({ "path": "docs:escape.txt", "old_text": "s", "new_text": "x" }),
+            "denied",
+        ),
+        ("delete", json!({ "path": "docs:linked" }), "denied"),
+        ("delete", json!({ "path": "docs:escape.txt" }), "denied"),
+        (
+            "write",
+            json!({ "path": "docs:.env", "content": "x" }),
+            "denied",
+        ),
+        (
+            "create",
+            json!({ "path": "docs:keys/id_ed25519", "content": "x" }),
+            "denied",
+        ),
+        (
+            "create",
+            json!({ "path": "docs:.git/hooks/pre-commit", "content": "x" }),
+            "denied",
+        ),
+        (
+            "move",
+            json!({ "from": "docs:.env", "to": "docs:env.txt" }),
+            "denied",
+        ),
+        (
+            "move",
+            json!({ "from": "docs:notes.md", "to": "docs:.ssh/notes.md" }),
+            "denied",
+        ),
+        (
+            "move",
+            json!({ "from": "docs:keys", "to": "docs:keys2" }),
+            "denied",
+        ),
+        (
+            "move",
+            json!({ "from": "docs:notes.md", "to": "ro:notes.md" }),
+            "not_writable",
+        ),
+        (
+            "create",
+            json!({ "path": "ro:new.md", "content": "x" }),
+            "not_writable",
+        ),
+        ("delete", json!({ "path": "ro:keep.md" }), "not_writable"),
+        (
+            "create",
+            json!({ "path": "docs:setup.exe", "content": "MZ" }),
+            "not_changeable",
+        ),
+        (
+            "create",
+            json!({ "path": "docs:report.docx", "content": "x" }),
+            "not_changeable",
+        ),
+        ("delete", json!({ "path": "docs:" }), "invalid_path"),
+        (
+            "write",
+            json!({ "path": "docs:notes.md", "content": "x", "mode": "truncate" }),
+            "invalid_argument",
+        ),
+        (
+            "delete",
+            json!({ "path": "docs:notes.md", "recursive": true }),
+            "invalid_argument",
+        ),
+    ] {
+        let result = s.call(tool, args.clone()).await;
+        assert_eq!(error_code(&result), expected, "{tool} {args}: {result}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
+        "supersecret-outside Falcon\n"
+    );
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(docs.join(".env")).unwrap(),
+        "API_TOKEN=supersecret-env\n"
+    );
+    assert!(docs.join("keys/id_rsa").exists());
+
+    // Nothing the server got names a local path or the trash.
+    let everything = format!("{made}{replaced}{moved}{replace}{deleted}");
+    assert!(
+        !everything.contains(&fx.base.display().to_string()),
+        "{everything}"
+    );
+
+    // The audit log has each change with its effect, and where the trashed
+    // copy went (locally only).
+    let audit = std::fs::read_to_string(fx.paths.audit_file()).unwrap();
+    let entries: Vec<Value> = audit
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let find = |tool: &str, effect: &str| {
+        entries
+            .iter()
+            .find(|e| e["tool"] == tool && e["effect"] == effect && e["dry_run"] != true)
+            .unwrap_or_else(|| panic!("no {tool} {effect} in {audit}"))
+            .clone()
+    };
+    let replaced_entry = find("write", "replaced");
+    assert!(
+        replaced_entry["trash"]
+            .as_str()
+            .unwrap()
+            .starts_with(&trash.display().to_string())
+    );
+    assert_eq!(replaced_entry["written"], 12);
+    let moved_entry = find("move", "moved");
+    assert_eq!(moved_entry["path"], "docs:plans/q4.md");
+    assert_eq!(moved_entry["to"], "docs:archive/2026/q4.md");
+    assert_eq!(find("delete", "trashed")["path"], "docs:archive");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["tool"] == "write" && e["dry_run"] == true && e["effect"] == "replaced")
+    );
+    assert!(entries.iter().any(|e| e["tool"] == "create"
+        && e["code"] == "not_writable"
+        && e["decision"] == "denied"));
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+}
+
+/// Changes have their own budget, apart from reads.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changes_are_rate_limited() {
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    let limits = Limits {
+        changes_per_minute: 2,
+        ..Limits::default()
+    };
+    pair_for_changes(&fx, &server, true, Some(limits));
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let mut s = connect(&mut server).await;
+    for n in 0..2 {
+        let made = s
+            .call(
+                "create",
+                json!({ "path": format!("docs:{n}.md"), "content": "x" }),
+            )
+            .await;
+        assert_eq!(made["isError"], false, "{made}");
+    }
+    let third = s
+        .call("create", json!({ "path": "docs:2.md", "content": "x" }))
+        .await;
+    assert_eq!(error_code(&third), "rate_limited");
+    assert!(!fx.base.join("work/docs/2.md").exists());
+    // Reads go on.
+    let read = s.call("read", json!({ "path": "docs:0.md" })).await;
+    assert_eq!(read["isError"], false, "{read}");
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+}
+
+/// Only this computer turns changes on, over the control channel; the
+/// tools appear on the next connection and go away with the switch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn allowing_changes_is_a_local_switch() {
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    pair_for_changes(&fx, &server, false, None);
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let mut s = connect(&mut server).await;
+    let tools = s.request("tools/list", json!({})).await;
+    assert_eq!(tool_names(&tools), ["roots", "search", "list", "read"]);
+    let refused = s
+        .request(
+            "tools/call",
+            json!({ "name": "create", "arguments": { "path": "docs:x.md", "content": "x" } }),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+
+    let allowed = control(
+        &fx.paths,
+        ControlRequest::RootsWritable {
+            root: "docs".into(),
+            writable: true,
+        },
+    )
+    .await;
+    assert_eq!(allowed["root"]["writable"], true, "{allowed}");
+    assert!(Config::load(&fx.paths).unwrap().roots[0].writable, "saved");
+    let status = control(&fx.paths, ControlRequest::Status).await;
+    assert_eq!(status["roots"][0]["writable"], true, "{status}");
+    // The daemon reconnects so the server lists the new tools.
+    let mut s = connect(&mut server).await;
+    let tools = s.request("tools/list", json!({})).await;
+    assert!(
+        tool_names(&tools).contains(&"delete".to_string()),
+        "{tools}"
+    );
+    let made = s
+        .call("create", json!({ "path": "docs:x.md", "content": "x" }))
+        .await;
+    assert_eq!(made["isError"], false, "{made}");
+    let ro = s
+        .call("create", json!({ "path": "ro:x.md", "content": "x" }))
+        .await;
+    assert_eq!(error_code(&ro), "not_writable");
+
+    control(
+        &fx.paths,
+        ControlRequest::RootsWritable {
+            root: "docs".into(),
+            writable: false,
+        },
+    )
+    .await;
+    let mut s = connect(&mut server).await;
+    let tools = s.request("tools/list", json!({})).await;
+    assert_eq!(tool_names(&tools), ["roots", "search", "list", "read"]);
+    let log = control(&fx.paths, ControlRequest::AuditTail { lines: Some(200) }).await;
+    let events: Vec<&str> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["event"].as_str().unwrap())
+        .collect();
+    assert!(
+        events.contains(&"root_changes_allowed") && events.contains(&"root_changes_stopped"),
+        "{events:?}"
+    );
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(10), daemon)
         .await

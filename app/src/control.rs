@@ -105,6 +105,7 @@ impl Client {
             label: label.map(str::to_string),
             follow_symlinks: false,
             i_know: false,
+            writable: false,
         })
     }
 

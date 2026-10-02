@@ -40,6 +40,9 @@ pub struct RootInfo {
     pub label: String,
     /// False if the folder is missing or unreadable right now.
     pub available: bool,
+    /// The user allowed changes in this folder.
+    #[serde(default)]
+    pub writable: bool,
     /// `pending`, `indexing`, `ready`, `error` or `disabled`.
     pub index: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,6 +131,7 @@ struct State {
     roots: Vec<Arc<RootHandle>>,
     configured: Vec<crate::config::Root>,
     deny: Arc<DenyList>,
+    write_deny: Arc<DenyList>,
     allow_hardlinks: bool,
     limits: Limits,
     index_enabled: bool,
@@ -193,6 +197,7 @@ impl Reader {
                     id: root.id.clone(),
                     label: root.label.clone(),
                     available,
+                    writable: root.writable,
                     index: match (state.index_enabled, s.map(|s| s.state)) {
                         (false, _) => "disabled".into(),
                         (true, Some(IndexState::Ready)) => "ready".into(),
@@ -422,6 +427,25 @@ impl Reader {
         })
     }
 
+    /// What the writer needs to make a change: the open roots, the deny
+    /// lists and the limits, as they are right now.
+    pub fn change_view(&self) -> ChangeView {
+        let state = self.state.read().expect("reader state");
+        ChangeView {
+            roots: state.roots.clone(),
+            configured: state.configured.clone(),
+            deny: Arc::clone(&state.deny),
+            write_deny: Arc::clone(&state.write_deny),
+            limits: state.limits.clone(),
+        }
+    }
+
+    /// Whether any shared folder allows changes.
+    pub fn any_writable(&self) -> bool {
+        let state = self.state.read().expect("reader state");
+        state.configured.iter().any(|r| r.writable)
+    }
+
     fn cached(&self, key: &CacheKey) -> Option<Arc<String>> {
         let cache = self.cache.lock().expect("cache");
         cache
@@ -438,6 +462,34 @@ impl Reader {
     }
 }
 
+/// A snapshot of the reader's state for one change.
+pub struct ChangeView {
+    pub roots: Vec<Arc<RootHandle>>,
+    pub configured: Vec<crate::config::Root>,
+    pub deny: Arc<DenyList>,
+    pub write_deny: Arc<DenyList>,
+    pub limits: Limits,
+}
+
+impl ChangeView {
+    /// The open root `id`, as reads find it.
+    pub fn root(&self, id: &str) -> Result<Arc<RootHandle>, ToolError> {
+        if let Some(root) = self.roots.iter().find(|r| r.id == id) {
+            return Ok(Arc::clone(root));
+        }
+        if self.configured.iter().any(|r| r.id == id) {
+            return Err(ToolError::new(
+                ErrorCode::NotFound,
+                "this folder is not available on the computer right now",
+            ));
+        }
+        Err(ToolError::new(
+            ErrorCode::UnknownRoot,
+            format!("no shared folder has the ID {id:?}; call roots for the IDs"),
+        ))
+    }
+}
+
 fn build_state(config: &Config, paths: &Paths) -> Result<State> {
     let deny = Arc::new(DenyList::from_config(&config.deny, paths)?);
     let mut roots = Vec::new();
@@ -451,6 +503,7 @@ fn build_state(config: &Config, paths: &Paths) -> Result<State> {
         roots,
         configured: config.roots.clone(),
         deny,
+        write_deny: Arc::new(DenyList::write_from_config(&config.deny)?),
         allow_hardlinks: config.deny.allow_hardlinks,
         limits: config.limits.clone(),
         index_enabled: config.index.enabled,

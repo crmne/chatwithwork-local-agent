@@ -63,6 +63,8 @@ pub struct NewRoot<'a> {
     pub label: Option<String>,
     pub i_know: bool,
     pub follow_symlinks: bool,
+    /// Allow changes in it from the start.
+    pub writable: bool,
 }
 
 /// Validate and add a root to `config`. Returns the new root.
@@ -115,9 +117,19 @@ pub fn add_root(config: &mut Config, paths: &Paths, new: NewRoot<'_>) -> Result<
         label,
         path,
         follow_symlinks: new.follow_symlinks,
+        writable: new.writable,
     };
     config.roots.push(root.clone());
     Ok(root)
+}
+
+/// Allow or stop changes in a shared folder, by ID, label or path. Only the
+/// user does this, here or through the control channel; the server can't.
+pub fn set_writable(config: &mut Config, which: &str, writable: bool) -> Result<Root> {
+    let index = find_root(config, which)?;
+    let root = &mut config.roots[index];
+    root.writable = writable;
+    Ok(root.clone())
 }
 
 /// The canonical form of a folder the user named. On Windows, the `\\?\`
@@ -138,8 +150,15 @@ pub fn canonical(path: &Path) -> Result<PathBuf> {
 
 /// Remove a root by ID, label or path.
 pub fn remove_root(config: &mut Config, which: &str) -> Result<Root> {
+    let index = find_root(config, which)?;
+    Ok(config.roots.remove(index))
+}
+
+/// The index of the root `which` names: its ID, its path, or a label only
+/// one root has.
+fn find_root(config: &Config, which: &str) -> Result<usize> {
     let as_path = canonical(Path::new(which)).ok();
-    let index = config
+    config
         .roots
         .iter()
         .position(|r| r.id == which || as_path.as_ref() == Some(&r.path))
@@ -153,8 +172,7 @@ pub fn remove_root(config: &mut Config, which: &str) -> Result<Root> {
                 .collect();
             (matches.len() == 1).then(|| matches[0])
         })
-        .with_context(|| format!("no shared folder matches {which:?}; see `cww roots list`"))?;
-    Ok(config.roots.remove(index))
+        .with_context(|| format!("no shared folder matches {which:?}; see `cww roots list`"))
 }
 
 /// Why a path is too broad to share by default, if it is.
@@ -308,6 +326,7 @@ mod tests {
             label: "x".into(),
             path: "/x".into(),
             follow_symlinks: false,
+            writable: false,
         });
         assert_eq!(new_id(&config, "Work docs"), "work-docs-2");
         assert_eq!(new_id(&config, "文档"), "root");
@@ -398,11 +417,25 @@ mod tests {
             label: None,
             i_know,
             follow_symlinks: false,
+            writable: false,
         };
         // A folder inside a temporary directory needs no --i-know.
         let root = add_root(&mut config, &paths, new(false)).unwrap();
         assert_eq!(root.id, "shared-docs");
         assert_eq!(root.label, "Shared Docs");
+        assert!(!root.writable, "read-only unless asked");
+        assert!(
+            set_writable(&mut config, "shared-docs", true)
+                .unwrap()
+                .writable
+        );
+        assert!(config.roots[0].writable);
+        assert!(
+            !set_writable(&mut config, "Shared Docs", false)
+                .unwrap()
+                .writable
+        );
+        assert!(set_writable(&mut config, "nope", true).is_err());
         assert!(
             add_root(&mut config, &paths, new(true)).is_err(),
             "duplicate"
@@ -429,6 +462,7 @@ mod tests {
                 label: None,
                 i_know: true,
                 follow_symlinks: false,
+                writable: false,
             },
         )
         .unwrap_err();

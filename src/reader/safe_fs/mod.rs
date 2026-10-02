@@ -32,6 +32,12 @@ mod windows;
 #[cfg(windows)]
 use windows as sys;
 
+pub use sys::{ChangeDir, Staged};
+#[cfg(unix)]
+pub use unix::rename_noreplace;
+#[cfg(windows)]
+pub use windows::rename_handle;
+
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -233,6 +239,8 @@ pub struct RootHandle {
     /// handle verification. Never sent to the server.
     pub path: PathBuf,
     pub follow_symlinks: bool,
+    /// The user allowed changes in this folder.
+    pub writable: bool,
     dir: sys::DirHandle,
 }
 
@@ -261,7 +269,64 @@ pub struct OpenedFile {
     pub identity: (u64, u64),
 }
 
+/// What a change sees of a directory entry, without following links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryStat {
+    pub kind: EntryKind,
+    pub size: u64,
+    pub modified: i64,
+    /// How many hard links it has.
+    pub links: u64,
+    /// Unix permission bits; 0 on Windows.
+    pub mode: u32,
+    /// Owned by a user other than the daemon's (never on Windows).
+    pub foreign: bool,
+    /// Marked read-only: no write bit on Unix, the read-only attribute on
+    /// Windows.
+    pub readonly: bool,
+    /// `(device, inode)`, or the volume and file index on Windows.
+    pub identity: (u64, u64),
+}
+
+impl EntryStat {
+    /// Any execute bit set (Unix).
+    pub fn executable(&self) -> bool {
+        self.mode & 0o111 != 0
+    }
+}
+
+/// Why a rename didn't happen.
+#[derive(Debug)]
+pub enum RenameError {
+    /// The target is on another filesystem: copy instead.
+    CrossDevice,
+    /// Something already has the target name.
+    Exists,
+    Other(ToolError),
+}
+
+/// A name for a temporary file: hidden, unlikely to collide, and short
+/// enough for any filesystem.
+pub fn temp_name() -> String {
+    use ring::rand::SecureRandom;
+    let mut bytes = [0u8; 8];
+    let _ = ring::rand::SystemRandom::new().fill(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(".cww-{hex}.tmp")
+}
+
 impl RootHandle {
+    /// Open the directory `rel` for a change: resolved like reads, but
+    /// never through a symlink, whatever the root allows for reads, and
+    /// checked against the deny list.
+    pub fn change_dir(
+        &self,
+        rel: &RelPath,
+        policy: OpenPolicy<'_>,
+    ) -> Result<ChangeDir, ToolError> {
+        self.change_dir_with(rel, policy, Strategy::Auto)
+    }
+
     /// Absolute local path for `rel`. Local use only (deny list, logs).
     pub fn abs_path(&self, rel: &RelPath) -> PathBuf {
         let mut path = self.path.clone();

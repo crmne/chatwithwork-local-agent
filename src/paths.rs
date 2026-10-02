@@ -36,13 +36,21 @@ pub struct Paths {
     pub data_dir: PathBuf,
     pub state_dir: PathBuf,
     pub runtime_dir: PathBuf,
+    /// The system trash for the home folder's filesystem: freedesktop's
+    /// `$XDG_DATA_HOME/Trash` on Linux, `~/.Trash` on macOS, none on
+    /// Windows (each drive has a Recycle Bin). [`Paths::under`] puts it
+    /// under its base instead, so tests never touch the real one.
+    pub home_trash: Option<PathBuf>,
 }
 
 impl Paths {
     /// Resolve the directories from the environment.
     pub fn from_env() -> Result<Self> {
         if let Some(home) = std::env::var_os("CWW_HOME").filter(|v| !v.is_empty()) {
-            return Ok(Self::under(Path::new(&home)));
+            // A side-by-side install still uses the real trash.
+            let mut paths = Self::under(Path::new(&home));
+            paths.home_trash = system_trash();
+            return Ok(paths);
         }
         #[cfg(windows)]
         {
@@ -72,6 +80,7 @@ impl Paths {
                 data_dir: xdg("XDG_DATA_HOME", ".local/share").join("cww"),
                 state_dir,
                 runtime_dir,
+                home_trash: system_trash(),
             })
         }
     }
@@ -83,6 +92,7 @@ impl Paths {
             data_dir: base.join("data"),
             state_dir: base.join("state"),
             runtime_dir: base.join("run"),
+            home_trash: (!cfg!(windows)).then(|| base.join("Trash")),
         }
     }
 
@@ -160,6 +170,23 @@ impl Paths {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The system trash for the home folder's filesystem, from the
+/// environment.
+fn system_trash() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    let home = home_dir().ok()?;
+    if cfg!(target_os = "macos") {
+        return Some(home.join(".Trash"));
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share"));
+    Some(data.join("Trash"))
 }
 
 pub fn home_dir() -> Result<PathBuf> {

@@ -13,30 +13,37 @@
 //! Checking the real path also defeats 8.3 short names (`ENVPRO~1`) and other
 //! aliases the logical path could use to dodge the deny list.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
-use std::io;
-use std::os::windows::ffi::OsStringExt;
+use std::io::{self, Read, Write};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_BAD_PATHNAME, ERROR_CANT_ACCESS_FILE, ERROR_DIRECTORY,
-    ERROR_FILE_NOT_FOUND, ERROR_FILENAME_EXCED_RANGE, ERROR_INVALID_NAME, ERROR_NO_MORE_FILES,
+    ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_BAD_PATHNAME, ERROR_CANT_ACCESS_FILE,
+    ERROR_DIRECTORY, ERROR_DISK_FULL, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
+    ERROR_FILENAME_EXCED_RANGE, ERROR_INVALID_NAME, ERROR_NO_MORE_FILES, ERROR_NOT_SAME_DEVICE,
     ERROR_PATH_NOT_FOUND, ERROR_SHARING_VIOLATION, HANDLE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_ID_BOTH_DIR_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
-    FileAttributeTagInfo, FileIdBothDirectoryInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_READ_ATTRIBUTES,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+    FileAttributeTagInfo, FileIdBothDirectoryInfo, FileRenameInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, SYNCHRONIZE,
+    SetFileInformationByHandle,
 };
 
-use super::{DirEntryInfo, EntryKind, OpenPolicy, OpenedFile, RelPath, RootHandle, Strategy, Want};
+use super::{
+    DirEntryInfo, EntryKind, EntryStat, OpenPolicy, OpenedFile, RelPath, RenameError, RootHandle,
+    Strategy, Want, temp_name,
+};
 use crate::config::Root;
 use crate::error::{ErrorCode, ToolError};
+use crate::trash::Trash;
 
 /// Symlinks, junctions and mount points have this bit in their tag.
 const NAME_SURROGATE: u32 = 0x2000_0000;
@@ -164,6 +171,7 @@ impl RootHandle {
             label: root.label.clone(),
             path: root.path.clone(),
             follow_symlinks: root.follow_symlinks,
+            writable: root.writable,
             dir: DirHandle { _file: file, real },
         })
     }
@@ -174,7 +182,7 @@ impl RootHandle {
         policy: OpenPolicy<'_>,
         _strategy: Strategy,
     ) -> Result<OpenedFile, ToolError> {
-        let (file, info) = self.resolve(rel, Want::File, policy)?;
+        let (file, info) = self.resolve(rel, Want::File, policy, self.follow_symlinks)?;
         Ok(OpenedFile {
             file,
             size: ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
@@ -193,7 +201,7 @@ impl RootHandle {
         rel: &RelPath,
         policy: OpenPolicy<'_>,
     ) -> Result<Vec<DirEntryInfo>, ToolError> {
-        let (dir, _) = self.resolve(rel, Want::Dir, policy)?;
+        let (dir, _) = self.resolve(rel, Want::Dir, policy, self.follow_symlinks)?;
         let dir_path = self.abs_path(rel);
         let mut entries = Vec::new();
         // u64 elements keep the buffer aligned for FILE_ID_BOTH_DIR_INFO.
@@ -254,11 +262,29 @@ impl RootHandle {
         Ok(entries)
     }
 
+    /// Open the directory `rel` for a change. Links and junctions are
+    /// never followed here, whatever the root allows for reads.
+    pub fn change_dir_with(
+        &self,
+        rel: &RelPath,
+        policy: OpenPolicy<'_>,
+        _strategy: Strategy,
+    ) -> Result<ChangeDir, ToolError> {
+        let (dir, _) = self.resolve(rel, Want::Dir, policy, false)?;
+        let real = final_path(&dir).map_err(|e| io_error(&e, "checking the path"))?;
+        Ok(ChangeDir {
+            path: self.abs_path(rel),
+            dir,
+            real,
+        })
+    }
+
     fn resolve(
         &self,
         rel: &RelPath,
         want: Want,
         policy: OpenPolicy<'_>,
+        follow: bool,
     ) -> Result<(File, BY_HANDLE_FILE_INFORMATION), ToolError> {
         let logical = self.abs_path(rel);
         if let Some(pattern) = policy.deny.denied_by(&logical) {
@@ -270,7 +296,7 @@ impl RootHandle {
         let parts = rel.components();
         let file = match self.open_direct(rel) {
             Some(file) => file,
-            None => self.open_walk(parts)?,
+            None => self.open_walk(parts, follow)?,
         };
         self.check_opened(file, want, policy)
     }
@@ -296,7 +322,7 @@ impl RootHandle {
 
     /// One component at a time, refusing links, so an error can say what
     /// was wrong.
-    fn open_walk(&self, parts: &[String]) -> Result<File, ToolError> {
+    fn open_walk(&self, parts: &[String], follow: bool) -> Result<File, ToolError> {
         let mut current = self.dir.real.clone();
         let mut opened = None;
         for (i, part) in parts.iter().enumerate() {
@@ -304,7 +330,7 @@ impl RootHandle {
             current.push(part);
             let file = open_no_follow(&current).map_err(|e| open_error(&e))?;
             let (attributes, tag) = attribute_tag(&file).map_err(|e| io_error(&e, "stat"))?;
-            if is_link(attributes, tag) && !self.follow_symlinks {
+            if is_link(attributes, tag) && !follow {
                 return Err(ToolError::denied("symlinks are not followed"));
             }
             if !last && attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
@@ -377,6 +403,375 @@ impl RootHandle {
             )));
         }
         Ok((file, info))
+    }
+}
+
+/// A directory inside a shared folder, opened for a change. Windows has no
+/// `openat`, so each change opens `<real path of this handle>\<name>`
+/// without following reparse points, then checks the handle it got.
+#[derive(Debug)]
+pub struct ChangeDir {
+    /// The directory's logical absolute path. Local use only.
+    pub path: PathBuf,
+    dir: File,
+    /// The path the kernel reports for `dir`.
+    real: PathBuf,
+}
+
+/// A new file written next to its final name, not yet in place.
+#[derive(Debug)]
+pub struct Staged {
+    file: File,
+    path: PathBuf,
+}
+
+/// Open without following a final reparse point, with `access`.
+fn open_with(path: &Path, access: u32) -> io::Result<File> {
+    OpenOptions::new()
+        .access_mode(access)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+fn stat_of(file: &File) -> io::Result<EntryStat> {
+    let (attributes, tag) = attribute_tag(file)?;
+    let info = file_info(file)?;
+    let kind = if is_link(attributes, tag) {
+        EntryKind::Symlink
+    } else if unsafe { GetFileType(raw(file)) } != FILE_TYPE_DISK {
+        EntryKind::Other
+    } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        EntryKind::Dir
+    } else {
+        EntryKind::File
+    };
+    Ok(EntryStat {
+        kind,
+        size: ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
+        modified: unix_time(filetime(info.ftLastWriteTime)),
+        links: info.nNumberOfLinks as u64,
+        mode: 0,
+        foreign: false,
+        readonly: info.dwFileAttributes & FILE_ATTRIBUTE_READONLY != 0,
+        identity: (
+            info.dwVolumeSerialNumber as u64,
+            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+        ),
+    })
+}
+
+fn is_missing(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error().map(|c| c as u32),
+        Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+    )
+}
+
+fn is_exists(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error().map(|c| c as u32),
+        Some(ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS)
+    )
+}
+
+impl ChangeDir {
+    /// `name` in this directory, as the kernel names it.
+    fn child(&self, name: &OsStr) -> PathBuf {
+        self.real.join(name)
+    }
+
+    /// Open `name` without following it, and insist the handle is really
+    /// in this directory.
+    fn open_child(&self, name: &OsStr, access: u32) -> Result<(File, EntryStat), ToolError> {
+        let file = open_with(&self.child(name), access).map_err(|e| change_error(&e))?;
+        let stat = stat_of(&file).map_err(|e| io_error(&e, "stat"))?;
+        if stat.kind == EntryKind::Symlink {
+            return Err(ToolError::denied("Links and junctions are never followed."));
+        }
+        let real = final_path(&file).map_err(|e| io_error(&e, "checking the path"))?;
+        if !real.parent().is_some_and(|p| same_path(p, &self.real)) {
+            return Err(ToolError::new(
+                ErrorCode::OutsideRoot,
+                "This path resolves outside its folder.",
+            ));
+        }
+        // An 8.3 short name (`ENVPRO~1`) is another name for a file the
+        // deny list may cover: only the file's own name is accepted.
+        if !real.file_name().is_some_and(|n| {
+            n.to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase()
+        }) {
+            return Err(ToolError::denied(
+                "This is a short name for another file; use the file's full name.",
+            ));
+        }
+        Ok((file, stat))
+    }
+
+    pub fn entry(&self, name: &OsStr) -> Result<Option<EntryStat>, ToolError> {
+        match open_with(&self.child(name), FILE_READ_ATTRIBUTES | SYNCHRONIZE) {
+            Ok(file) => stat_of(&file).map(Some).map_err(|e| io_error(&e, "stat")),
+            Err(e) if is_missing(&e) => Ok(None),
+            Err(e) => Err(change_error(&e)),
+        }
+    }
+
+    pub fn read(&self, name: &OsStr, cap: u64) -> Result<(Vec<u8>, EntryStat), ToolError> {
+        let (file, stat) = self.open_child(name, windows_sys::Win32::Foundation::GENERIC_READ)?;
+        if stat.kind != EntryKind::File {
+            return Err(ToolError::new(
+                ErrorCode::NotAFile,
+                "This path is not a regular file.",
+            ));
+        }
+        if stat.size > cap {
+            return Err(too_large(stat.size, cap));
+        }
+        let mut bytes = Vec::new();
+        file.take(cap + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| io_error(&e, "reading the file"))?;
+        if bytes.len() as u64 > cap {
+            return Err(too_large(bytes.len() as u64, cap));
+        }
+        Ok((bytes, stat))
+    }
+
+    pub fn stage(&self, bytes: &[u8], _mode: u32) -> Result<Staged, ToolError> {
+        for _ in 0..16 {
+            let path = self.child(OsStr::new(&temp_name()));
+            let mut file = match OpenOptions::new()
+                .access_mode(FILE_GENERIC_WRITE | DELETE)
+                .share_mode(0)
+                .create_new(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&path)
+            {
+                Ok(file) => file,
+                Err(e) if is_exists(&e) => continue,
+                Err(e) => return Err(change_error(&e)),
+            };
+            let written = file.write_all(bytes).and_then(|()| file.sync_all());
+            let staged = Staged { file, path };
+            if let Err(e) = written {
+                self.discard(staged);
+                return Err(change_error(&e));
+            }
+            return Ok(staged);
+        }
+        Err(ToolError::internal("no free name for a temporary file"))
+    }
+
+    pub fn commit(&self, staged: Staged, name: &OsStr) -> Result<(), ToolError> {
+        match rename_handle(&staged.file, &self.child(name)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.discard(staged);
+                Err(if is_exists(&e) {
+                    exists()
+                } else {
+                    change_error(&e)
+                })
+            }
+        }
+    }
+
+    pub fn discard(&self, staged: Staged) {
+        drop(staged.file);
+        let _ = std::fs::remove_file(&staged.path);
+    }
+
+    pub fn make_dir(&self, name: &OsStr, _mode: u32) -> Result<(), ToolError> {
+        std::fs::create_dir(self.child(name)).map_err(|e| {
+            if is_exists(&e) {
+                exists()
+            } else {
+                change_error(&e)
+            }
+        })?;
+        self.subdir(name).map(|_| ())
+    }
+
+    pub fn subdir(&self, name: &OsStr) -> Result<ChangeDir, ToolError> {
+        let (dir, stat) = self.open_child(name, windows_sys::Win32::Foundation::GENERIC_READ)?;
+        if stat.kind != EntryKind::Dir {
+            return Err(ToolError::new(
+                ErrorCode::NotADirectory,
+                "A part of the path is not a folder.",
+            ));
+        }
+        let real = final_path(&dir).map_err(|e| io_error(&e, "checking the path"))?;
+        Ok(ChangeDir {
+            path: self.path.join(name),
+            dir,
+            real,
+        })
+    }
+
+    pub fn entries(&self) -> Result<Vec<(OsString, EntryStat)>, ToolError> {
+        // A fresh handle, so the listing starts at the beginning.
+        let dir = open_with(&self.real, windows_sys::Win32::Foundation::GENERIC_READ)
+            .map_err(|e| change_error(&e))?;
+        let mut out = Vec::new();
+        let mut buf = vec![0u64; 8 * 1024];
+        loop {
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    raw(&dir),
+                    FileIdBothDirectoryInfo,
+                    buf.as_mut_ptr().cast(),
+                    (buf.len() * 8) as u32,
+                )
+            };
+            if ok == 0 {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) {
+                    break;
+                }
+                return Err(io_error(&err, "reading the folder"));
+            }
+            let base = buf.as_ptr() as *const u8;
+            let mut offset = 0usize;
+            loop {
+                // SAFETY: the kernel filled `buf` with a chain of entries.
+                let entry = unsafe { &*(base.add(offset) as *const FILE_ID_BOTH_DIR_INFO) };
+                let name_len = entry.FileNameLength as usize / 2;
+                let name_ptr = std::ptr::addr_of!(entry.FileName) as *const u16;
+                let name =
+                    OsString::from_wide(unsafe { std::slice::from_raw_parts(name_ptr, name_len) });
+                if name != "." && name != ".." {
+                    let attributes = entry.FileAttributes;
+                    let kind = if is_link(attributes, entry.EaSize) {
+                        EntryKind::Symlink
+                    } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                        EntryKind::Dir
+                    } else {
+                        EntryKind::File
+                    };
+                    out.push((
+                        name,
+                        EntryStat {
+                            kind,
+                            size: entry.EndOfFile.max(0) as u64,
+                            modified: unix_time(entry.LastWriteTime),
+                            links: 1,
+                            mode: 0,
+                            foreign: false,
+                            readonly: attributes & FILE_ATTRIBUTE_READONLY != 0,
+                            identity: (0, entry.FileId as u64),
+                        },
+                    ));
+                }
+                if entry.NextEntryOffset == 0 {
+                    break;
+                }
+                offset += entry.NextEntryOffset as usize;
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn rename(&self, name: &OsStr, to: &ChangeDir, to_name: &OsStr) -> Result<(), RenameError> {
+        let (file, _) = self
+            .open_child(name, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .map_err(RenameError::Other)?;
+        rename_handle(&file, &to.child(to_name)).map_err(|e| {
+            if e.raw_os_error() == Some(ERROR_NOT_SAME_DEVICE as i32) {
+                RenameError::CrossDevice
+            } else if is_exists(&e) {
+                RenameError::Exists
+            } else {
+                RenameError::Other(change_error(&e))
+            }
+        })
+    }
+
+    pub fn trash(
+        &self,
+        name: &OsStr,
+        trash: &Trash,
+        stat: &EntryStat,
+    ) -> Result<PathBuf, ToolError> {
+        let (file, _) = self.open_child(name, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)?;
+        let real = final_path(&file).map_err(|e| io_error(&e, "checking the path"))?;
+        trash.put(
+            &file,
+            &self.path.join(name),
+            &real,
+            stat.kind == EntryKind::Dir,
+            stat.size,
+        )
+    }
+
+    pub fn remove_own(&self, name: &OsStr) {
+        let path = self.child(name);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    pub fn device(&self) -> u64 {
+        file_info(&self.dir)
+            .map(|i| i.dwVolumeSerialNumber as u64)
+            .unwrap_or(0)
+    }
+}
+
+/// Rename the open `file` to `target` (a full path), never replacing
+/// anything there. The handle needs `DELETE` access.
+pub fn rename_handle(file: &File, target: &Path) -> io::Result<()> {
+    let name: Vec<u16> = target.as_os_str().encode_wide().collect();
+    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let size = header + (name.len() + 1) * 2;
+    // u64 elements keep the buffer aligned for FILE_RENAME_INFO.
+    let mut buf = vec![0u64; size.div_ceil(8)];
+    let info = buf.as_mut_ptr() as *mut FILE_RENAME_INFO;
+    // SAFETY: `buf` is zeroed, aligned and large enough for the header and
+    // the name that follows it.
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = false;
+        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).FileNameLength = (name.len() * 2) as u32;
+        let dst = std::ptr::addr_of_mut!((*info).FileName) as *mut u16;
+        std::ptr::copy_nonoverlapping(name.as_ptr(), dst, name.len());
+    }
+    let ok = unsafe {
+        SetFileInformationByHandle(raw(file), FileRenameInfo, buf.as_ptr().cast(), size as u32)
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn exists() -> ToolError {
+    ToolError::new(ErrorCode::Exists, "Something already exists at this path.")
+}
+
+fn too_large(size: u64, cap: u64) -> ToolError {
+    ToolError::new(
+        ErrorCode::TooLarge,
+        format!("The file is {size} bytes; files up to {cap} bytes can be changed."),
+    )
+}
+
+fn change_error(err: &io::Error) -> ToolError {
+    match err.raw_os_error().map(|c| c as u32) {
+        Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => {
+            ToolError::new(ErrorCode::NotFound, "Nothing exists at this path.")
+        }
+        Some(ERROR_ACCESS_DENIED) => ToolError::denied("The operating system denied the change."),
+        Some(ERROR_SHARING_VIOLATION) => {
+            ToolError::internal("Another program has this file open, so it can't be changed.")
+        }
+        Some(ERROR_DISK_FULL) => ToolError::internal("The disk is full."),
+        Some(ERROR_INVALID_NAME | ERROR_BAD_PATHNAME) => {
+            ToolError::invalid_path("This name is not valid on Windows.")
+        }
+        _ => io_error(err, "changing the file"),
     }
 }
 
@@ -463,6 +858,7 @@ mod tests {
             label: "Docs".into(),
             path: root_path,
             follow_symlinks: follow,
+            writable: false,
         })
         .unwrap();
         Fixture {
@@ -552,6 +948,18 @@ mod tests {
             ErrorCode::Denied,
             "{name}"
         );
+        // Changes refuse the short name too.
+        let deny = deny();
+        let policy = OpenPolicy {
+            deny: &deny,
+            allow_hardlinks: false,
+        };
+        let top = f
+            .root
+            .change_dir_with(&RelPath::default(), policy, Strategy::Auto)
+            .unwrap();
+        let err = top.read(OsStr::new(name), 1024).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Denied, "{name}");
     }
 
     #[test]
@@ -568,6 +976,39 @@ mod tests {
         std::fs::write(f.root.path.join("../outside/other.txt"), "x").unwrap();
         let err = open(&f, "escape_dir/other.txt").unwrap_err();
         assert_eq!(err.code, ErrorCode::OutsideRoot);
+    }
+
+    #[test]
+    fn change_dirs_never_follow_junctions() {
+        for follow in [false, true] {
+            let f = fixture(follow);
+            let deny = deny();
+            let policy = OpenPolicy {
+                deny: &deny,
+                allow_hardlinks: false,
+            };
+            let sub = f
+                .root
+                .change_dir_with(&RelPath::parse("sub").unwrap(), policy, Strategy::Auto)
+                .unwrap();
+            assert!(sub.entry(OsStr::new("deep.txt")).unwrap().is_some());
+            for rel in ["escape_dir", "inside_dir", "escape_dir/x"] {
+                let err = f
+                    .root
+                    .change_dir_with(&RelPath::parse(rel).unwrap(), policy, Strategy::Auto)
+                    .unwrap_err();
+                assert_eq!(err.code, ErrorCode::Denied, "{rel}, follow {follow}");
+            }
+            let top = f
+                .root
+                .change_dir_with(&RelPath::default(), policy, Strategy::Auto)
+                .unwrap();
+            let junction = top.entry(OsStr::new("escape_dir")).unwrap().unwrap();
+            assert_eq!(junction.kind, EntryKind::Symlink);
+            assert!(top.subdir(OsStr::new("escape_dir")).is_err());
+            let hard = top.entry(OsStr::new("hardlink.txt")).unwrap().unwrap();
+            assert_eq!(hard.links, 2);
+        }
     }
 
     #[test]

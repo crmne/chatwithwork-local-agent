@@ -42,10 +42,28 @@ pub struct AuditEntry {
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
+    /// The tool path a call named (the source, for a move).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Where a move went.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
+    /// What a change did: `created`, `replaced`, `appended`, `edited`,
+    /// `created_folder`, `moved`, `trashed` or `unchanged`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
+    /// The call only checked a change (`dry_run`), and changed nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    /// Bytes a change wrote to disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written: Option<u64>,
+    /// Where the old version or the deleted item went in the system trash,
+    /// on this computer. Never sent to the server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decision: Option<Decision>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,6 +225,21 @@ pub fn format_line(line: &str) -> String {
         ));
         if let Some(path) = &e.path {
             out.push_str(&format!(" {path}"));
+        }
+        if let Some(to) = &e.to {
+            out.push_str(&format!(" -> {to}"));
+        }
+        if let Some(effect) = &e.effect {
+            out.push_str(&format!(" {effect}"));
+        }
+        if e.dry_run == Some(true) {
+            out.push_str(" (dry run)");
+        }
+        if let Some(written) = e.written {
+            out.push_str(&format!(" written={written}"));
+        }
+        if let Some(trash) = &e.trash {
+            out.push_str(&format!(" trash={trash}"));
         }
         if let Some(query) = &e.query {
             out.push_str(&format!(" query={query:?}"));

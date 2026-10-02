@@ -4,19 +4,24 @@
 // no-ops on one of them.
 #![allow(clippy::unnecessary_cast)]
 
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::os::fd::{AsFd, OwnedFd};
+use std::io::{Read, Write};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rustix::fs::{AtFlags, FileType, Mode, OFlags, Stat};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags, Stat};
 use rustix::io::Errno;
 
 use super::{
-    DirEntryInfo, EntryKind, OpenPolicy, OpenedFile, RelPath, RootHandle, Strategy, Want, is_within,
+    DirEntryInfo, EntryKind, EntryStat, OpenPolicy, OpenedFile, RelPath, RenameError, RootHandle,
+    Strategy, Want, is_within, temp_name,
 };
 use crate::config::Root;
 use crate::error::{ErrorCode, ToolError};
+use crate::trash::Trash;
 
 pub type DirHandle = OwnedFd;
 
@@ -34,6 +39,7 @@ impl RootHandle {
             label: root.label.clone(),
             path: root.path.clone(),
             follow_symlinks: root.follow_symlinks,
+            writable: root.writable,
             dir,
         })
     }
@@ -44,7 +50,7 @@ impl RootHandle {
         policy: OpenPolicy<'_>,
         strategy: Strategy,
     ) -> Result<OpenedFile, ToolError> {
-        let (fd, stat) = self.resolve(rel, Want::File, policy, strategy)?;
+        let (fd, stat) = self.resolve(rel, Want::File, policy, strategy, self.follow_symlinks)?;
         Ok(OpenedFile {
             file: File::from(fd),
             size: stat.st_size as u64,
@@ -54,8 +60,24 @@ impl RootHandle {
     }
 
     pub fn open_dir(&self, rel: &RelPath, policy: OpenPolicy<'_>) -> Result<OwnedFd, ToolError> {
-        self.resolve(rel, Want::Dir, policy, Strategy::Auto)
+        self.resolve(rel, Want::Dir, policy, Strategy::Auto, self.follow_symlinks)
             .map(|(fd, _)| fd)
+    }
+
+    /// Open the directory `rel` for a change. Symlinks are never followed
+    /// here, whatever the root allows for reads.
+    pub fn change_dir_with(
+        &self,
+        rel: &RelPath,
+        policy: OpenPolicy<'_>,
+        strategy: Strategy,
+    ) -> Result<ChangeDir, ToolError> {
+        let (fd, stat) = self.resolve(rel, Want::Dir, policy, strategy, false)?;
+        Ok(ChangeDir {
+            path: self.abs_path(rel),
+            fd,
+            dev: stat.st_dev as u64,
+        })
     }
 
     /// List a directory. Denied entries and names that aren't UTF-8 are left
@@ -106,6 +128,7 @@ impl RootHandle {
         want: Want,
         policy: OpenPolicy<'_>,
         strategy: Strategy,
+        follow: bool,
     ) -> Result<(OwnedFd, Stat), ToolError> {
         let logical = self.abs_path(rel);
         if let Some(pattern) = policy.deny.denied_by(&logical) {
@@ -118,18 +141,18 @@ impl RootHandle {
             Strategy::Auto
                 if cfg!(target_os = "linux") && !OPENAT2_UNAVAILABLE.load(Ordering::Relaxed) =>
             {
-                match self.open_beneath(rel, want) {
+                match self.open_beneath(rel, want, follow) {
                     Ok(fd) => fd,
                     Err(Errno::NOSYS) | Err(Errno::INVAL) | Err(Errno::PERM)
                         if !OPENAT2_UNAVAILABLE.load(Ordering::Relaxed) && openat2_missing() =>
                     {
                         OPENAT2_UNAVAILABLE.store(true, Ordering::Relaxed);
-                        self.open_walk(rel, want)?
+                        self.open_walk(rel, want, follow)?
                     }
-                    Err(e) => return Err(self.classify_beneath_error(e, rel)),
+                    Err(e) => return Err(self.classify_beneath_error(e, rel, follow)),
                 }
             }
-            _ => self.open_walk(rel, want)?,
+            _ => self.open_walk(rel, want, follow)?,
         };
 
         let stat = rustix::fs::fstat(&fd).map_err(|e| io_error(e, "stat"))?;
@@ -158,7 +181,7 @@ impl RootHandle {
                 "files with more than one hard link are not served",
             ));
         }
-        if self.follow_symlinks {
+        if follow {
             // The logical path may differ from where symlinks led; check the
             // real location against the deny list too.
             if let Some(real) = handle_path(&fd)
@@ -175,9 +198,9 @@ impl RootHandle {
     /// `openat2` reports a symlink as `ELOOP` or `ENOTDIR`. Find out which
     /// component is to blame, for an accurate error. Only `lstat`s prefixes
     /// in order and stops at the first symlink, so nothing is followed.
-    fn classify_beneath_error(&self, err: Errno, rel: &RelPath) -> ToolError {
-        if self.follow_symlinks || !matches!(err, Errno::LOOP | Errno::NOTDIR) {
-            return resolve_error(err, self.follow_symlinks);
+    fn classify_beneath_error(&self, err: Errno, rel: &RelPath, follow: bool) -> ToolError {
+        if follow || !matches!(err, Errno::LOOP | Errno::NOTDIR) {
+            return resolve_error(err, follow);
         }
         let mut prefix = PathBuf::new();
         for part in rel.components() {
@@ -193,47 +216,47 @@ impl RootHandle {
         resolve_error(err, false)
     }
 
-    fn open_flags(&self, want: Want) -> OFlags {
+    fn open_flags(want: Want, follow: bool) -> OFlags {
         let mut flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK;
         if want == Want::Dir {
             flags |= OFlags::DIRECTORY;
         }
-        if !self.follow_symlinks {
+        if !follow {
             flags |= OFlags::NOFOLLOW;
         }
         flags
     }
 
     #[cfg(target_os = "linux")]
-    fn open_beneath(&self, rel: &RelPath, want: Want) -> Result<OwnedFd, Errno> {
+    fn open_beneath(&self, rel: &RelPath, want: Want, follow: bool) -> Result<OwnedFd, Errno> {
         use rustix::fs::ResolveFlags;
         let mut resolve = ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS;
-        if !self.follow_symlinks {
+        if !follow {
             resolve |= ResolveFlags::NO_SYMLINKS;
         }
         rustix::fs::openat2(
             &self.dir,
             rel.fs_path(),
-            self.open_flags(want),
+            Self::open_flags(want, follow),
             Mode::empty(),
             resolve,
         )
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn open_beneath(&self, _rel: &RelPath, _want: Want) -> Result<OwnedFd, Errno> {
+    fn open_beneath(&self, _rel: &RelPath, _want: Want, _follow: bool) -> Result<OwnedFd, Errno> {
         Err(Errno::NOSYS)
     }
 
     /// Portable resolution: one component at a time with `O_NOFOLLOW`, then a
     /// check that the handle really is inside the root.
-    fn open_walk(&self, rel: &RelPath, want: Want) -> Result<OwnedFd, ToolError> {
-        let fd = if self.follow_symlinks {
+    fn open_walk(&self, rel: &RelPath, want: Want, follow: bool) -> Result<OwnedFd, ToolError> {
+        let fd = if follow {
             // Let the kernel follow links, then insist the result is inside.
             rustix::fs::openat(
                 &self.dir,
                 rel.fs_path(),
-                self.open_flags(want),
+                Self::open_flags(want, true),
                 Mode::empty(),
             )
             .map_err(|e| resolve_error(e, true))?
@@ -242,16 +265,21 @@ impl RootHandle {
             let mut current: Option<OwnedFd> = None;
             if parts.is_empty() {
                 current = Some(
-                    rustix::fs::openat(&self.dir, ".", self.open_flags(want), Mode::empty())
-                        .map_err(|e| resolve_error(e, false))?,
+                    rustix::fs::openat(
+                        &self.dir,
+                        ".",
+                        Self::open_flags(want, false),
+                        Mode::empty(),
+                    )
+                    .map_err(|e| resolve_error(e, false))?,
                 );
             }
             for (i, part) in parts.iter().enumerate() {
                 let last = i + 1 == parts.len();
                 let flags = if last {
-                    self.open_flags(want)
+                    Self::open_flags(want, false)
                 } else {
-                    self.open_flags(Want::Dir)
+                    Self::open_flags(Want::Dir, false)
                 };
                 let parent = current.as_ref().map_or(self.dir.as_fd(), |fd| fd.as_fd());
                 let next = rustix::fs::openat(parent, part.as_str(), flags, Mode::empty())
@@ -271,6 +299,318 @@ impl RootHandle {
                 "can't verify where this path resolves on this platform",
             )),
         }
+    }
+}
+
+/// A directory inside a shared folder, opened for a change. Every change
+/// happens relative to this handle, so nothing that moves around it later
+/// can redirect it.
+#[derive(Debug)]
+pub struct ChangeDir {
+    /// The directory's logical absolute path. Local use only (the deny
+    /// list, trash records, logs).
+    pub path: PathBuf,
+    fd: OwnedFd,
+    dev: u64,
+}
+
+/// A new file written next to its final name, not yet in place.
+#[derive(Debug)]
+pub struct Staged {
+    name: OsString,
+}
+
+impl ChangeDir {
+    /// The entry `name`, without following it if it's a link. `None` if
+    /// nothing has that name.
+    pub fn entry(&self, name: &OsStr) -> Result<Option<EntryStat>, ToolError> {
+        match rustix::fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => Ok(Some(entry_stat(&stat))),
+            Err(Errno::NOENT) => Ok(None),
+            Err(e) => Err(change_error(e, "checking the path")),
+        }
+    }
+
+    /// Read the regular file `name`, at most `cap` bytes.
+    pub fn read(&self, name: &OsStr, cap: u64) -> Result<(Vec<u8>, EntryStat), ToolError> {
+        let before = self.entry(name)?.ok_or_else(not_found)?;
+        if before.kind != EntryKind::File {
+            return Err(ToolError::new(
+                ErrorCode::NotAFile,
+                "This path is not a regular file.",
+            ));
+        }
+        if before.size > cap {
+            return Err(too_large(before.size, cap));
+        }
+        let fd = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|e| change_error(e, "opening the file"))?;
+        let stat = entry_stat(&rustix::fs::fstat(&fd).map_err(|e| change_error(e, "stat"))?);
+        if stat.identity != before.identity || stat.kind != EntryKind::File {
+            return Err(ToolError::new(
+                ErrorCode::Conflict,
+                "The file changed while it was being read. Try again.",
+            ));
+        }
+        let mut bytes = Vec::new();
+        File::from(fd)
+            .take(cap + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| ToolError::internal(format!("reading the file: {e}")))?;
+        if bytes.len() as u64 > cap {
+            return Err(too_large(bytes.len() as u64, cap));
+        }
+        Ok((bytes, stat))
+    }
+
+    /// Write `bytes` to a new hidden file in this directory, with `mode`,
+    /// and flush it to disk. [`ChangeDir::commit`] puts it in place.
+    pub fn stage(&self, bytes: &[u8], mode: u32) -> Result<Staged, ToolError> {
+        for _ in 0..16 {
+            let name = OsString::from(temp_name());
+            let fd = match rustix::fs::openat(
+                &self.fd,
+                &name,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            ) {
+                Ok(fd) => fd,
+                Err(Errno::EXIST) => continue,
+                Err(e) => return Err(change_error(e, "creating the file")),
+            };
+            let staged = Staged { name };
+            let mut file = File::from(fd);
+            let written = file
+                .write_all(bytes)
+                .map_err(|e| e.raw_os_error().map_or(Errno::IO, Errno::from_raw_os_error))
+                .and_then(|()| {
+                    rustix::fs::fchmod(
+                        &file,
+                        Mode::from_raw_mode((mode & 0o666) as rustix::fs::RawMode),
+                    )
+                })
+                .and_then(|()| rustix::fs::fsync(&file));
+            if let Err(e) = written {
+                drop(file);
+                self.discard(staged);
+                return Err(change_error(e, "writing the file"));
+            }
+            return Ok(staged);
+        }
+        Err(ToolError::internal("no free name for a temporary file"))
+    }
+
+    /// Put a staged file in place as `name`, which must not exist.
+    pub fn commit(&self, staged: Staged, name: &OsStr) -> Result<(), ToolError> {
+        match rename_noreplace(self.fd.as_fd(), &staged.name, self.fd.as_fd(), name) {
+            Ok(()) => {
+                let _ = rustix::fs::fsync(&self.fd);
+                Ok(())
+            }
+            Err(e) => {
+                self.discard(staged);
+                Err(match e {
+                    Errno::EXIST => exists(),
+                    other => change_error(other, "putting the file in place"),
+                })
+            }
+        }
+    }
+
+    /// Remove a staged file that won't be used.
+    pub fn discard(&self, staged: Staged) {
+        let _ = rustix::fs::unlinkat(&self.fd, &staged.name, AtFlags::empty());
+    }
+
+    /// Make the directory `name` with `mode`. Fails if anything has that
+    /// name.
+    pub fn make_dir(&self, name: &OsStr, mode: u32) -> Result<(), ToolError> {
+        rustix::fs::mkdirat(&self.fd, name, Mode::from_raw_mode(0o700)).map_err(|e| match e {
+            Errno::EXIST => exists(),
+            other => change_error(other, "making the folder"),
+        })?;
+        // The daemon's umask is strict; give the folder the mode any other
+        // program would, on the handle of the folder just made.
+        if let Ok(dir) = self.subdir(name) {
+            let _ = rustix::fs::fchmod(
+                &dir.fd,
+                Mode::from_raw_mode((mode & 0o777) as rustix::fs::RawMode),
+            );
+        }
+        let _ = rustix::fs::fsync(&self.fd);
+        Ok(())
+    }
+
+    /// Open the subdirectory `name`, never through a link.
+    pub fn subdir(&self, name: &OsStr) -> Result<ChangeDir, ToolError> {
+        let fd = rustix::fs::openat(
+            &self.fd,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| match e {
+            Errno::LOOP | Errno::MLINK => ToolError::denied("Symlinks are never followed."),
+            other => change_error(other, "opening the folder"),
+        })?;
+        let stat = rustix::fs::fstat(&fd).map_err(|e| change_error(e, "stat"))?;
+        Ok(ChangeDir {
+            path: self.path.join(name),
+            fd,
+            dev: stat.st_dev as u64,
+        })
+    }
+
+    /// Everything in this directory, links included and not followed.
+    pub fn entries(&self) -> Result<Vec<(OsString, EntryStat)>, ToolError> {
+        let dir = rustix::fs::Dir::read_from(&self.fd)
+            .map_err(|e| change_error(e, "reading the folder"))?;
+        let mut out = Vec::new();
+        for entry in dir {
+            let entry = entry.map_err(|e| change_error(e, "reading the folder"))?;
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            if name == "." || name == ".." {
+                continue;
+            }
+            if let Some(stat) = self.entry(name)? {
+                out.push((name.to_os_string(), stat));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Move the entry `name` to `to`/`to_name`, never replacing anything.
+    pub fn rename(&self, name: &OsStr, to: &ChangeDir, to_name: &OsStr) -> Result<(), RenameError> {
+        rename_noreplace(self.fd.as_fd(), name, to.fd.as_fd(), to_name).map_err(|e| match e {
+            Errno::XDEV => RenameError::CrossDevice,
+            Errno::EXIST | Errno::NOTEMPTY => RenameError::Exists,
+            Errno::INVAL => RenameError::Other(ToolError::invalid_argument(
+                "A folder can't be moved into itself.",
+            )),
+            other => RenameError::Other(change_error(other, "moving")),
+        })
+    }
+
+    /// Move the entry `name` to the system trash. Returns where it went.
+    pub fn trash(
+        &self,
+        name: &OsStr,
+        trash: &Trash,
+        stat: &EntryStat,
+    ) -> Result<PathBuf, ToolError> {
+        let name = name
+            .to_str()
+            .ok_or_else(|| ToolError::invalid_path("This name is not valid UTF-8."))?;
+        let went = trash.put(
+            self.fd.as_fd(),
+            name,
+            &self.path.join(name),
+            stat.identity.0,
+            stat.kind == EntryKind::Dir,
+        )?;
+        let _ = rustix::fs::fsync(&self.fd);
+        Ok(went)
+    }
+
+    /// Remove `name` and everything under it, for a copy this daemon made
+    /// and abandoned. Never used on the user's files.
+    pub fn remove_own(&self, name: &OsStr) {
+        match self.subdir(name) {
+            Ok(sub) => {
+                if let Ok(entries) = sub.entries() {
+                    for (child, _) in entries {
+                        sub.remove_own(&child);
+                    }
+                }
+                let _ = rustix::fs::unlinkat(&self.fd, name, AtFlags::REMOVEDIR);
+            }
+            Err(_) => {
+                let _ = rustix::fs::unlinkat(&self.fd, name, AtFlags::empty());
+            }
+        }
+    }
+
+    /// The device the directory is on.
+    pub fn device(&self) -> u64 {
+        self.dev
+    }
+}
+
+fn entry_stat(stat: &Stat) -> EntryStat {
+    let kind = match FileType::from_raw_mode(stat.st_mode) {
+        FileType::RegularFile => EntryKind::File,
+        FileType::Directory => EntryKind::Dir,
+        FileType::Symlink => EntryKind::Symlink,
+        _ => EntryKind::Other,
+    };
+    EntryStat {
+        kind,
+        size: stat.st_size as u64,
+        modified: stat.st_mtime as i64,
+        links: stat.st_nlink as u64,
+        mode: stat.st_mode as u32 & 0o7777,
+        foreign: stat.st_uid != rustix::process::geteuid().as_raw(),
+        readonly: kind == EntryKind::File && stat.st_mode as u32 & 0o222 == 0,
+        identity: (stat.st_dev as u64, stat.st_ino as u64),
+    }
+}
+
+/// Rename without replacing whatever is at the target:
+/// `renameat2(RENAME_NOREPLACE)` on Linux, `renameatx_np(RENAME_EXCL)` on
+/// macOS. On a Linux filesystem without it, look first; changes run one at
+/// a time, so only another program could slip in between.
+pub fn rename_noreplace<P: rustix::path::Arg + Copy, Q: rustix::path::Arg + Copy>(
+    from_dir: BorrowedFd<'_>,
+    from: P,
+    to_dir: BorrowedFd<'_>,
+    to: Q,
+) -> Result<(), Errno> {
+    match rustix::fs::renameat_with(from_dir, from, to_dir, to, RenameFlags::NOREPLACE) {
+        Err(Errno::INVAL | Errno::NOSYS) if cfg!(target_os = "linux") => {
+            match rustix::fs::statat(to_dir, to, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => Err(Errno::EXIST),
+                Err(Errno::NOENT) => rustix::fs::renameat(from_dir, from, to_dir, to),
+                Err(e) => Err(e),
+            }
+        }
+        other => other,
+    }
+}
+
+fn not_found() -> ToolError {
+    ToolError::new(ErrorCode::NotFound, "Nothing exists at this path.")
+}
+
+fn exists() -> ToolError {
+    ToolError::new(ErrorCode::Exists, "Something already exists at this path.")
+}
+
+fn too_large(size: u64, cap: u64) -> ToolError {
+    ToolError::new(
+        ErrorCode::TooLarge,
+        format!("The file is {size} bytes; files up to {cap} bytes can be changed."),
+    )
+}
+
+fn change_error(err: Errno, what: &str) -> ToolError {
+    match err {
+        Errno::NOENT => not_found(),
+        Errno::LOOP | Errno::MLINK => ToolError::denied("Symlinks are never followed."),
+        Errno::ACCESS | Errno::PERM | Errno::ROFS => {
+            ToolError::denied("The operating system denied the change.")
+        }
+        Errno::NOSPC | Errno::DQUOT => ToolError::internal("The disk is full."),
+        Errno::NAMETOOLONG => ToolError::invalid_path("The name is too long."),
+        Errno::NOTDIR => ToolError::new(
+            ErrorCode::NotADirectory,
+            "A part of the path is not a folder.",
+        ),
+        other => ToolError::internal(format!("{what}: {other}")),
     }
 }
 
@@ -405,6 +745,7 @@ mod tests {
             label: "Docs".into(),
             path: root_path,
             follow_symlinks: follow,
+            writable: false,
         })
         .unwrap();
         Fixture {
@@ -513,6 +854,49 @@ mod tests {
                 open(&f, "notes.md/x", s).unwrap_err().code,
                 ErrorCode::NotADirectory
             );
+        }
+    }
+
+    #[test]
+    fn change_dirs_never_follow_links() {
+        // Even a root that follows links for reads.
+        for follow in [false, true] {
+            let f = fixture(follow);
+            let deny = deny();
+            let policy = OpenPolicy {
+                deny: &deny,
+                allow_hardlinks: false,
+            };
+            for s in STRATEGIES {
+                let sub = f
+                    .root
+                    .change_dir_with(&RelPath::parse("sub").unwrap(), policy, s)
+                    .unwrap();
+                assert_eq!(sub.path, f.root.path.join("sub"));
+                for rel in ["escape_dir", "prefix_trick", "escape_dir/x", "notes.md"] {
+                    let err = f
+                        .root
+                        .change_dir_with(&RelPath::parse(rel).unwrap(), policy, s)
+                        .unwrap_err();
+                    assert!(
+                        matches!(
+                            err.code,
+                            ErrorCode::Denied | ErrorCode::NotADirectory | ErrorCode::OutsideRoot
+                        ),
+                        "{rel} with {s:?}, follow {follow}: {err:?}"
+                    );
+                }
+                // The entry itself is reported, never followed.
+                let top = f
+                    .root
+                    .change_dir_with(&RelPath::default(), policy, s)
+                    .unwrap();
+                let link = top.entry(OsStr::new("escape_dir")).unwrap().unwrap();
+                assert_eq!(link.kind, EntryKind::Symlink);
+                assert!(top.subdir(OsStr::new("escape_dir")).is_err());
+                let hard = top.entry(OsStr::new("hardlink.txt")).unwrap().unwrap();
+                assert_eq!(hard.links, 2);
+            }
         }
     }
 

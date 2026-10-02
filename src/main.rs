@@ -11,7 +11,7 @@ use serde_json::Value;
 use cww::config::{Config, DEFAULT_SERVER};
 use cww::control::{self, ControlRequest};
 use cww::paths::Paths;
-use cww::roots::{NewRoot, add_root, remove_root};
+use cww::roots::{NewRoot, add_root, remove_root, set_writable};
 use cww::{audit, auth, daemon, service};
 
 /// Chat with Work Local Agent.
@@ -109,17 +109,34 @@ enum RootsCommand {
         /// Follow symlinks that stay inside the folder.
         #[arg(long)]
         follow_symlinks: bool,
+        /// Allow changes in it from the start (see `allow-changes`).
+        #[arg(long)]
+        allow_changes: bool,
     },
     /// List shared folders.
     List,
     /// Stop sharing a folder (by ID, label or path).
     Remove { root: String },
+    /// Let Chat with Work change files in a shared folder: create, edit,
+    /// move and delete, each approved in Chat with Work, with old versions
+    /// and deleted files kept in the system trash.
+    AllowChanges { root: String },
+    /// Make a shared folder read-only again.
+    DenyChanges { root: String },
 }
 
 #[derive(Subcommand)]
 enum DebugCommand {
-    /// Confine this process as the daemon would, then try to read FILES.
-    Sandbox { files: Vec<PathBuf> },
+    /// Confine this process as the daemon would, then try to read FILES,
+    /// and to write each `--write` file directly (bypassing cww's checks).
+    Sandbox {
+        files: Vec<PathBuf>,
+        #[arg(long = "write")]
+        writes: Vec<PathBuf>,
+    },
+    /// Confine this process as the daemon would, then make one change with
+    /// a change tool, as the server would ask: TOOL and its JSON arguments.
+    Change { tool: String, arguments: String },
     /// Confine this process for a keychain-held key, then write, read and
     /// delete a test secret in the OS keychain.
     Keychain,
@@ -255,7 +272,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Debug {
-            command: DebugCommand::Sandbox { files },
+            command: DebugCommand::Sandbox { files, writes },
         } => {
             let status = daemon::confine_for_check(&paths, None)?;
             println!("sandbox: {}", serde_json::to_string(&status)?);
@@ -264,6 +281,24 @@ fn run(cli: Cli) -> Result<()> {
                     Ok(_) => println!("read {}", file.display()),
                     Err(e) => println!("refused {} ({e})", file.display()),
                 }
+            }
+            for file in writes {
+                match std::fs::write(&file, "probe") {
+                    Ok(()) => println!("wrote {}", file.display()),
+                    Err(e) => println!("refused writing {} ({e})", file.display()),
+                }
+            }
+        }
+        Command::Debug {
+            command: DebugCommand::Change { tool, arguments },
+        } => {
+            let status = daemon::confine_for_check(&paths, None)?;
+            println!("sandbox: {}", serde_json::to_string(&status)?);
+            let arguments: Value = serde_json::from_str(&arguments)
+                .map_err(|e| anyhow::anyhow!("parsing ARGUMENTS: {e}"))?;
+            match daemon::change_for_check(&paths, &tool, arguments)? {
+                Ok(result) => println!("changed {}", serde_json::to_string(&result)?),
+                Err(e) => println!("refused {}: {}", e.code.as_str(), e.message),
             }
         }
         Command::Daemon { command } => match command {
@@ -311,6 +346,7 @@ fn roots(paths: &Paths, command: RootsCommand) -> Result<()> {
             label,
             i_know,
             follow_symlinks,
+            allow_changes,
         } => {
             let root = add_root(
                 &mut config,
@@ -320,14 +356,20 @@ fn roots(paths: &Paths, command: RootsCommand) -> Result<()> {
                     label,
                     i_know,
                     follow_symlinks,
+                    writable: allow_changes,
                 },
             )?;
             config.save(paths)?;
             println!(
-                "Sharing {} as {} ({}).",
+                "Sharing {} as {} ({}){}.",
                 root.path.display(),
                 root.id,
-                root.label
+                root.label,
+                if root.writable {
+                    ", with changes allowed"
+                } else {
+                    ""
+                }
             );
             notify_daemon(paths, "");
         }
@@ -336,7 +378,17 @@ fn roots(paths: &Paths, command: RootsCommand) -> Result<()> {
                 println!("Nothing is shared. Add a folder with `cww roots add <path>`.");
             }
             for root in &config.roots {
-                println!("{:<24} {:<24} {}", root.id, root.label, root.path.display());
+                println!(
+                    "{:<24} {:<24} {:<10} {}",
+                    root.id,
+                    root.label,
+                    if root.writable {
+                        "changes"
+                    } else {
+                        "read-only"
+                    },
+                    root.path.display()
+                );
             }
         }
         RootsCommand::Remove { root } => {
@@ -349,7 +401,31 @@ fn roots(paths: &Paths, command: RootsCommand) -> Result<()> {
             );
             notify_daemon(paths, "");
         }
+        RootsCommand::AllowChanges { root } => allow_changes(paths, &mut config, &root, true)?,
+        RootsCommand::DenyChanges { root } => allow_changes(paths, &mut config, &root, false)?,
     }
+    Ok(())
+}
+
+/// `cww roots allow-changes` and `deny-changes`.
+fn allow_changes(paths: &Paths, config: &mut Config, which: &str, writable: bool) -> Result<()> {
+    let root = set_writable(config, which, writable)?;
+    config.save(paths)?;
+    if writable {
+        println!(
+            "Chat with Work can now change files in {} ({}). Each change asks you first in \
+             Chat with Work, and old versions and deleted files go to the system trash.",
+            root.label,
+            root.path.display()
+        );
+    } else {
+        println!(
+            "{} ({}) is read-only again.",
+            root.label,
+            root.path.display()
+        );
+    }
+    notify_daemon(paths, "");
     Ok(())
 }
 
@@ -646,6 +722,7 @@ fn offer_documents(paths: &Paths) -> Result<()> {
             label: Some("Documents".into()),
             i_know: false,
             follow_symlinks: false,
+            allow_changes: false,
         },
     )
 }

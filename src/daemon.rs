@@ -22,15 +22,17 @@ use crate::limits::Limiter;
 use crate::paths::Paths;
 use crate::policy::DEFAULT_DENY;
 use crate::reader::Reader;
-use crate::roots::{NewRoot, add_root, remove_root};
+use crate::roots::{NewRoot, add_root, remove_root, set_writable};
 use crate::status::{Changes, Connection, SharedStatus};
 use crate::tools::LocalFiles;
 use crate::tunnel::{Tunnel, TunnelExit, TunnelSettings};
+use crate::writer::Writer;
 
 struct Daemon {
     paths: Paths,
     config: Mutex<Config>,
     reader: Arc<Reader>,
+    writer: Arc<Writer>,
     limiter: Arc<Limiter>,
     audit: Arc<AuditLog>,
     paused: Arc<AtomicBool>,
@@ -120,6 +122,9 @@ pub fn run_foreground(paths: Paths, options: &Foreground) -> Result<()> {
     if sandboxed && !options.worker {
         return supervise_worker(options);
     }
+    // Trash records use local times; `time` only finds the offset while
+    // the process has one thread.
+    crate::trash::remember_local_offset();
     if sandboxed {
         confine(&config, &paths);
     } else {
@@ -149,6 +154,24 @@ pub fn confine_for_check(paths: &Paths, keychain: Option<bool>) -> Result<crate:
     Ok(crate::sandbox::status())
 }
 
+/// Make one change as the daemon would, for `cww debug change`, after
+/// [`confine_for_check`].
+pub fn change_for_check(
+    paths: &Paths,
+    tool: &str,
+    arguments: Value,
+) -> Result<Result<crate::writer::ChangeResult, crate::error::ToolError>> {
+    let mut config = Config::load(paths)?;
+    config.index.enabled = false;
+    let reader = Arc::new(Reader::new(&config, paths, Changes::default())?);
+    let writer = Writer::new(
+        reader,
+        Arc::new(Limiter::new(config.limits.clone())),
+        crate::trash::Trash::new(paths.home_trash.clone()),
+    );
+    Ok(crate::tools::run_change(&writer, tool, arguments))
+}
+
 /// Apply the sandbox for the configured roots. Runs before any thread
 /// starts: Landlock only confines the calling thread and its children.
 fn confine(config: &Config, paths: &Paths) {
@@ -163,8 +186,16 @@ fn confine(config: &Config, paths: &Paths) {
     }
     let keychain = crate::auth::secrets::SecretStore::for_config(config, paths)
         == crate::auth::secrets::SecretStore::Keyring;
+    // Folders that allow changes, and the trash their files go to: made
+    // now, since the sandbox won't let the daemon make them later.
+    let writable = writable_roots(config);
+    let trash = crate::trash::prepare(
+        &crate::trash::Trash::new(paths.home_trash.clone()),
+        &writable,
+    );
     let plan =
-        crate::sandbox::Plan::new(config.roots.iter().map(|r| r.path.clone()), paths, keychain);
+        crate::sandbox::Plan::new(config.roots.iter().map(|r| r.path.clone()), paths, keychain)
+            .with_changes(writable, trash);
     let status = crate::sandbox::confine(plan);
     match status.state {
         "enforced" => tracing::info!("sandbox: {} enforced", status.kind),
@@ -175,6 +206,16 @@ fn confine(config: &Config, paths: &Paths) {
             status.detail.map(|d| format!(" ({d})")).unwrap_or_default()
         ),
     }
+}
+
+/// The folders that allow changes.
+fn writable_roots(config: &Config) -> Vec<PathBuf> {
+    config
+        .roots
+        .iter()
+        .filter(|r| r.writable)
+        .map(|r| r.path.clone())
+        .collect()
 }
 
 /// Run the confined worker, starting it again whenever it asks to be (to
@@ -219,7 +260,10 @@ fn supervise_worker(options: &Foreground) -> Result<()> {
 /// `handle_signals` is set).
 pub async fn run(paths: Paths, shutdown: CancellationToken, handle_signals: bool) -> Result<()> {
     #[cfg(unix)]
-    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
+    {
+        let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
+        crate::writer::remember_umask(previous.bits() as u32);
+    }
     paths.ensure()?;
     let config = Config::load(&paths)?;
     let (events, _) = broadcast::channel(256);
@@ -234,11 +278,19 @@ pub async fn run(paths: Paths, shutdown: CancellationToken, handle_signals: bool
             .await
             .context("starting the reader")??
     };
+    let reader = Arc::new(reader);
+    let limiter = Arc::new(Limiter::new(config.limits.clone()));
+    let writer = Arc::new(Writer::new(
+        Arc::clone(&reader),
+        Arc::clone(&limiter),
+        crate::trash::Trash::new(paths.home_trash.clone()),
+    ));
     let daemon = Arc::new(Daemon {
-        limiter: Arc::new(Limiter::new(config.limits.clone())),
+        limiter,
+        writer,
         paused: Arc::new(AtomicBool::new(config.paused)),
         config: Mutex::new(config),
-        reader: Arc::new(reader),
+        reader,
         audit,
         status: SharedStatus::new(changes.clone()),
         tunnel_token: Mutex::new(shutdown.child_token()),
@@ -330,6 +382,7 @@ impl Daemon {
             let max_message_bytes = self.config.lock().await.limits.max_message_bytes;
             let files = LocalFiles::new(
                 Arc::clone(&self.reader),
+                Arc::clone(&self.writer),
                 Arc::clone(&self.limiter),
                 Arc::clone(&self.audit),
                 Arc::clone(&self.paused),
@@ -391,9 +444,10 @@ impl Daemon {
         let paths = self.paths.clone();
         let new = Config::load(&paths)?;
         let roots: Vec<std::path::PathBuf> = new.roots.iter().map(|r| r.path.clone()).collect();
-        if crate::sandbox::plan().is_some_and(|plan| !plan.covers(&roots)) {
-            // The kernel won't let this process read the new folder. Exit
-            // and let the supervisor start a worker whose sandbox covers it.
+        if crate::sandbox::plan().is_some_and(|plan| !plan.covers(&roots, &writable_roots(&new))) {
+            // The kernel won't let this process read the new folder, or
+            // its write rights don't match the folders that allow changes.
+            // Exit and let the supervisor start a worker whose sandbox fits.
             let mut entry = AuditEntry::event("restarting");
             entry.detail = Some("to confine the daemon to the new set of folders".into());
             self.audit.append(&entry);
@@ -407,9 +461,12 @@ impl Daemon {
         self.limiter.set_limits(new.limits.clone());
         self.paused.store(new.paused, Ordering::SeqCst);
         let mut config = self.config.lock().await;
+        // A new set of folders that allow changes changes the tools offered:
+        // reconnect, so the server lists them again.
         let pairing_changed = config.server != new.server
             || config.secret_store != new.secret_store
-            || config.proxy != new.proxy;
+            || config.proxy != new.proxy
+            || writable_roots(&config) != writable_roots(&new);
         *config = new;
         drop(config);
         if pairing_changed {
@@ -427,6 +484,7 @@ impl Daemon {
             label,
             follow_symlinks,
             i_know,
+            writable,
         } = new
         else {
             unreachable!("only called for roots_add");
@@ -441,11 +499,38 @@ impl Daemon {
                         label,
                         i_know,
                         follow_symlinks,
+                        writable,
                     },
                 )
             })
             .await?;
         let mut entry = AuditEntry::event("root_added");
+        entry.detail = Some(format!(
+            "{} ({}){}",
+            root.id,
+            root.label,
+            if root.writable {
+                ", changes allowed"
+            } else {
+                ""
+            }
+        ));
+        self.audit.append(&entry);
+        self.reload().await?;
+        Ok(json!({ "root": root }))
+    }
+
+    /// Allow or stop changes in a folder. Only this computer's user can:
+    /// the request comes over the control channel, never the tunnel.
+    async fn set_writable(&self, which: String, writable: bool) -> Result<Value> {
+        let root = self
+            .edit_config(move |config, _| set_writable(config, &which, writable))
+            .await?;
+        let mut entry = AuditEntry::event(if writable {
+            "root_changes_allowed"
+        } else {
+            "root_changes_stopped"
+        });
         entry.detail = Some(format!("{} ({})", root.id, root.label));
         self.audit.append(&entry);
         self.reload().await?;
@@ -779,6 +864,9 @@ impl ControlHandler for Daemon {
             }
             request @ ControlRequest::RootsAdd { .. } => self.add_root(request).await,
             ControlRequest::RootsRemove { root } => self.remove_root(root).await,
+            ControlRequest::RootsWritable { root, writable } => {
+                self.set_writable(root, writable).await
+            }
             ControlRequest::AuditTail { lines } => {
                 let path = self.audit.path().to_path_buf();
                 let n = lines.unwrap_or(50).min(1000);

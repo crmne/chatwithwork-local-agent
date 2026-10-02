@@ -24,7 +24,9 @@ pub mod service;
 pub mod status;
 pub mod tls;
 pub mod tools;
+pub mod trash;
 pub mod tui;
 pub mod tunnel;
 #[cfg(windows)]
 pub mod win;
+pub mod writer;

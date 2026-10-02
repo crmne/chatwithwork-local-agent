@@ -8,8 +8,10 @@
 //!
 //! - **Linux:** Landlock. The worker may read the shared folders and system
 //!   paths (`/etc`, `/usr`, `/lib`, `/nix/store`), and write only cww's own
-//!   directories. Landlock applies to the calling thread and its children,
-//!   so it is set up before the runtime starts any thread.
+//!   directories, the folders that allow changes (create, write, rename and
+//!   remove, never execute), and the trash directories their files go to.
+//!   Landlock applies to the calling thread and its children, so it is set
+//!   up before the runtime starts any thread.
 //! - **macOS:** Seatbelt (`sandbox_init`), with the same file rules plus the
 //!   Mach services the daemon needs: DNS, FSEvents, and the keychain when the
 //!   device key lives there.
@@ -18,7 +20,8 @@
 //! A sandbox can't be widened once applied, even across `exec`. So `cww
 //! daemon run` is a small unconfined supervisor that runs the confined
 //! daemon as a child and starts it again, with new rules, when a folder is
-//! shared that the current rules don't cover (exit code [`RESTART_CODE`]).
+//! shared that the current rules don't cover, or when the set of folders
+//! that allow changes changes (exit code [`RESTART_CODE`]).
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -35,6 +38,10 @@ pub const RESTART_CODE: i32 = 75;
 pub struct Plan {
     /// Shared folders: read only.
     pub roots: Vec<PathBuf>,
+    /// Shared folders that allow changes: read and write.
+    pub writable: Vec<PathBuf>,
+    /// The trash directories the writable folders' files go to: write.
+    pub trash: Vec<PathBuf>,
     /// cww's own directories: read and write.
     pub own: Vec<PathBuf>,
     /// The control socket, which the daemon binds and accepts on.
@@ -55,17 +62,35 @@ impl Plan {
         }
         Self {
             roots: roots.into_iter().collect(),
+            writable: Vec::new(),
+            trash: Vec::new(),
             own,
             socket: paths.socket_path(),
             keychain,
         }
     }
 
-    /// Whether every one of `roots` is readable under this plan.
-    pub fn covers(&self, roots: &[PathBuf]) -> bool {
-        roots
-            .iter()
-            .all(|root| self.roots.iter().any(|allowed| root.starts_with(allowed)))
+    /// Also allow changes in `writable`, whose files go to `trash`.
+    pub fn with_changes(mut self, writable: Vec<PathBuf>, trash: Vec<PathBuf>) -> Self {
+        self.writable = writable;
+        self.trash = trash;
+        self
+    }
+
+    /// Whether every one of `roots` is readable under this plan, and the
+    /// folders it lets the daemon change are exactly `writable`: a folder
+    /// that stopped allowing changes loses its write rights too.
+    pub fn covers(&self, roots: &[PathBuf], writable: &[PathBuf]) -> bool {
+        let mut want = writable.to_vec();
+        want.sort();
+        want.dedup();
+        let mut have = self.writable.clone();
+        have.sort();
+        have.dedup();
+        want == have
+            && roots
+                .iter()
+                .all(|root| self.roots.iter().any(|allowed| root.starts_with(allowed)))
     }
 }
 
@@ -177,6 +202,23 @@ mod sys {
         let all = AccessFs::from_all(abi);
         let read_data = AccessFs::ReadFile | AccessFs::ReadDir;
         let own = all & !AccessFs::Execute;
+        // Changes: make and replace files and folders, rename across
+        // folders (Refer) and remove. Never execute, make devices, FIFOs,
+        // sockets or symlinks, or use ioctls.
+        let change = AccessFs::WriteFile
+            | AccessFs::MakeReg
+            | AccessFs::MakeDir
+            | AccessFs::RemoveFile
+            | AccessFs::RemoveDir
+            | AccessFs::Refer
+            | AccessFs::Truncate;
+        // The trash only takes items in: a subset of a changeable folder's
+        // rights, as Landlock requires of a rename's destination.
+        let trash = AccessFs::WriteFile
+            | AccessFs::MakeReg
+            | AccessFs::MakeDir
+            | AccessFs::RemoveFile
+            | AccessFs::Refer;
         let system = existing(&[
             "/etc",
             "/usr",
@@ -200,6 +242,13 @@ mod sys {
             .and_then(|r| r.create())
             .and_then(|r| r.add_rules(path_beneath_rules(&system, read)))
             .and_then(|r| r.add_rules(path_beneath_rules(existing_paths(&plan.roots), read_data)))
+            .and_then(|r| {
+                r.add_rules(path_beneath_rules(
+                    existing_paths(&plan.writable),
+                    read_data | change,
+                ))
+            })
+            .and_then(|r| r.add_rules(path_beneath_rules(existing_paths(&plan.trash), trash)))
             .and_then(|r| r.add_rules(path_beneath_rules(existing_paths(&plan.own), own)))
             .and_then(|r| r.restrict_self())
             .map_err(|e| format!("{e}"))?;
@@ -313,6 +362,19 @@ mod sys {
         if !plan.roots.is_empty() {
             rules.push_str(&format!("(allow file-read*{})\n", subpaths(&plan.roots)));
         }
+        if !plan.writable.is_empty() {
+            rules.push_str(&format!(
+                "(allow file-read* file-write*{})\n",
+                subpaths(&plan.writable)
+            ));
+        }
+        if !plan.trash.is_empty() {
+            // Items are renamed into the trash; nothing there is read.
+            rules.push_str(&format!(
+                "(allow file-write-create{})\n",
+                subpaths(&plan.trash)
+            ));
+        }
         rules.push_str(&format!(
             "(allow file-read* file-write*{})\n",
             subpaths(&plan.own)
@@ -399,10 +461,27 @@ mod tests {
             roots: vec!["/home/u/Documents".into()],
             ..Plan::default()
         };
-        assert!(plan.covers(&["/home/u/Documents".into()]));
-        assert!(plan.covers(&["/home/u/Documents/Work".into()]));
-        assert!(!plan.covers(&["/home/u/Downloads".into()]));
-        assert!(!plan.covers(&["/home/u/Documents2".into()]));
+        assert!(plan.covers(&["/home/u/Documents".into()], &[]));
+        assert!(plan.covers(&["/home/u/Documents/Work".into()], &[]));
+        assert!(!plan.covers(&["/home/u/Downloads".into()], &[]));
+        assert!(!plan.covers(&["/home/u/Documents2".into()], &[]));
+    }
+
+    #[test]
+    fn plans_cover_exactly_the_folders_that_allow_changes() {
+        let docs = PathBuf::from("/home/u/Documents");
+        let plan = Plan {
+            roots: vec![docs.clone()],
+            ..Plan::default()
+        };
+        assert!(!plan.covers(std::slice::from_ref(&docs), std::slice::from_ref(&docs)));
+        let plan = plan.with_changes(
+            vec![docs.clone()],
+            vec!["/home/u/.local/share/Trash".into()],
+        );
+        assert!(plan.covers(std::slice::from_ref(&docs), std::slice::from_ref(&docs)));
+        // Stopping changes needs a new sandbox too.
+        assert!(!plan.covers(std::slice::from_ref(&docs), &[]));
     }
 
     #[cfg(target_os = "macos")]
@@ -410,12 +489,16 @@ mod tests {
     fn seatbelt_profile_quotes_paths() {
         let plan = Plan {
             roots: vec![r#"/Users/u/My "odd" folder"#.into()],
+            writable: vec!["/Users/u/Drafts".into()],
+            trash: vec!["/Users/u/.Trash".into()],
             own: vec!["/Users/u/.config/cww".into()],
             socket: "/Users/u/.local/state/cww/cww.sock".into(),
             keychain: true,
         };
         let profile = sys::profile(&plan);
         assert!(profile.contains(r#"(subpath "/Users/u/My \"odd\" folder")"#));
+        assert!(profile.contains(r#"(allow file-read* file-write* (subpath "/Users/u/Drafts"))"#));
+        assert!(profile.contains(r#"(subpath "/Users/u/.Trash"))"#));
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("com.apple.SecurityServer"));
     }

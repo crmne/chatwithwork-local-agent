@@ -74,6 +74,16 @@ pub enum ControlRequest {
         follow_symlinks: bool,
         #[serde(default)]
         i_know: bool,
+        /// Allow changes in it from the start.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        writable: bool,
+    },
+    /// Allow changes in a shared folder (by ID, label or path), or stop
+    /// them. The daemon restarts under a sandbox with write rights for
+    /// exactly the folders that allow changes.
+    RootsWritable {
+        root: String,
+        writable: bool,
     },
     /// Stop sharing a folder, by ID, label or path.
     RootsRemove {
@@ -864,6 +874,7 @@ mod tests {
                 label: Some("X".into()),
                 follow_symlinks: false,
                 i_know: false,
+                writable: false,
             }
         );
         let sub: ControlRequest = serde_json::from_str(r#"{"cmd":"subscribe"}"#).unwrap();

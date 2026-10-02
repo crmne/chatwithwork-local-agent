@@ -215,6 +215,7 @@ mod tests {
             label: "Docs".into(),
             path: base,
             follow_symlinks: false,
+            writable: false,
         })
         .unwrap();
         let deny = Arc::new(DenyList::new(Vec::<String>::new()).unwrap());

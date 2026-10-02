@@ -303,6 +303,7 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
                 label: label.clone(),
                 follow_symlinks: false,
                 i_know: *i_know,
+                writable: false,
             };
             if let Some(v) = control::request(&socket, request)? {
                 let root = &v["root"];
@@ -324,6 +325,7 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
                     label: label.clone(),
                     i_know: *i_know,
                     follow_symlinks: false,
+                    writable: false,
                 },
             )?;
             config.save(paths)?;

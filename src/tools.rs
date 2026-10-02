@@ -1,10 +1,16 @@
-//! The MCP server: exactly four read-only tools, and nothing else.
+//! The MCP server: four read-only tools, and the change tools when a shared
+//! folder allows changes.
 //!
-//! `roots`, `search`, `list` and `read`, all annotated `readOnlyHint: true`
-//! and `openWorldHint: false`. There is no write, exec, or network code
-//! behind any of them. Every call passes, in order: pause check, rate limit,
-//! argument validation, then the reader (path parsing, root lookup, deny
-//! list, safe open), and is appended to the audit log whatever the outcome.
+//! `roots`, `search`, `list` and `read` are annotated `readOnlyHint: true`
+//! and `openWorldHint: false`, with no write, exec, or network code behind
+//! them. `create`, `write`, `edit`, `mkdir`, `move` and `delete` are listed
+//! only while at least one folder allows changes (the user's choice, made on
+//! this computer); they are annotated `readOnlyHint: false`, with
+//! `destructiveHint: true` for the ones that can replace or remove
+//! something, and run in the writer (see `crate::writer`). Every call
+//! passes, in order: pause check, rate limit, argument validation, then the
+//! reader or the writer (path parsing, root lookup, deny list, safe open),
+//! and is appended to the audit log whatever the outcome.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -29,12 +35,24 @@ use crate::limits::Limiter;
 use crate::reader::{
     ListRequest, ListResponse, ReadRequest, ReadResponse, Reader, SearchRequest, SearchResponse,
 };
+use crate::writer::{
+    ChangeResult, CreateRequest, DeleteRequest, EditRequest, MkdirRequest, MoveRequest,
+    WriteRequest, Writer,
+};
 
 /// Request `_meta` key carrying the Chat with Work chat ID, used for the
 /// per-chat read budget and the audit log.
 pub const CHAT_ID_META: &str = "com.chatwithwork/chatId";
 
-pub const TOOL_NAMES: [&str; 4] = ["roots", "search", "list", "read"];
+/// Tool `_meta` key: the call is a plain (non-destructive) write when every
+/// argument named here has the value given. A missing argument counts as
+/// its default. See PROTOCOL.md.
+pub const WRITE_WHEN_META: &str = "com.chatwithwork/writeWhen";
+
+pub const READ_TOOLS: [&str; 4] = ["roots", "search", "list", "read"];
+
+/// Offered only while a shared folder allows changes.
+pub const CHANGE_TOOLS: [&str; 6] = ["create", "write", "edit", "mkdir", "move", "delete"];
 
 /// Headroom kept below the message cap for the JSON-RPC envelope.
 const ENVELOPE_HEADROOM: usize = 2048;
@@ -46,6 +64,7 @@ pub struct LocalFiles {
 
 struct Inner {
     reader: Arc<Reader>,
+    writer: Arc<Writer>,
     limiter: Arc<Limiter>,
     audit: Arc<AuditLog>,
     paused: Arc<AtomicBool>,
@@ -55,6 +74,7 @@ struct Inner {
 impl LocalFiles {
     pub fn new(
         reader: Arc<Reader>,
+        writer: Arc<Writer>,
         limiter: Arc<Limiter>,
         audit: Arc<AuditLog>,
         paused: Arc<AtomicBool>,
@@ -63,6 +83,7 @@ impl LocalFiles {
         Self {
             inner: Arc::new(Inner {
                 reader,
+                writer,
                 limiter,
                 audit,
                 paused,
@@ -79,7 +100,9 @@ impl LocalFiles {
         chat_id: Option<String>,
         request_id: String,
     ) -> Option<CallToolResult> {
-        if !TOOL_NAMES.contains(&name) {
+        let known = READ_TOOLS.contains(&name)
+            || (CHANGE_TOOLS.contains(&name) && self.inner.writer.enabled());
+        if !known {
             let mut entry = AuditEntry::event("tool");
             entry.tool = Some(name.chars().take(64).collect());
             entry.chat_id = chat_id;
@@ -94,10 +117,16 @@ impl LocalFiles {
         entry.tool = Some(name.to_string());
         entry.chat_id = chat_id.clone();
         entry.request_id = Some(request_id);
-        entry.path = args
-            .get("path")
-            .and_then(Value::as_str)
-            .map(|s| s.chars().take(512).collect());
+        let text = |key: &str| {
+            args.get(key)
+                .and_then(Value::as_str)
+                .map(|s| s.chars().take(512).collect::<String>())
+        };
+        entry.path = text("path").or_else(|| text("from"));
+        entry.to = text("to");
+        if args.get("dry_run") == Some(&Value::Bool(true)) {
+            entry.dry_run = Some(true);
+        }
         entry.query = args
             .get("query")
             .and_then(Value::as_str)
@@ -107,6 +136,15 @@ impl LocalFiles {
         let outcome = self.run(name, args, chat_id.as_deref().unwrap_or("")).await;
         let result = match outcome {
             Ok(output) => {
+                if let Output::Change(change) = &output {
+                    entry.effect = Some(change.effect.as_str().into());
+                    entry.written = (change.written > 0).then_some(change.written);
+                    entry.trash = change.trashed_to.as_ref().map(|p| p.display().to_string());
+                    if change.from.is_some() {
+                        entry.path = change.from.clone();
+                        entry.to = Some(change.path.clone());
+                    }
+                }
                 let (result, bytes, results) = output.into_result(self.budget());
                 entry.decision = Some(Decision::Allowed);
                 entry.bytes = Some(bytes);
@@ -176,8 +214,35 @@ impl LocalFiles {
                     .record_read(chat, resp.text.chars().count());
                 Ok(Output::Read(resp))
             }
-            _ => unreachable!("checked against TOOL_NAMES"),
+            change if CHANGE_TOOLS.contains(&change) => {
+                let writer = Arc::clone(&self.inner.writer);
+                let name = change.to_string();
+                blocking(move || run_change(&writer, &name, args))
+                    .await
+                    .map(Output::Change)
+            }
+            _ => unreachable!("checked against the tool names"),
         }
+    }
+
+    /// The tools offered right now.
+    pub fn tools(&self) -> Vec<Tool> {
+        tools(self.inner.writer.enabled())
+    }
+}
+
+/// Run the change tool `name` with `args` in `writer`.
+pub fn run_change(writer: &Writer, name: &str, args: Value) -> Result<ChangeResult, ToolError> {
+    match name {
+        "create" => writer.create(&parse_args::<CreateRequest>(args)?),
+        "write" => writer.write(&parse_args::<WriteRequest>(args)?),
+        "edit" => writer.edit(&parse_args::<EditRequest>(args)?),
+        "mkdir" => writer.mkdir(&parse_args::<MkdirRequest>(args)?),
+        "move" => writer.move_entry(&parse_args::<MoveRequest>(args)?),
+        "delete" => writer.delete(&parse_args::<DeleteRequest>(args)?),
+        other => Err(ToolError::invalid_argument(format!(
+            "{other:?} is not a change tool"
+        ))),
     }
 }
 
@@ -191,6 +256,7 @@ enum Output {
     /// The page, and the offset it starts at.
     List(ListResponse, usize),
     Read(ReadResponse),
+    Change(ChangeResult),
 }
 
 impl Output {
@@ -220,6 +286,10 @@ impl Output {
                 resp.next_cursor = Some((start + keep).to_string());
             },
             Output::Read(resp) => {
+                let (r, b) = success(&resp);
+                (r, b, None)
+            }
+            Output::Change(resp) => {
                 let (r, b) = success(&resp);
                 (r, b, None)
             }
@@ -304,7 +374,188 @@ fn tool(name: &'static str, title: &str, description: &'static str, input: Value
     )
 }
 
-pub fn tools() -> Vec<Tool> {
+/// A tool that changes files: never read-only, never open-world.
+fn change_tool(
+    name: &'static str,
+    title: &str,
+    description: &'static str,
+    input: Value,
+    destructive: bool,
+    idempotent: bool,
+    write_when: Option<Value>,
+) -> Tool {
+    let mut tool = Tool::new(
+        Cow::Borrowed(name),
+        Cow::Borrowed(description),
+        schema(input),
+    )
+    .with_title(title)
+    .annotate(
+        ToolAnnotations::new()
+            .read_only(false)
+            .destructive(destructive)
+            .idempotent(idempotent)
+            .open_world(false),
+    );
+    if let Some(when) = write_when {
+        let mut meta = JsonObject::new();
+        meta.insert(WRITE_WHEN_META.into(), when);
+        tool = tool.with_meta(rmcp::model::MetaObject(meta));
+    }
+    tool
+}
+
+const DRY_RUN: &str = "Check the change and describe it without making it.";
+
+/// The change tools, in the order they are listed.
+pub fn change_tools() -> Vec<Tool> {
+    vec![
+        change_tool(
+            "create",
+            "Create a local file",
+            "Create a new text file in a shared folder that allows changes (`writable: true` in \
+             `roots`). Fails if anything is already at the path, and the folder it goes in \
+             must exist (see `mkdir`). For Word and Excel files use `create_document`. \
+             Programs, scripts that run when opened, and shortcuts are never created. The \
+             person approves every change.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "`<root_id>:relative/path` of the new file." },
+                    "content": { "type": "string", "description": "The file's text (UTF-8)." },
+                    "dry_run": { "type": "boolean", "description": DRY_RUN }
+                },
+                "required": ["path", "content"],
+                "additionalProperties": false
+            }),
+            false,
+            false,
+            None,
+        ),
+        change_tool(
+            "write",
+            "Write a local file",
+            "Replace a text file's whole content (`mode: \"replace\"`, the default) or add text \
+             at its end (`mode: \"append\"`), in a shared folder that allows changes. Creates \
+             the file if it doesn't exist. The previous version goes to the system trash on \
+             the person's computer. Office documents, PDFs and other binary files can't be \
+             written as text. `expected_sha256` makes the call fail if the file's current \
+             SHA-256 (as a dry run reports it) is different.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "`<root_id>:relative/path` of the file." },
+                    "content": { "type": "string", "description": "The new text, or the text to add." },
+                    "mode": { "type": "string", "enum": ["replace", "append"], "description": "Default `replace`." },
+                    "expected_sha256": { "type": "string", "description": "Only change the file if its current content has this SHA-256 (hex)." },
+                    "dry_run": { "type": "boolean", "description": DRY_RUN }
+                },
+                "required": ["path", "content"],
+                "additionalProperties": false
+            }),
+            true,
+            false,
+            Some(json!({ "mode": "append" })),
+        ),
+        change_tool(
+            "edit",
+            "Edit a local file",
+            "Replace one exact span of a text file in a shared folder that allows changes: \
+             `old_text` must appear exactly once in the file (quote it exactly, with enough \
+             surrounding text to be unique) and becomes `new_text`. The previous version goes \
+             to the system trash on the person's computer.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "`<root_id>:relative/path` of the file." },
+                    "old_text": { "type": "string", "description": "The exact text to replace; it must appear once." },
+                    "new_text": { "type": "string", "description": "What replaces it." },
+                    "expected_sha256": { "type": "string", "description": "Only change the file if its current content has this SHA-256 (hex)." },
+                    "dry_run": { "type": "boolean", "description": DRY_RUN }
+                },
+                "required": ["path", "old_text", "new_text"],
+                "additionalProperties": false
+            }),
+            false,
+            false,
+            None,
+        ),
+        change_tool(
+            "mkdir",
+            "Create a local folder",
+            "Create a folder in a shared folder that allows changes. With `parents: true`, also \
+             create the missing folders on the way. A folder that already exists is left as \
+             it is.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "`<root_id>:relative/path` of the folder." },
+                    "parents": { "type": "boolean", "description": "Create missing parent folders too." },
+                    "dry_run": { "type": "boolean", "description": DRY_RUN }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            false,
+            true,
+            None,
+        ),
+        change_tool(
+            "move",
+            "Move a local file",
+            "Move or rename a file or folder, within a shared folder or between two that allow \
+             changes. Fails if something is already at `to`, unless `replace: true`, which \
+             moves that file to the system trash on the person's computer first (a file can \
+             only replace a file).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "`<root_id>:relative/path` to move." },
+                    "to": { "type": "string", "description": "`<root_id>:relative/path` it moves to, name included." },
+                    "replace": { "type": "boolean", "description": "Move a file already at `to` to the trash first. Default false." },
+                    "dry_run": { "type": "boolean", "description": DRY_RUN }
+                },
+                "required": ["from", "to"],
+                "additionalProperties": false
+            }),
+            true,
+            false,
+            Some(json!({ "replace": false })),
+        ),
+        change_tool(
+            "delete",
+            "Delete a local file",
+            "Move a file or folder in a shared folder that allows changes to the system trash \
+             on the person's computer (the Trash on macOS, the Recycle Bin on Windows, the \
+             desktop's trash on Linux), where they can restore it. Nothing is deleted for \
+             good.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "`<root_id>:relative/path` to move to the trash." },
+                    "dry_run": { "type": "boolean", "description": DRY_RUN }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            true,
+            false,
+            None,
+        ),
+    ]
+}
+
+/// The tools to offer: the read-only four, then the change tools when
+/// `changes` (a shared folder allows them).
+pub fn tools(changes: bool) -> Vec<Tool> {
+    let mut all = read_tools();
+    if changes {
+        all.extend(change_tools());
+    }
+    all
+}
+
+fn read_tools() -> Vec<Tool> {
     vec![
         tool(
             "roots",
@@ -370,11 +621,18 @@ pub fn tools() -> Vec<Tool> {
 
 impl ServerHandler for LocalFiles {
     fn get_info(&self) -> ServerConfig {
+        let instructions = if self.inner.writer.enabled() {
+            "Access to folders the user shared from their computer. Call `roots` first. Paths \
+             are always `<root_id>:relative/path`; absolute paths are refused. Folders with \
+             `writable: true` also take changes (`create`, `write`, `edit`, `mkdir`, `move`, \
+             `delete`); the others are read-only. Old versions and deleted files go to the \
+             system trash on the computer."
+        } else {
+            "Read-only access to folders the user shared from their computer. Call `roots` \
+             first. Paths are always `<root_id>:relative/path`; absolute paths are refused."
+        };
         let mut info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "Read-only access to folders the user shared from their computer. Call `roots` \
-                 first. Paths are always `<root_id>:relative/path`; absolute paths are refused.",
-            );
+            .with_instructions(instructions);
         info.server_info = Implementation::new("cww", env!("CARGO_PKG_VERSION"));
         info
     }
@@ -420,7 +678,7 @@ impl ServerHandler for LocalFiles {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(tools()))
+        Ok(ListToolsResult::with_all_items(self.tools()))
     }
 
     async fn call_tool(

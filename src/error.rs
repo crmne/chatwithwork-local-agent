@@ -30,6 +30,17 @@ pub enum ErrorCode {
     RateLimited,
     /// The user paused the agent.
     Paused,
+    /// A change in a shared folder that doesn't allow changes.
+    NotWritable,
+    /// A change would overwrite something that is already there.
+    Exists,
+    /// A kind of file the daemon never changes: executables, launchers,
+    /// documents it can't write whole, or a binary file as text.
+    NotChangeable,
+    /// The system trash can't take the old version, so nothing changed.
+    TrashUnavailable,
+    /// The file changed since the caller looked at it.
+    Conflict,
     Internal,
 }
 
@@ -48,6 +59,11 @@ impl ErrorCode {
             Self::Unsupported => "unsupported",
             Self::RateLimited => "rate_limited",
             Self::Paused => "paused",
+            Self::NotWritable => "not_writable",
+            Self::Exists => "exists",
+            Self::NotChangeable => "not_changeable",
+            Self::TrashUnavailable => "trash_unavailable",
+            Self::Conflict => "conflict",
             Self::Internal => "internal",
         }
     }
@@ -63,6 +79,8 @@ impl ErrorCode {
                 | Self::Denied
                 | Self::RateLimited
                 | Self::Paused
+                | Self::NotWritable
+                | Self::NotChangeable
         )
     }
 }

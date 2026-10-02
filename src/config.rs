@@ -83,9 +83,15 @@ pub struct Root {
     /// Absolute, canonical path. Never sent to the server.
     pub path: PathBuf,
     /// Follow symlinks that stay inside the root. Off by default. Links that
-    /// leave the root are refused either way.
+    /// leave the root are refused either way. Changes never follow them.
     #[serde(default)]
     pub follow_symlinks: bool,
+    /// Allow changes: creating, editing, moving and deleting files here,
+    /// each approved in Chat with Work, with old versions kept in the
+    /// system trash. Off by default, and only ever turned on here or from
+    /// this computer's apps, never by the server.
+    #[serde(default)]
+    pub writable: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -125,6 +131,17 @@ pub struct Limits {
     pub max_message_bytes: usize,
     /// Time budget for the live grep fallback, in milliseconds.
     pub grep_timeout_ms: u64,
+    /// Changes (create, write, edit, mkdir, move, delete) accepted per
+    /// rolling minute, across all chats.
+    pub changes_per_minute: u32,
+    /// Changes accepted per rolling day.
+    pub changes_per_day: u32,
+    /// Bytes changes may write per rolling hour (new contents and copies).
+    pub change_bytes_per_hour: u64,
+    /// Largest file a change creates, edits or copies, in bytes.
+    pub max_change_file_bytes: u64,
+    /// Most files and folders one move or delete of a folder may carry.
+    pub max_change_entries: usize,
 }
 
 impl Default for Limits {
@@ -141,6 +158,11 @@ impl Default for Limits {
             max_index_file_bytes: 32 * 1024 * 1024,
             max_message_bytes: 256 * 1024,
             grep_timeout_ms: 5_000,
+            changes_per_minute: 30,
+            changes_per_day: 500,
+            change_bytes_per_hour: 50 * 1024 * 1024,
+            max_change_file_bytes: 10 * 1024 * 1024,
+            max_change_entries: 1_000,
         }
     }
 }
@@ -207,11 +229,20 @@ mod tests {
             label: "Docs".into(),
             path: "/tmp/docs".into(),
             follow_symlinks: false,
+            writable: true,
         });
         config.deny.extra.push("*.secret".into());
         config.proxy = Some("http://proxy.example:3128".into());
         config.save(&paths).unwrap();
         assert_eq!(Config::load(&paths).unwrap(), config);
+    }
+
+    #[test]
+    fn folders_are_read_only_unless_they_say_otherwise() {
+        let config: Config =
+            toml::from_str("[[roots]]\nid = \"docs\"\nlabel = \"Docs\"\npath = \"/tmp/docs\"\n")
+                .unwrap();
+        assert!(!config.roots[0].writable);
     }
 
     #[test]

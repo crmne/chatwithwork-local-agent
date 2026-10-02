@@ -12,6 +12,7 @@ use crate::error::{ErrorCode, ToolError};
 
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3600);
+const DAY: Duration = Duration::from_secs(24 * 3600);
 /// Chats tracked for per-chat budgets; the oldest are forgotten first.
 const MAX_TRACKED_CHATS: usize = 1024;
 
@@ -20,6 +21,8 @@ struct Windows {
     calls: VecDeque<Instant>,
     reads: VecDeque<(Instant, usize)>,
     chat_reads: HashMap<String, VecDeque<(Instant, usize)>>,
+    /// Changes made, with the bytes each wrote.
+    changes: VecDeque<(Instant, u64)>,
 }
 
 pub struct Limiter {
@@ -110,6 +113,59 @@ impl Limiter {
     }
 }
 
+impl Limiter {
+    /// Count one change that will write `bytes`, against the change budgets
+    /// (separate from the read budgets). Refused when any is used up.
+    pub fn check_change(&self, bytes: u64) -> Result<(), ToolError> {
+        self.check_change_at(bytes, Instant::now())
+    }
+
+    fn check_change_at(&self, bytes: u64, now: Instant) -> Result<(), ToolError> {
+        let limits = self.limits.lock().expect("limits").clone();
+        let mut w = self.windows.lock().expect("windows");
+        prune(&mut w.changes, now, DAY, |(t, _)| *t);
+        let within = |window: Duration| {
+            w.changes
+                .iter()
+                .filter(move |(t, _)| now.duration_since(*t) < window)
+        };
+        let last_minute = within(MINUTE).count();
+        let last_day = w.changes.len();
+        let last_hour_bytes: u64 = within(HOUR).map(|(_, b)| b).sum();
+        if last_minute >= limits.changes_per_minute as usize {
+            return Err(ToolError::new(
+                ErrorCode::RateLimited,
+                format!(
+                    "This computer allows {} changes a minute. Try again shortly.",
+                    limits.changes_per_minute
+                ),
+            ));
+        }
+        if last_day >= limits.changes_per_day as usize {
+            return Err(ToolError::new(
+                ErrorCode::RateLimited,
+                format!(
+                    "This computer allows {} changes a day, and they are used up. Try again \
+                     later.",
+                    limits.changes_per_day
+                ),
+            ));
+        }
+        if last_hour_bytes.saturating_add(bytes) > limits.change_bytes_per_hour {
+            return Err(ToolError::new(
+                ErrorCode::RateLimited,
+                format!(
+                    "This computer allows changes to write {} MB an hour, and this one would go \
+                     over. Try again later.",
+                    limits.change_bytes_per_hour / (1024 * 1024)
+                ),
+            ));
+        }
+        w.changes.push_back((now, bytes));
+        Ok(())
+    }
+}
+
 fn prune<T>(q: &mut VecDeque<T>, now: Instant, window: Duration, at: impl Fn(&T) -> Instant) {
     while q
         .front()
@@ -145,6 +201,36 @@ mod tests {
             ErrorCode::RateLimited
         );
         l.check_call_at(t0 + MINUTE).unwrap();
+    }
+
+    #[test]
+    fn budgets_changes_apart_from_reads() {
+        let l = Limiter::new(Limits {
+            changes_per_minute: 2,
+            changes_per_day: 3,
+            change_bytes_per_hour: 100,
+            ..limits()
+        });
+        let t0 = Instant::now();
+        l.check_change_at(10, t0).unwrap();
+        l.check_change_at(10, t0).unwrap();
+        let err = l.check_change_at(10, t0).unwrap_err();
+        assert_eq!(err.code, ErrorCode::RateLimited);
+        assert!(
+            err.message.contains("2 changes a minute"),
+            "{}",
+            err.message
+        );
+        // Too many bytes for the hour.
+        let err = l.check_change_at(81, t0 + MINUTE).unwrap_err();
+        assert!(err.message.contains("an hour"), "{}", err.message);
+        l.check_change_at(80, t0 + MINUTE).unwrap();
+        // Three a day.
+        let err = l.check_change_at(0, t0 + HOUR).unwrap_err();
+        assert!(err.message.contains("3 changes a day"), "{}", err.message);
+        l.check_change_at(0, t0 + DAY).unwrap();
+        // Reads are a separate budget.
+        assert_eq!(l.read_allowance_at("a", t0).unwrap(), 100);
     }
 
     #[test]
