@@ -238,7 +238,8 @@ pub fn canned_stream(activity: u64, answer: u64) -> Vec<(Duration, Step)> {
     let ms = Duration::from_millis;
     let mut steps = vec![
         (
-            ms(400),
+            // Long enough to see "Thinking" shimmer, as a model takes.
+            ms(2500),
             Step::Activity {
                 id: activity,
                 pending: true,
