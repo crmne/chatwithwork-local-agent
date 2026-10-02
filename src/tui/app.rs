@@ -113,6 +113,22 @@ pub struct Offline {
     pub audit_file: Option<String>,
 }
 
+/// The deny list in effect, as the daemon (or `config.toml`) says it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct DenyList {
+    /// The built-in patterns still in effect.
+    pub builtin: Vec<String>,
+    /// Patterns added in `config.toml`.
+    pub extra: Vec<String>,
+    /// Built-in patterns dropped in `config.toml`.
+    pub removed: Vec<String>,
+    /// The Local Agent's own folders.
+    pub own_dirs: Vec<String>,
+    pub allow_hardlinks: bool,
+    pub config_file: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Suggestion {
@@ -184,6 +200,7 @@ pub enum View {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Folders,
+    Privacy,
     Activity,
     Account,
     General,
@@ -191,11 +208,18 @@ pub enum Page {
 
 impl Page {
     /// In the order the settings list them.
-    pub const ALL: [Page; 4] = [Page::Folders, Page::Activity, Page::Account, Page::General];
+    pub const ALL: [Page; 5] = [
+        Page::Folders,
+        Page::Privacy,
+        Page::Activity,
+        Page::Account,
+        Page::General,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Page::Folders => "Shared folders",
+            Page::Privacy => "Always private",
             Page::Activity => "Activity",
             Page::Account => "Account",
             Page::General => "General",
@@ -207,6 +231,10 @@ impl Page {
             Page::Folders => {
                 "Chat with Work can search and read the files in these folders, and nothing \
                  else on this computer."
+            }
+            Page::Privacy => {
+                "These files are never shared, even inside a shared folder. Chat with Work \
+                 can't change this list."
             }
             Page::Activity => {
                 "Every request from Chat with Work, as logged on this computer. The log never \
@@ -301,6 +329,8 @@ pub enum DaemonCommand {
     InstallService,
     /// `cww logout`: forget the pairing.
     Logout,
+    /// Read the deny list in effect.
+    LoadDeny,
 }
 
 /// A pairing started from the TUI.
@@ -438,6 +468,8 @@ pub enum DaemonMsg {
     Audit(Box<AuditEntry>),
     AuditHistory(Vec<AuditEntry>),
     Suggestions(Vec<Suggestion>),
+    /// The deny list in effect, or why it can't be read.
+    Deny(Result<DenyList, String>),
     /// The subscription ended: the daemon stopped.
     Lost,
     Pairing(PairingMsg),
@@ -1156,6 +1188,8 @@ pub struct App {
     /// Oldest first.
     pub audit: Vec<AuditEntry>,
     pub suggestions: Vec<Suggestion>,
+    /// The deny list, once read for its page.
+    pub deny: Option<Result<DenyList, String>>,
     pub view: View,
     pub focus: Focus,
     pub selected_root: usize,
@@ -1163,6 +1197,8 @@ pub struct App {
     pub log_scroll: usize,
     /// The selected page of the web's settings, on the Account page.
     pub selected_link: usize,
+    /// Lines the Always private page is scrolled down by.
+    pub page_scroll: usize,
     pub modal: Option<Modal>,
     pub notice: Option<Notice>,
     pub pairing: Option<Pairing>,
@@ -1176,6 +1212,9 @@ pub struct App {
     pub quit_armed: bool,
     /// What the last frame drew where, for the mouse.
     pub hits: Hits,
+    /// Effects to run after the message at hand, such as reading what a
+    /// page shows when it opens.
+    later: Vec<Effect>,
 }
 
 impl App {
@@ -1184,11 +1223,13 @@ impl App {
             daemon: Daemon::Unknown,
             audit: Vec::new(),
             suggestions: Vec::new(),
+            deny: None,
             view: View::Chat,
             focus: Focus::Chats,
             selected_root: 0,
             log_scroll: 0,
             selected_link: 0,
+            page_scroll: 0,
             modal: None,
             notice: None,
             pairing: None,
@@ -1198,6 +1239,7 @@ impl App {
             quit: false,
             quit_armed: false,
             hits: Hits::default(),
+            later: Vec::new(),
         }
     }
 
@@ -1213,6 +1255,12 @@ impl App {
     }
 
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        let mut effects = self.handle(msg);
+        effects.append(&mut self.later);
+        effects
+    }
+
+    fn handle(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Key(key) => self.key(key),
             Msg::Mouse(event) => self.mouse(event),
@@ -1297,10 +1345,15 @@ impl App {
         }
     }
 
-    /// Open the settings on `page`.
+    /// Open the settings on `page`. The deny list is read each time its
+    /// page opens, since only `config.toml` changes it.
     fn settings(&mut self, page: Page) {
         if !matches!(self.view, View::Settings(_)) {
             self.log_scroll = 0;
+        }
+        if page == Page::Privacy && self.view != View::Settings(Page::Privacy) {
+            self.later.push(Effect::Daemon(DaemonCommand::LoadDeny));
+            self.page_scroll = 0;
         }
         self.view = View::Settings(page);
         self.chat.search = None;
@@ -1437,6 +1490,14 @@ impl App {
             (Page::Folders, KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete) => {
                 self.confirm_remove()
             }
+            (Page::Privacy, KeyCode::Up | KeyCode::Char('k')) => {
+                self.page_scroll = self.page_scroll.saturating_sub(1);
+            }
+            (Page::Privacy, KeyCode::Down | KeyCode::Char('j')) => self.page_scroll += 1,
+            (Page::Privacy, KeyCode::PageUp) => {
+                self.page_scroll = self.page_scroll.saturating_sub(10);
+            }
+            (Page::Privacy, KeyCode::PageDown) => self.page_scroll += 10,
             (Page::Activity, KeyCode::Up | KeyCode::Char('k')) => self.scroll_log(3),
             (Page::Activity, KeyCode::Down | KeyCode::Char('j')) => self.scroll_log(-3),
             (Page::Activity, KeyCode::PageUp) => self.scroll_log(10),
@@ -3103,6 +3164,7 @@ impl App {
                 self.audit.extend(live);
             }
             DaemonMsg::Suggestions(suggestions) => self.suggestions = suggestions,
+            DaemonMsg::Deny(deny) => self.deny = Some(deny),
             DaemonMsg::Lost => {
                 self.daemon = Daemon::Unknown;
                 self.notice(Signal::Attention, DAEMON_STOPPED);

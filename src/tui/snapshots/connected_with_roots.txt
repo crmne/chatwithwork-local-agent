@@ -4,10 +4,10 @@
                                │  and nothing else on this computer.
   SETTINGS                     │
  ▌ Shared folders              │  ▌● Work docs                               Indexed · 1,532 files
-   Activity                    │     /home/carmine/Work docs · work-docs:
-   Account                     │   ⠋ Projects                                       Indexing · 214
-   General                     │     /home/carmine/Projects · projects:
-                               │
+   Always private              │     /home/carmine/Work docs · work-docs:
+   Activity                    │   ⠋ Projects                                       Indexing · 214
+   Account                     │     /home/carmine/Projects · projects:
+   General                     │
                                │  ↑↓ select   a share a folder   r rename   d stop sharing
                                │
                                │

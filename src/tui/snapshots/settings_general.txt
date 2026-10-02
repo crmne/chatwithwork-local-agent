@@ -4,10 +4,10 @@
                                │
   SETTINGS                     │  Local Agent     ● Running · cww 0.1.0
    Shared folders              │  Sharing         Answering Chat with Work
-   Activity                    │  Configuration   /srv/cww/config.toml
-   Account                     │  Activity log    /srv/cww/audit.jsonl
- ▌ General                     │
-                               │  p pause sharing   r look again
+   Always private              │  Configuration   /srv/cww/config.toml
+   Activity                    │  Activity log    /srv/cww/audit.jsonl
+   Account                     │
+ ▌ General                     │  p pause sharing   r look again
                                │
                                │
                                │

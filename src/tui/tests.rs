@@ -265,7 +265,7 @@ fn snapshot_settings_account_and_general() {
     let mut app = app();
     chats_ready(&mut app);
     app.update(char(','));
-    app.update(char('3'));
+    app.update(char('4'));
     assert_snapshot("settings_account", &app);
     app.update(key(KeyCode::Tab));
     assert_eq!(app.view, View::Settings(Page::General));
@@ -278,12 +278,12 @@ fn settings_go_page_to_page_and_back() {
     chats_ready(&mut app);
     for (key_code, page) in [
         (KeyCode::Char(','), Page::Folders),
-        (KeyCode::Tab, Page::Activity),
-        (KeyCode::Right, Page::Account),
-        (KeyCode::BackTab, Page::Activity),
+        (KeyCode::Tab, Page::Privacy),
+        (KeyCode::Right, Page::Activity),
+        (KeyCode::BackTab, Page::Privacy),
         (KeyCode::Left, Page::Folders),
         (KeyCode::BackTab, Page::General),
-        (KeyCode::Char('2'), Page::Activity),
+        (KeyCode::Char('3'), Page::Activity),
     ] {
         app.update(key(key_code));
         assert_eq!(app.view, View::Settings(page), "{key_code:?}");
@@ -401,7 +401,7 @@ fn the_account_page_disconnects_after_asking() {
     let mut app = app();
     chats_ready(&mut app);
     app.update(char(','));
-    app.update(char('3'));
+    app.update(char('4'));
     app.update(char('d'));
     assert_eq!(app.modal, Some(Modal::ConfirmLogout));
     assert_eq!(
@@ -423,7 +423,7 @@ fn shows_the_proxy_without_credentials() {
     });
     running(&mut app, s);
     app.update(char(','));
-    app.update(char('3'));
+    app.update(char('4'));
     assert_eq!(app.view, View::Settings(Page::Account));
     let screen = render_to_string(&app, 100, 30);
     assert!(screen.contains("proxy.corp:3128"), "{screen}");
@@ -2855,7 +2855,7 @@ fn the_webs_settings_open_from_the_account_page() {
     let mut app = app();
     chats_ready(&mut app);
     app.update(char(','));
-    app.update(char('3'));
+    app.update(char('4'));
     let screen = render_to_string(&app, 100, 30);
     assert!(screen.contains("1,250 of 5,000 credits left"), "{screen}");
     assert!(screen.contains("Organization    Plenty"), "{screen}");
@@ -2878,4 +2878,54 @@ fn the_webs_settings_open_from_the_account_page() {
     app.update(key(KeyCode::Up));
     app.update(key(KeyCode::Up));
     assert!(app.update(key(KeyCode::Enter)).is_empty());
+}
+
+#[test]
+fn snapshot_settings_privacy() {
+    let mut app = app();
+    chats_ready(&mut app);
+    app.update(char(','));
+    assert_eq!(
+        app.update(char('2')),
+        vec![Effect::Daemon(DaemonCommand::LoadDeny)],
+        "read each time the page opens"
+    );
+    assert_eq!(app.view, View::Settings(Page::Privacy));
+    assert!(
+        app.update(key(KeyCode::Down)).is_empty(),
+        "not again while open"
+    );
+    app.update(Msg::Daemon(DaemonMsg::Deny(Ok(DenyList {
+        builtin: [
+            ".ssh", ".gnupg", ".aws", ".env*", "*.pem", "*.key", "id_*", "*.kdbx",
+        ]
+        .map(String::from)
+        .to_vec(),
+        extra: vec!["*.secret".into()],
+        removed: vec![".npmrc".into()],
+        own_dirs: vec!["/srv/cww".into()],
+        allow_hardlinks: false,
+        config_file: Some("/srv/cww/config.toml".into()),
+    }))));
+    assert_snapshot("settings_privacy", &app);
+    // A long list scrolls.
+    let mut long = app.clone();
+    if let Some(Ok(deny)) = &mut long.deny {
+        deny.builtin = (0..200).map(|i| format!("pattern-{i}")).collect();
+    }
+    let screen = render_to_string(&long, 100, 30);
+    assert!(
+        screen.contains("↑↓ scroll") && !screen.contains("Also private"),
+        "{screen}"
+    );
+    for _ in 0..40 {
+        long.update(key(KeyCode::Down));
+    }
+    let screen = render_to_string(&long, 100, 30);
+    assert!(screen.contains("Also private"), "{screen}");
+    app.update(Msg::Daemon(DaemonMsg::Deny(Err(
+        "can't read config.toml".into()
+    ))));
+    let screen = render_to_string(&app, 100, 30);
+    assert!(screen.contains("can't read config.toml"), "{screen}");
 }

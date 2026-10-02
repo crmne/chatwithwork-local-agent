@@ -125,7 +125,7 @@ The CLI, the terminal UI and the settings app talk to the daemon over a local so
 cww        # or cww tui
 ```
 
-Run in a terminal, `cww` opens a terminal UI laid out like the desktop app's chat page. On the left: New chat, the search, your chats (the ones you pinned on the web first, then by day), and your projects (picking one shows its chats and starts a new chat in it; picking it again shows every chat), with your name at the foot, and your credits under it when they run low. The list stays current as chats start, change or go, on the web too. On the right: the open chat and the composer, with the model on its edge. Your name, `,` or `/settings` open the settings, with the same pages as the desktop app: Shared folders (with their index state), Activity (every request from Chat with Work, colour-coded by decision), Account (the pairing, the connection, whether chats are allowed here, your organization and credits, and the web's own settings pages, which open in the browser) and General (the daemon, pausing, and where its files are). Nothing else stays on screen: a single word at the top right says when something needs you (the daemon stopped, offline, connecting, paused, not paired, revoked, or the open chat not live), and clicking it opens the page that helps.
+Run in a terminal, `cww` opens a terminal UI laid out like the desktop app's chat page. On the left: New chat, the search, your chats (the ones you pinned on the web first, then by day), and your projects (picking one shows its chats and starts a new chat in it; picking it again shows every chat), with your name at the foot, and your credits under it when they run low. The list stays current as chats start, change or go, on the web too. On the right: the open chat and the composer, with the model on its edge. Your name, `,` or `/settings` open the settings, with the same pages as the desktop app: Shared folders (with their index state), Always private (the deny list, which only `config.toml` changes), Activity (every request from Chat with Work, colour-coded by decision), Account (the pairing, the connection, whether chats are allowed here, your organization and credits, and the web's own settings pages, which open in the browser) and General (the daemon, pausing, and where its files are). Nothing else stays on screen: a single word at the top right says when something needs you (the daemon stopped, offline, connecting, paused, not paired, revoked, or the open chat not live), and clicking it opens the page that helps.
 
 | Key | Does |
 |---|---|
@@ -136,7 +136,7 @@ Run in a terminal, `cww` opens a terminal UI laid out like the desktop app's cha
 | `e` | Show every tool step under its activity line |
 | `o` | Open the chat in the browser, or ask to use your chats here |
 | `,` | Open the settings, or go back to the chats |
-| `Tab`, `←` `→`, `1` to `4` | In the settings: the next, previous or numbered page |
+| `Tab`, `←` `→`, `1` to `5` | In the settings: the next, previous or numbered page |
 | `l` | The activity log (`PgUp`, `PgDn`, `End` to follow) |
 | `a` | Share a folder (prefilled with your Documents folder if it isn't shared) |
 | `r` | In Shared folders, rename the selected folder; elsewhere, look for the daemon again |

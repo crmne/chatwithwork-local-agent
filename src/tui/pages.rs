@@ -114,6 +114,7 @@ pub fn render(
             log_view(frame, body, app, theme);
         }
         Page::Account => account(frame, body, app, theme, hits),
+        Page::Privacy => privacy(frame, body, app, theme),
         Page::General => general(frame, body, app, theme),
     }
 }
@@ -287,6 +288,118 @@ fn root_state(
         "error" => (DOT, Signal::Negative, "Index error".into()),
         "disabled" => (DOT, Signal::Positive, "Searched live".into()),
         other => (DOT, Signal::Idle, other.replace('_', " ")),
+    }
+}
+
+// ----------------------------------------------------------- always private
+
+fn privacy(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let width = area.width.min(COLUMN) as usize;
+    let deny = match &app.deny {
+        None => {
+            draw(frame, area, vec![Line::styled("Loading…", theme.faint())]);
+            return;
+        }
+        Some(Err(error)) => {
+            draw(
+                frame,
+                area,
+                wrap(error, width)
+                    .into_iter()
+                    .map(|l| Line::styled(l, theme.signal_ink(Signal::Negative)))
+                    .collect(),
+            );
+            return;
+        }
+        Some(Ok(deny)) => deny,
+    };
+    let mut lines = Vec::new();
+    let mut section = |title: &str, about: Option<&str>, patterns: &[String], style| {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(title.to_string(), theme.strong()));
+        if let Some(about) = about {
+            lines.extend(
+                wrap(about, width)
+                    .into_iter()
+                    .map(|l| Line::styled(l, theme.muted())),
+            );
+        }
+        // Patterns stay whole: the line breaks between them.
+        let mut line: Vec<Span<'static>> = Vec::new();
+        let mut used = 0;
+        for pattern in patterns {
+            let len = pattern.chars().count() + 2;
+            if used + len > width && !line.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut line)));
+                used = 0;
+            }
+            line.push(Span::styled(format!("{pattern}  "), style));
+            used += len;
+        }
+        if !line.is_empty() {
+            lines.push(Line::from(line));
+        }
+    };
+    section(
+        "Built in",
+        Some(
+            "Keys, credentials, password stores, mail, messages and browser profiles. A \
+             pattern matches a file or folder name anywhere in a path.",
+        ),
+        &deny.builtin,
+        theme.ink(),
+    );
+    if !deny.extra.is_empty() {
+        section("Added by you", None, &deny.extra, theme.ink());
+    }
+    if !deny.removed.is_empty() {
+        section(
+            "Removed by you",
+            Some("These built-in patterns no longer apply."),
+            &deny.removed,
+            theme.signal_ink(Signal::Negative),
+        );
+    }
+    section(
+        "Also private",
+        Some(if deny.allow_hardlinks {
+            "The Local Agent's own settings, keys, index and logs. Files with more than one \
+             hard link are allowed by your configuration."
+        } else {
+            "The Local Agent's own settings, keys, index and logs, and files with more than \
+             one hard link, which could point outside a shared folder."
+        }),
+        &[],
+        theme.ink(),
+    );
+    lines.push(Line::raw(""));
+    let file = deny
+        .config_file
+        .as_deref()
+        .map(|f| format!(" ({})", home(f)))
+        .unwrap_or_default();
+    lines.extend(
+        wrap(
+            &format!(
+                "To change this list, edit the [deny] section of config.toml{file}, and it \
+                 applies right away."
+            ),
+            width,
+        )
+        .into_iter()
+        .map(|l| Line::styled(l, theme.faint())),
+    );
+    // Taller than the screen: ↑ ↓ scroll it.
+    let height = area.height as usize;
+    if lines.len() > height && height > 1 {
+        let scroll = app.page_scroll.min(lines.len() - (height - 1));
+        let mut shown: Vec<Line> = lines.into_iter().skip(scroll).take(height - 1).collect();
+        shown.push(Line::styled("↑↓ scroll", theme.faint()));
+        draw(frame, area, shown);
+    } else {
+        draw(frame, area, lines);
     }
 }
 

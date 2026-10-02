@@ -4,10 +4,10 @@
                                │  The log never leaves it.
   SETTINGS                     │
    Shared folders              │  TIME      RESULT   TOOL        DETAIL                  8 entries
- ▌ Activity                    │  08:14:00  ·        started
-   Account                     │  08:14:03  ·        connected   https://chatwithwork.com
-   General                     │  08:16:10  allowed  read        work-docs:plans/q3.md → 5.1 KB ·
-                               │  08:17:30  denied   read        work-docs:.env · chat 1234
+   Always private              │  08:14:00  ·        started
+ ▌ Activity                    │  08:14:03  ·        connected   https://chatwithwork.com
+   Account                     │  08:16:10  allowed  read        work-docs:plans/q3.md → 5.1 KB ·
+   General                     │  08:17:30  denied   read        work-docs:.env · chat 1234
                                │                                 this path is on the deny list
                                │                                 (.env*)
                                │  08:18:02  allowed  list        projects: → 12 entries · chat 123

@@ -2345,7 +2345,7 @@ fn help_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
         ("tab ← →", "in settings: the next or previous page"),
         (
             "↑ ↓  j k",
-            "in settings: select a folder, scroll the activity",
+            "in settings: select a folder or a web page, scroll a list",
         ),
         ("a", "share a folder"),
         (

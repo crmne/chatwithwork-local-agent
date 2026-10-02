@@ -1,0 +1,30 @@
+ ◆ Chat with Work              │  Always private
+                               │
+  ← Chats                  esc │  These files are never shared, even inside a shared folder. Chat
+                               │  with Work can't change this list.
+  SETTINGS                     │
+   Shared folders              │  Built in
+ ▌ Always private              │  Keys, credentials, password stores, mail, messages and browser
+   Activity                    │  profiles. A pattern matches a file or folder name anywhere in a
+   Account                     │  path.
+   General                     │  .ssh  .gnupg  .aws  .env*  *.pem  *.key  id_*  *.kdbx
+                               │
+                               │  Added by you
+                               │  *.secret
+                               │
+                               │  Removed by you
+                               │  These built-in patterns no longer apply.
+                               │  .npmrc
+                               │
+                               │  Also private
+                               │  The Local Agent's own settings, keys, index and logs, and files
+                               │  with more than one hard link, which could point outside a shared
+                               │  folder.
+                               │
+                               │  To change this list, edit the [deny] section of config.toml
+                               │  (/srv/cww/config.toml), and it applies right away.
+                               │
+                               │
+                               │
+                               │
+  C  Carmine                   │

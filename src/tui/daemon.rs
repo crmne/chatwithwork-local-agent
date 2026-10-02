@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::app::{
-    DaemonCommand, DaemonMsg, DaemonStatus, Msg, Offline, PairingMsg, RootState, Suggestion,
+    DaemonCommand, DaemonMsg, DaemonStatus, DenyList, Msg, Offline, PairingMsg, RootState,
+    Suggestion,
 };
 use crate::audit::{self, AuditEntry};
 use crate::auth::{LoginOptions, start_login};
@@ -246,6 +247,13 @@ fn work(paths: &Paths, tx: &Sender<Msg>, commands: &Receiver<DaemonCommand>, wak
             }
             _ => {}
         }
+        if command == DaemonCommand::LoadDeny {
+            let deny = deny_list(paths).map_err(|e| format!("{e:#}"));
+            if !send(tx, DaemonMsg::Deny(deny)) {
+                return;
+            }
+            continue;
+        }
         let result = run(paths, &command);
         let offline = matches!(result, Ok((_, true)));
         let result = result.map(|(text, _)| text).map_err(|e| format!("{e:#}"));
@@ -391,10 +399,41 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
             };
             Ok((text.into(), !running))
         }
-        DaemonCommand::Retry | DaemonCommand::Pair | DaemonCommand::CancelPairing => {
-            Ok((String::new(), false))
-        }
+        DaemonCommand::Retry
+        | DaemonCommand::Pair
+        | DaemonCommand::CancelPairing
+        | DaemonCommand::LoadDeny => Ok((String::new(), false)),
     }
+}
+
+/// The deny list in effect: the daemon's, or worked out from
+/// `config.toml` as the daemon would while it isn't running.
+fn deny_list(paths: &Paths) -> Result<DenyList> {
+    if let Some(v) = control::request(&paths.socket_path(), ControlRequest::Deny)? {
+        return Ok(serde_json::from_value(v)?);
+    }
+    let config = Config::load(paths)?;
+    let removed = &config.deny.remove;
+    Ok(DenyList {
+        builtin: crate::policy::DEFAULT_DENY
+            .iter()
+            .filter(|p| {
+                !removed
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(p.trim_end_matches('/')))
+            })
+            .map(|p| p.to_string())
+            .collect(),
+        extra: config.deny.extra.clone(),
+        removed: removed.clone(),
+        own_dirs: paths
+            .all_dirs()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        allow_hardlinks: config.deny.allow_hardlinks,
+        config_file: Some(paths.config_file().display().to_string()),
+    })
 }
 
 /// Give a shared folder a new label in `config`, as the daemon would.
@@ -524,6 +563,10 @@ mod tests {
             panic!("expected the offline view");
         };
         assert!(renamed.config_file.unwrap().ends_with("config.toml"));
+        let deny = deny_list(&paths).unwrap();
+        assert!(deny.builtin.iter().any(|p| p == ".env*"));
+        assert!(deny.extra.is_empty() && deny.removed.is_empty());
+        assert!(deny.config_file.unwrap().ends_with("config.toml"));
         run(&paths, &DaemonCommand::RemoveRoot { id }).unwrap();
         assert!(Config::load(&paths).unwrap().roots.is_empty());
     }
