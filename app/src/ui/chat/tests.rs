@@ -377,6 +377,8 @@ fn renders_like_the_web() {
                     .get_by_label("Searching Drive and Slack · Reading Q3 actuals.xlsx")
                     .click();
             }
+            // kittest paints a pointer wherever one hovers: take it away.
+            fx.harness.event(egui::Event::PointerGone);
             // Let fonts and textures settle.
             fx.harness.run_steps(12);
             let theme = if dark { "dark" } else { "light" };
