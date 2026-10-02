@@ -246,6 +246,14 @@ pub struct ChatState {
     pub list: ChatList,
     /// What's typed in the sidebar's search.
     pub search: String,
+    /// The project whose chats the sidebar shows, picked in it.
+    pub filter: Option<u64>,
+    /// The project a new chat starts in.
+    pub project: Option<u64>,
+    /// The menu under the person's name is open.
+    pub user_menu: bool,
+    /// The picker behind the sidebar's "All projects" is open.
+    pub projects_menu: bool,
     /// The open chat; `None` is a new one.
     pub open: Option<u64>,
     pub transcript: Option<Transcript>,
@@ -298,6 +306,10 @@ impl Default for ChatState {
             access: Access::Unknown,
             list: ChatList::default(),
             search: String::new(),
+            filter: None,
+            project: None,
+            user_menu: false,
+            projects_menu: false,
             open: None,
             transcript: None,
             loading: false,
@@ -333,17 +345,19 @@ impl ChatState {
         self.access == Access::Ready
     }
 
-    /// The chats the search leaves, newest first.
+    /// The chats the project picked and the search leave, newest first.
     pub fn visible(&self) -> Vec<&ChatSummary> {
         let query = self.search.trim().trim_start_matches('#').to_lowercase();
-        if query.is_empty() {
-            return self.list.chats.iter().collect();
-        }
         self.list
             .chats
             .iter()
             .filter(|chat| {
-                chat.title.to_lowercase().contains(&query)
+                self.filter
+                    .is_none_or(|id| chat.project.as_ref().is_some_and(|p| p.id == id))
+            })
+            .filter(|chat| {
+                query.is_empty()
+                    || chat.title.to_lowercase().contains(&query)
                     || chat.number.to_string() == query
                     || chat
                         .project
@@ -351,6 +365,34 @@ impl ChatState {
                         .is_some_and(|p| p.name.to_lowercase().contains(&query))
             })
             .collect()
+    }
+
+    /// A project the list knows, by id.
+    pub fn project(&self, id: u64) -> Option<&cww::tui::chat::Project> {
+        self.list.projects.iter().find(|p| p.id == id)
+    }
+
+    /// Show a project's chats and start a new chat in it, as the web's
+    /// project page does; picked again, every chat shows again.
+    pub fn pick_project(&mut self, id: u64) -> Vec<Command> {
+        if self.filter == Some(id) {
+            self.filter = None;
+            return Vec::new();
+        }
+        self.filter = Some(id);
+        let commands = self.new_chat();
+        self.project = Some(id);
+        commands
+    }
+
+    /// The projects changed: forget one that's gone.
+    fn keep_projects(&mut self) {
+        if self.filter.is_some_and(|id| self.project(id).is_none()) {
+            self.filter = None;
+        }
+        if self.project.is_some_and(|id| self.project(id).is_none()) {
+            self.project = None;
+        }
     }
 
     /// The open chat, as last read or listed.
@@ -451,6 +493,7 @@ impl ChatState {
     pub fn new_chat(&mut self) -> Vec<Command> {
         let followed = self.open.is_some();
         self.open = None;
+        self.project = None;
         self.transcript = None;
         self.streamed.clear();
         self.progress = None;
@@ -512,7 +555,7 @@ impl ChatState {
         vec![Command::Send(Ask {
             chat: self.open,
             text,
-            project: None,
+            project: self.project.filter(|_| self.open.is_none()),
             model: self.model_for_question(),
             attachments,
         })]
@@ -726,6 +769,7 @@ impl ChatState {
                 let was_ready = self.ready();
                 self.access = Access::Ready;
                 self.list = list;
+                self.keep_projects();
                 let mut commands = Vec::new();
                 if self.models == ModelList::Unknown {
                     self.models = ModelList::Loading;
@@ -1009,7 +1053,10 @@ impl ChatState {
                 }
             }
             ListLive::Removed(number) => return self.remove_chat(number),
-            ListLive::Projects(projects) => self.list.projects = projects,
+            ListLive::Projects(projects) => {
+                self.list.projects = projects;
+                self.keep_projects();
+            }
             ListLive::Account(account) => self.list.set_account(account),
         }
         Vec::new()
@@ -1561,6 +1608,33 @@ mod tests {
             commands,
             vec![Command::List, Command::Follow(Some(2)), Command::Open(2)]
         );
+    }
+
+    #[test]
+    fn a_project_picked_shows_its_chats_and_starts_a_chat_in_it() {
+        let mut state = ready();
+        state.list.projects = vec![cww::tui::chat::Project {
+            id: 7,
+            name: "Falcon".into(),
+            ..Default::default()
+        }];
+        state.list.chats[0].project = state.list.projects.first().cloned();
+        state.open_chat(1);
+        assert_eq!(state.pick_project(7), vec![Command::Follow(None)]);
+        assert_eq!((state.open, state.project), (None, Some(7)));
+        assert_eq!(state.visible().len(), 1);
+        state.input = "Kick-off agenda?".into();
+        let [Command::Send(ask)] = &state.send()[..] else {
+            panic!("one send")
+        };
+        assert_eq!(ask.project, Some(7));
+        // Picked again: every chat.
+        state.pick_project(7);
+        assert_eq!(state.visible().len(), 2);
+        // A project that goes away is forgotten.
+        state.pick_project(7);
+        state.update(Msg::ListLive(ListLive::Projects(Vec::new())));
+        assert_eq!((state.filter, state.project), (None, None));
     }
 
     #[test]

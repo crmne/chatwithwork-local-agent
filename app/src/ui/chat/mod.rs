@@ -383,7 +383,7 @@ impl ChatPage {
                 focus_search: std::mem::take(&mut self.focus_search),
             }
             .show(&mut child, rect, &mut self.state);
-            self.sidebar_event(event, &mut action);
+            self.sidebar_event(event, env, &mut action);
         } else if drawer_t > 0.0 {
             animating |= drawer_t < 1.0;
             let width = tokens::SIDEBAR_WIDTH.min(full.width() * 0.85);
@@ -423,13 +423,14 @@ impl ChatPage {
                         Some(
                             sidebar::Event::Open(_)
                                 | sidebar::Event::NewChat
-                                | sidebar::Event::Settings
+                                | sidebar::Event::Page(_)
+                                | sidebar::Event::Project(_)
                                 | sidebar::Event::Toggle
                         )
                     ) {
                         self.drawer = false;
                     }
-                    self.sidebar_event(event, &mut action);
+                    self.sidebar_event(event, env, &mut action);
                 });
         }
 
@@ -450,13 +451,26 @@ impl ChatPage {
         action
     }
 
-    fn sidebar_event(&mut self, event: Option<sidebar::Event>, action: &mut Option<Action>) {
+    fn sidebar_event(
+        &mut self,
+        event: Option<sidebar::Event>,
+        env: &Env,
+        action: &mut Option<Action>,
+    ) {
         match event {
             Some(sidebar::Event::NewChat) => {
+                self.state.filter = None;
                 let commands = self.state.new_chat();
                 self.run(commands);
                 self.focus_composer = true;
             }
+            Some(sidebar::Event::Project(id)) => {
+                let commands = self.state.pick_project(id);
+                self.run(commands);
+                self.focus_composer = true;
+            }
+            Some(sidebar::Event::OpenUrl(url)) => self.open_on_server(env, &url),
+            Some(sidebar::Event::Page(page)) => *action = Some(Action::Settings(page)),
             Some(sidebar::Event::Open(number)) => {
                 let commands = self.state.open_chat(number);
                 self.run(commands);
@@ -469,9 +483,6 @@ impl ChatPage {
                     self.collapsed = true;
                 }
             }
-            Some(sidebar::Event::Settings) => {
-                *action = Some(Action::Settings(super::Page::Folders))
-            }
             Some(sidebar::Event::Rename(chat, title)) => {
                 let commands = self.state.act(chat, state::ChatAction::Rename(title));
                 self.run(commands);
@@ -481,6 +492,17 @@ impl ChatPage {
             }
             None => {}
         }
+    }
+
+    /// The project the open chat is in, as the list knows it.
+    fn open_project(&self) -> Option<cww::tui::chat::Project> {
+        let project = self.state.open_summary()?.project.as_ref()?;
+        Some(
+            self.state
+                .project(project.id)
+                .cloned()
+                .unwrap_or_else(|| project.clone()),
+        )
     }
 
     /// Why the composer is locked right now, and the way out.
@@ -708,6 +730,7 @@ impl ChatPage {
         let column = (main.width() - 32.0).min(tokens::COLUMN);
         let mut animating = false;
         let mut events = Vec::new();
+        let mut project_url = None;
         let mut child = ui.new_child(UiBuilder::new().max_rect(main));
         // On the chat's first read: start at the latest message.
         let scroll_to_bottom = self.scroll_to_bottom > 0 && !self.state.loading;
@@ -732,6 +755,20 @@ impl ChatPage {
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
                 col.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                if let Some(project) = self.open_project() {
+                    let (rect, _) = col.allocate_exact_size(vec2(column, 19.5), Sense::hover());
+                    if let Some(url) = project_line(
+                        &mut col,
+                        rect,
+                        &project,
+                        &self.state.list.account.name,
+                        images,
+                        p,
+                    ) {
+                        project_url = Some(url);
+                    }
+                    col.add_space(12.0);
+                }
                 let (found, moving) = Conversation {
                     palette: p,
                     images,
@@ -762,6 +799,9 @@ impl ChatPage {
                     );
                 }
             });
+        if let Some(url) = project_url {
+            self.open_on_server(env, &url);
+        }
         for event in events {
             match event {
                 conversation::Event::OpenUrl(url) => super::open_url(&url),
@@ -964,7 +1004,13 @@ impl ChatPage {
             GREETINGS[self.greeting].replace("{}", &name)
         };
         let galley = paint::layout(ui.painter(), paint::job(&greeting, ty, p.ink, column));
-        let content = galley.size().y + 28.0 + composer_h;
+        // The project it starts in, under the greeting.
+        let project = self
+            .state
+            .project
+            .and_then(|id| self.state.project(id).cloned());
+        let project_h = if project.is_some() { 19.5 + 12.0 } else { 0.0 };
+        let content = galley.size().y + 28.0 + project_h + composer_h;
         // The column's padding, and the page's 8 at the bottom.
         let available = main.height() - 64.0 - 96.0 - 8.0;
         let top = main.top() + 64.0 + ((available - content) / 2.0).max(0.0);
@@ -987,8 +1033,17 @@ impl ChatPage {
             galley,
             p.ink.gamma_multiply(eased),
         );
+        if let Some(project) = &project {
+            let line =
+                Rect::from_min_size(pos2(left, top + greeting_height + 28.0), vec2(column, 19.5));
+            if let Some(url) =
+                project_line(ui, line, project, &self.state.list.account.name, images, p)
+            {
+                self.open_on_server(env, &url);
+            }
+        }
         let rect = Rect::from_min_size(
-            pos2(left, top + greeting_height + 28.0),
+            pos2(left, top + greeting_height + 28.0 + project_h),
             vec2(column, composer_h),
         );
         let focus = std::mem::take(&mut self.focus_composer);
@@ -998,6 +1053,78 @@ impl ChatPage {
         }
         self.composer_event(event, env, action);
         rise < 1.0
+    }
+}
+
+/// `.chat-project`: above a chat in a project, or a new chat started in
+/// one, centered: its icon, its name, which opens its page on the web, and
+/// who reads it. The web counts the people on a project; the chat API
+/// doesn't say, so the app names them without a count. Returns the page to
+/// open when the name was clicked.
+fn project_line(
+    ui: &mut Ui,
+    rect: Rect,
+    project: &cww::tui::chat::Project,
+    account: &str,
+    images: &Images,
+    p: &Palette,
+) -> Option<String> {
+    let ty = tokens::scale::SMALLER;
+    let painter = ui.painter().clone();
+    let name = paint::layout(
+        &painter,
+        paint::job(&project.name, ty.weight(550.0), p.ink, f32::INFINITY),
+    );
+    let audience = if project.hq && !account.trim().is_empty() {
+        format!(" · shared with everyone in {}", account.trim())
+    } else {
+        " · shared with the people on it".to_string()
+    };
+    let rest = paint::layout(
+        &painter,
+        paint::job(&audience, ty, p.ink_muted, f32::INFINITY),
+    );
+    let width = 16.0 + 8.0 + name.size().x + rest.size().x;
+    let mut x = rect.center().x - width / 2.0;
+    let cy = rect.center().y;
+    images.icon_at(
+        &painter,
+        pos2(x + 8.0, cy),
+        16.0,
+        sidebar::project_icon(project),
+        p.ink_faint,
+    );
+    x += 16.0 + 8.0;
+    let name_rect = Rect::from_min_size(pos2(x, cy - name.size().y / 2.0), name.size());
+    let response = ui.interact(
+        name_rect,
+        Id::new(("chat-project-line", project.id)),
+        if project.url.is_some() {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Link, true, &project.name));
+    widgets::label(ui, rect, &format!("{}{audience}", project.name));
+    if response.hovered() && project.url.is_some() {
+        painter.hline(
+            name_rect.x_range(),
+            name_rect.bottom() + 1.0,
+            egui::Stroke::new(1.0, p.ink),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    painter.galley(name_rect.min, name, p.ink);
+    painter.galley(
+        pos2(name_rect.right(), cy - rest.size().y / 2.0),
+        rest,
+        p.ink_muted,
+    );
+    if response.clicked() {
+        project.url.clone()
+    } else {
+        None
     }
 }
 

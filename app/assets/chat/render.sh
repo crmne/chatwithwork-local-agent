@@ -20,7 +20,9 @@ stop lock-simple caret-right copy check arrow-down arrow-up-right gear-six
 warning-circle file-text file-pdf file-xls file-doc globe-simple app-window plug
 desktop caret-up-down dots-three pencil-simple trash arrows-clockwise git-branch
 export hand-palm hourglass-medium warning file file-image file-ppt file-txt
-file-code file-audio file-video laptop plugs-connected list-checks"
+file-code file-audio file-video laptop plugs-connected list-checks buildings
+users-three folder-simple chat-circle chats-circle user-circle chart-bar folders
+credit-card sparkle bell link clock"
 
 cells=()
 for name in $ICONS; do

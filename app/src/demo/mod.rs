@@ -7,6 +7,18 @@
 mod assets;
 mod chats;
 
+/// Northwind's projects, as the demo's list sends them.
+#[cfg(test)]
+pub fn projects() -> Vec<Value> {
+    chats::projects()
+}
+
+/// One more project, invite-only.
+#[cfg(test)]
+pub fn project(id: u64, name: &str, icon: &str) -> Value {
+    chats::project(id, name, icon, false, false)
+}
+
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -32,6 +44,10 @@ struct State {
     listed: Vec<Value>,
     /// Refuse the `chats` topic, as a daemon from before live lists does.
     old_daemon: bool,
+    /// The organization's credits left, of 5,000.
+    credits_left: u64,
+    /// The projects the person is on.
+    projects: Vec<Value>,
     /// Answers don't stream on their own (tests hold them still).
     held: bool,
     /// Chats whose answer is streaming now.
@@ -140,10 +156,23 @@ impl Server {
         self.demo.sync_list();
     }
 
-    /// Send the list's subscribers one change as the server words it.
+    /// The credits move elsewhere: the list's header says so.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn list_event(&self, update: Value) {
-        self.demo.change(|s| s.list_events.push(update));
+    pub fn spend(&self, left: u64) {
+        self.demo.change(|s| {
+            s.credits_left = left;
+            s.list_events.push(chats::account_update(left));
+        });
+    }
+
+    /// The projects change elsewhere: joined, renamed, left.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_projects(&self, projects: Vec<Value>) {
+        self.demo.change(|s| {
+            s.projects = projects.clone();
+            s.list_events
+                .push(json!({ "event": "projects", "projects": projects }));
+        });
     }
 
     /// What happens elsewhere while `--demo` runs: a chat started on the
@@ -167,7 +196,7 @@ impl Server {
             pause(4);
             me.edit_elsewhere(30, |c| c["title"] = json!("Q4 hiring plan"));
             pause(10);
-            me.list_event(chats::account_update(410));
+            me.spend(410);
         });
     }
 }
@@ -201,6 +230,8 @@ fn fresh() -> State {
         chat_events: Vec::new(),
         list_events: Vec::new(),
         old_daemon: false,
+        credits_left: 1250,
+        projects: chats::projects(),
         held: false,
         streaming: HashSet::new(),
         cancelled: HashSet::new(),
@@ -307,6 +338,8 @@ fn sample() -> State {
         chat_events: Vec::new(),
         list_events: Vec::new(),
         old_daemon: false,
+        credits_left: 1250,
+        projects: chats::projects(),
         held: false,
         streaming: HashSet::new(),
         cancelled: HashSet::new(),
@@ -535,14 +568,11 @@ impl Demo {
             "chats" => {
                 let state = self.state.lock().expect("demo lock");
                 let list: Vec<Value> = state.chats.iter().map(|c| c.summary.clone()).collect();
-                json!({
-                    "ok": true,
-                    "chats": list,
-                    "projects": [],
-                    "account": { "name": chats::ACCOUNT },
-                    "user": { "name": chats::USER },
-                    "locked_reason": null,
-                })
+                let mut answer = chats::list_header(state.credits_left);
+                answer["ok"] = json!(true);
+                answer["chats"] = json!(list);
+                answer["projects"] = json!(state.projects);
+                answer
             }
             "chat" => {
                 let state = self.state.lock().expect("demo lock");
@@ -629,13 +659,17 @@ impl Demo {
                                 .max()
                                 .unwrap_or(0)
                                 + 1;
-                            state.chats.insert(
-                                0,
-                                chats::Chat::new(
-                                    chats::summary(n, &chats::title_for(&text), "idle", ago(0)),
-                                    Vec::new(),
-                                ),
-                            );
+                            let mut summary =
+                                chats::summary(n, &chats::title_for(&text), "idle", ago(0));
+                            // Started in a project: it's the project's.
+                            if let Some(project) = state.projects.iter().find(|p| {
+                                request["project"].is_u64() && p["id"] == request["project"]
+                            }) {
+                                summary["project"] =
+                                    json!({ "id": project["id"], "name": project["name"] });
+                                summary["can"]["share"] = json!(false);
+                            }
+                            state.chats.insert(0, chats::Chat::new(summary, Vec::new()));
                             n
                         }
                     };

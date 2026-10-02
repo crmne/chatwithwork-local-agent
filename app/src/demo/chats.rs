@@ -128,8 +128,62 @@ pub fn account_update(left: u64) -> Value {
         "event": "account",
         "account": { "name": ACCOUNT, "logo": null },
         "user": { "name": USER, "avatar": null },
-        "credits": { "left": left, "capacity": 5000, "running_low": left * 5 < 5000 },
+        "credits": credits(left),
         "locked_reason": null,
+    })
+}
+
+/// The organization's credits, `left` of 5,000: running low under 20%.
+fn credits(left: u64) -> Value {
+    json!({ "left": left, "capacity": 5000, "running_low": left * 5 < 5000 })
+}
+
+/// A web page of the demo organization.
+fn page(path: &str) -> String {
+    format!("{SERVER}/northwind{path}")
+}
+
+/// One of Northwind's projects, as the list names it.
+pub fn project(id: u64, name: &str, icon: &str, hq: bool, all_access: bool) -> Value {
+    json!({ "id": id, "name": name, "icon": icon, "hq": hq, "all_access": all_access,
+            "url": page(&format!("/projects/{id}")) })
+}
+
+/// The projects Alex is on: HQ first, then by name.
+pub fn projects() -> Vec<Value> {
+    vec![
+        project(3, "HQ", "buildings", true, false),
+        project(7, "Falcon", "folder-simple", false, false),
+        project(8, "People", "users-three", false, true),
+    ]
+}
+
+/// What the web's sidebar shows around the chats: the organization, the
+/// person, the credits, the pins and the web's pages.
+pub fn list_header(left: u64) -> Value {
+    let tabs = [
+        ("account", "Account", "user-circle"),
+        ("people", "People", "users-three"),
+        ("usage", "Usage", "chart-bar"),
+        ("models", "Models", "sparkle"),
+        ("connectors", "Connectors", "plugs-connected"),
+        ("notifications", "Notifications", "bell"),
+        ("sharing", "Sharing", "link"),
+    ];
+    json!({
+        "account": { "name": ACCOUNT, "logo": null },
+        "user": { "name": USER, "avatar": null },
+        "credits": credits(left),
+        "locked_reason": null,
+        "pins": { "projects": [7], "chats": [4] },
+        "links": {
+            "new_chat": page("/chats/new"),
+            "chats": page("/chats"),
+            "projects": page("/projects"),
+            "settings": tabs.iter().map(|(tab, label, icon)| json!({
+                "tab": tab, "label": label, "icon": icon, "url": page(&format!("/settings?tab={tab}")),
+            })).collect::<Vec<_>>(),
+        },
     })
 }
 

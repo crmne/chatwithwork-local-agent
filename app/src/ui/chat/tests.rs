@@ -156,9 +156,9 @@ impl Fixture {
 fn chats_are_listed_by_day_and_open_with_their_answers() {
     let mut fx = fixture(Options::default());
     fx.wait_for_label("Vendor contract renewal");
-    for day in ["Today", "Yesterday", "Earlier"] {
-        fx.harness.get_by_label(day);
-    }
+    // One Recent list, as the web's sidebar has.
+    fx.harness.get_by_label("Recent");
+    assert!(fx.harness.query_by_label("Yesterday").is_none());
     fx.chat().set_greeting(4);
     fx.harness.run_steps(1);
     fx.harness
@@ -468,6 +468,118 @@ fn the_webs_logos_come_from_the_server_once_and_are_kept() {
     fx.harness
         .try_run()
         .expect("loaded logos ask for no frames");
+}
+
+#[test]
+fn the_sidebar_shows_the_organization_and_whats_pinned_as_the_web_does() {
+    OPENED.with(|o| o.borrow_mut().clear());
+    let mut fx = fixture(Options::default());
+    fx.ready();
+    fx.wait_for_label("Organization: Northwind");
+    for label in ["Recent", "Pinned", "All projects", "Falcon"] {
+        fx.harness.get_by_label(label);
+    }
+    // A pinned chat stays in Recent too; the pin opens it.
+    let pinned: Vec<_> = fx
+        .harness
+        .get_all_by_label("Weekly report for leadership")
+        .collect();
+    assert_eq!(pinned.len(), 2);
+    pinned[1].click();
+    fx.wait_for_request("chat", |r| r["chat"] == "4");
+    // Chats opens the web's page of every chat.
+    fx.harness.get_by_label("Chats").click();
+    fx.harness.run_steps(2);
+    assert_eq!(
+        OPENED.with(|o| o.borrow().clone()),
+        ["https://chatwithwork.com/northwind/chats"]
+    );
+}
+
+#[test]
+fn a_project_shows_its_chats_and_starts_a_chat_in_it() {
+    let mut fx = fixture(Options::default());
+    fx.ready();
+    fx.wait_for_label("Falcon");
+    fx.harness.get_by_label("Falcon").click();
+    fx.wait_for_label("Falcon · shared with the people on it");
+    assert!(
+        fx.harness
+            .query_by_label("Vendor contract renewal")
+            .is_none()
+    );
+    fx.harness.get_by_label("Falcon launch checklist");
+    let field = fx
+        .harness
+        .get_by_role(egui::accesskit::Role::MultilineTextInput);
+    field.focus();
+    field.type_text("What's left before launch?");
+    fx.harness.run_steps(2);
+    fx.harness.get_by_label("Send message").click();
+    let sent = fx.wait_for_request("chat_send", |_| true);
+    assert_eq!(sent["project"], 7);
+    // The new chat is the project's, and every chat shows again on asking.
+    fx.wait("the new chat in the list", |h| {
+        h.state()
+            .chat_state()
+            .is_some_and(|s| s.list.chats[0].project.as_ref().is_some_and(|p| p.id == 7))
+    });
+    fx.harness.get_by_label("Falcon · Show all").click();
+    fx.wait_for_label("Vendor contract renewal");
+    // Any project, from All projects.
+    fx.harness.get_by_label("All projects").click();
+    fx.wait_for_label("People");
+    fx.harness.get_by_label("People").click();
+    fx.wait_for_label("People · shared with the people on it");
+    fx.harness.get_by_label("Hiring pipeline status");
+    assert!(
+        fx.harness
+            .query_by_label("Falcon launch checklist")
+            .is_none()
+    );
+}
+
+#[test]
+fn the_menu_under_your_name_opens_settings_here_and_on_the_web() {
+    OPENED.with(|o| o.borrow_mut().clear());
+    let mut fx = fixture(Options::default());
+    fx.ready();
+    fx.harness.get_by_label("Settings and usage").click();
+    fx.wait_for_label("Usage");
+    fx.harness.get_by_label("Usage").click();
+    fx.harness.run_steps(2);
+    assert_eq!(
+        OPENED.with(|o| o.borrow().clone()),
+        ["https://chatwithwork.com/northwind/settings?tab=usage"]
+    );
+    assert!(fx.harness.query_by_label("Usage").is_none(), "it closes");
+    fx.harness.get_by_label("Settings and usage").click();
+    fx.wait_for_label("Shared Folders");
+    fx.harness.get_by_label("Shared Folders").click();
+    fx.harness.run_steps(2);
+    assert_eq!(fx.harness.state().page(), Page::Folders);
+}
+
+#[test]
+fn credits_and_projects_change_in_place() {
+    let mut fx = fixture(Options::default());
+    fx.ready();
+    fx.live();
+    assert!(fx.harness.query_by_label_contains("credits left").is_none());
+    // Running low: the meter shows under the name, as on the web.
+    fx.server.spend(410);
+    fx.wait_for_label("410 of 5,000 credits left");
+    // A project joined elsewhere is in the picker.
+    let mut projects = crate::demo::projects();
+    projects.push(crate::demo::project(9, "Board", "folder-simple"));
+    fx.server.set_projects(projects);
+    fx.wait("the new project", |h| {
+        h.state()
+            .chat_state()
+            .is_some_and(|s| s.list.projects.iter().any(|p| p.id == 9))
+    });
+    fx.harness.get_by_label("All projects").click();
+    fx.wait_for_label("Board");
 }
 
 #[test]
@@ -1001,6 +1113,34 @@ fn review_screens() -> Vec<Screen> {
                 fx.harness
                     .get_by_label("Made a plan · 2 steps")
                     .click_accesskit();
+            },
+        },
+        Screen {
+            name: "user-menu",
+            chat: Some(11),
+            setup: |fx| fx.chat().state_mut().user_menu = true,
+        },
+        Screen {
+            name: "project",
+            chat: None,
+            setup: |fx| {
+                let commands = fx.chat().state_mut().pick_project(7);
+                assert!(commands.is_empty());
+            },
+        },
+        Screen {
+            name: "project-chat",
+            chat: Some(10),
+            setup: nothing,
+        },
+        Screen {
+            name: "credits",
+            chat: Some(11),
+            setup: |fx| {
+                fx.server.spend(410);
+                fx.wait("the meter", |h| {
+                    h.query_by_label("410 of 5,000 credits left").is_some()
+                });
             },
         },
         Screen {

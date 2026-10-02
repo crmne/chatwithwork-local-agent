@@ -50,9 +50,49 @@ pub enum Icon {
     Laptop,
     PlugsConnected,
     ListChecks,
+    Buildings,
+    UsersThree,
+    FolderSimple,
+    ChatCircle,
+    ChatsCircle,
+    UserCircle,
+    ChartBar,
+    Folders,
+    CreditCard,
+    Sparkle,
+    Bell,
+    Link,
+    Clock,
 }
 
-const COUNT: usize = Icon::ListChecks as usize + 1;
+const COUNT: usize = Icon::Clock as usize + 1;
+
+impl Icon {
+    /// A Phosphor icon the server names (a project's, a Settings tab's), if
+    /// the atlas has it.
+    pub fn named(name: &str) -> Option<Icon> {
+        Some(match name {
+            "buildings" => Icon::Buildings,
+            "users-three" => Icon::UsersThree,
+            "folder-simple" => Icon::FolderSimple,
+            "folders" => Icon::Folders,
+            "user-circle" => Icon::UserCircle,
+            "chart-bar" => Icon::ChartBar,
+            "credit-card" => Icon::CreditCard,
+            "sparkle" => Icon::Sparkle,
+            "plugs-connected" => Icon::PlugsConnected,
+            "plug" => Icon::Plug,
+            "bell" => Icon::Bell,
+            "link" => Icon::Link,
+            "laptop" => Icon::Laptop,
+            "gear-six" => Icon::GearSix,
+            "chat-circle" => Icon::ChatCircle,
+            "chats-circle" => Icon::ChatsCircle,
+            "list-checks" => Icon::ListChecks,
+            _ => return None,
+        })
+    }
+}
 const CELL: f32 = 64.0;
 /// Icons to a row of the atlas: 32 cells make 2048, the widest texture.
 const COLUMNS: usize = 32;
