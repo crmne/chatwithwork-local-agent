@@ -1,9 +1,12 @@
-//! `--demo`: a stand-in daemon with sample folders, activity and a paired
-//! account, speaking the real control protocol on a private socket. For
-//! screenshots, for trying the app without pairing a computer, and for the
-//! window's tests, which also read the requests it received. Built only
+//! `--demo`: a stand-in daemon with sample folders, activity, chats and a
+//! paired account, speaking the real control protocol on a private socket.
+//! For screenshots, for trying the app without pairing a computer, and for
+//! the window's tests, which also read the requests it received. Built only
 //! with the `demo` feature, and in tests.
 
+mod chats;
+
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,6 +22,16 @@ struct State {
     log: Vec<Value>,
     generation: u64,
     requests: Vec<Value>,
+    chats: Vec<chats::Chat>,
+    /// Every chat update so far, as followers get them.
+    chat_events: Vec<Value>,
+    /// Answers don't stream on their own (tests hold them still).
+    held: bool,
+    /// Chats whose answer is streaming now.
+    streaming: HashSet<u64>,
+    /// Chats asked to stop.
+    cancelled: HashSet<u64>,
+    next_id: u64,
 }
 
 struct Demo {
@@ -51,6 +64,25 @@ impl Server {
     pub fn requests(&self) -> Vec<Value> {
         self.demo.state.lock().expect("demo lock").requests.clone()
     }
+
+    /// Hold answers still: nothing streams until released, so tests see
+    /// one moment of it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn hold_streams(&self, held: bool) {
+        self.demo.change(|s| s.held = held);
+    }
+
+    /// Finish a held answer in chat `chat`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn finish(&self, chat: u64, message: u64, content: &str) {
+        self.demo.apply(
+            chat,
+            &chats::Step::Finish {
+                id: message,
+                content: content.to_string(),
+            },
+        );
+    }
 }
 
 fn ago(seconds: i64) -> String {
@@ -77,6 +109,12 @@ fn fresh() -> State {
         log: vec![json!({ "ts": ago(5), "event": "started", "detail": "cww 0.1.0" })],
         generation: 0,
         requests: Vec::new(),
+        chats: chats::sample(),
+        chat_events: Vec::new(),
+        held: false,
+        streaming: HashSet::new(),
+        cancelled: HashSet::new(),
+        next_id: 1000,
     }
 }
 
@@ -173,6 +211,12 @@ fn sample() -> State {
         log,
         generation: 0,
         requests: Vec::new(),
+        chats: chats::sample(),
+        chat_events: Vec::new(),
+        held: false,
+        streaming: HashSet::new(),
+        cancelled: HashSet::new(),
+        next_id: 1000,
     }
 }
 
@@ -276,6 +320,9 @@ impl Demo {
                 });
                 json!({ "ok": true })
             }
+            "chats" | "chat" | "chat_send" | "chat_cancel" | "chat_access" => {
+                self.chat_request(cmd, request)
+            }
             "deny" => deny(),
             "audit_tail" => {
                 let n = request["lines"].as_u64().unwrap_or(50) as usize;
@@ -292,6 +339,21 @@ impl Demo {
         while reader.read_line(&mut line).is_ok_and(|n| n > 0) {
             let request: Value = serde_json::from_str(&line).unwrap_or_default();
             line.clear();
+            if request["cmd"] == "subscribe"
+                && request["topics"]
+                    .as_array()
+                    .is_some_and(|t| t.iter().any(|t| t == "chat"))
+            {
+                self.state
+                    .lock()
+                    .expect("demo lock")
+                    .requests
+                    .push(request.clone());
+                return self.follow(
+                    reader.get_mut(),
+                    request["chat"].as_str().unwrap_or_default(),
+                );
+            }
             if request["cmd"] == "subscribe" {
                 self.state
                     .lock()
@@ -343,6 +405,327 @@ impl Demo {
             }
             if send(reader.get_mut(), &self.answer(&request)).is_err() {
                 return;
+            }
+        }
+    }
+}
+
+impl Demo {
+    /// The chat API (CONTROL.md, "Chats"), for a paired sample.
+    fn chat_request(self: &Arc<Self>, cmd: &str, request: &Value) -> Value {
+        let paired = !self.state.lock().expect("demo lock").status["server"].is_null();
+        if !paired {
+            return json!({ "ok": false, "code": "not_paired", "error": "This computer isn't paired." });
+        }
+        let number = request["chat"].as_str().and_then(|c| c.parse::<u64>().ok());
+        match cmd {
+            "chats" => {
+                let state = self.state.lock().expect("demo lock");
+                let list: Vec<Value> = state.chats.iter().map(|c| c.summary.clone()).collect();
+                json!({
+                    "ok": true,
+                    "chats": list,
+                    "projects": [],
+                    "account": { "name": chats::ACCOUNT },
+                    "user": { "name": chats::USER },
+                    "locked_reason": null,
+                })
+            }
+            "chat" => {
+                let state = self.state.lock().expect("demo lock");
+                match state
+                    .chats
+                    .iter()
+                    .find(|c| Some(c.summary["number"].as_u64().unwrap_or(0)) == number)
+                {
+                    Some(chat) => json!({
+                        "ok": true,
+                        "chat": chat.summary,
+                        "locked_reason": null,
+                        "entries": chat.entries,
+                    }),
+                    None => json!({ "ok": false, "code": "not_found", "error": "No such chat" }),
+                }
+            }
+            "chat_send" => {
+                let text = request["text"].as_str().unwrap_or_default().to_string();
+                let (number, summary) = {
+                    let mut state = self.state.lock().expect("demo lock");
+                    let id = state.next_id;
+                    state.next_id += 10;
+                    let number = match number {
+                        Some(n) => n,
+                        None => {
+                            let n = state
+                                .chats
+                                .iter()
+                                .filter_map(|c| c.summary["number"].as_u64())
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            state.chats.insert(
+                                0,
+                                chats::Chat {
+                                    summary: json!({
+                                        "number": n, "title": chats::title_for(&text), "state": "idle",
+                                        "project": null, "mine": true, "updated_at": ago(0),
+                                        "url": format!("https://chatwithwork.com/northwind/chats/{n}"),
+                                    }),
+                                    entries: Vec::new(),
+                                },
+                            );
+                            n
+                        }
+                    };
+                    let Some(chat) = state
+                        .chats
+                        .iter_mut()
+                        .find(|c| c.summary["number"] == json!(number))
+                    else {
+                        return json!({ "ok": false, "code": "not_found", "error": "No such chat" });
+                    };
+                    if chat.summary["state"] == "processing" {
+                        return json!({ "ok": false, "code": "chat_busy", "error": "An answer is being written in this chat." });
+                    }
+                    chat.entries
+                        .push(json!({ "kind": "user", "id": id, "content": text }));
+                    chat.summary["state"] = json!("processing");
+                    chat.summary["updated_at"] = json!(ago(0));
+                    (number, chat.summary.clone())
+                };
+                self.changed(number);
+                let held = self.state.lock().expect("demo lock").held;
+                if !held {
+                    let id = self.state.lock().expect("demo lock").next_id;
+                    self.stream(number, chats::canned_stream(id + 1, id + 2));
+                }
+                json!({ "ok": true, "chat": summary })
+            }
+            "chat_cancel" => {
+                let Some(number) = number else {
+                    return json!({ "ok": false, "code": "bad_request", "error": "No chat" });
+                };
+                let streaming = {
+                    let mut state = self.state.lock().expect("demo lock");
+                    state.cancelled.insert(number);
+                    state.streaming.contains(&number)
+                };
+                if !streaming {
+                    self.settle(number);
+                }
+                json!({ "ok": true })
+            }
+            _ => json!({ "ok": true, "granted": true, "requested": false }),
+        }
+    }
+
+    /// Tell followers that `chat` changed.
+    fn changed(&self, chat: u64) {
+        self.chat_event(chat, json!({ "type": "changed" }));
+    }
+
+    fn chat_event(&self, chat: u64, update: Value) {
+        self.change(|s| {
+            s.chat_events
+                .push(json!({ "event": "chat", "chat": chat.to_string(), "update": update }));
+        });
+    }
+
+    /// Stop a chat's answer where it is.
+    fn settle(&self, chat: u64) {
+        self.change(|s| {
+            if let Some(c) = s
+                .chats
+                .iter_mut()
+                .find(|c| c.summary["number"] == json!(chat))
+            {
+                c.summary["state"] = json!("idle");
+                for entry in &mut c.entries {
+                    if entry["kind"] == "activity" {
+                        entry["pending"] = json!(false);
+                    }
+                }
+            }
+            s.cancelled.remove(&chat);
+        });
+        self.changed(chat);
+    }
+
+    /// Play `steps` into `chat` on a thread of their own.
+    fn stream(self: &Arc<Self>, chat: u64, steps: Vec<(Duration, chats::Step)>) {
+        let me = Arc::clone(self);
+        if !me.state.lock().expect("demo lock").streaming.insert(chat) {
+            return;
+        }
+        std::thread::spawn(move || {
+            for (pause, step) in steps {
+                std::thread::sleep(pause);
+                let cancelled = me
+                    .state
+                    .lock()
+                    .expect("demo lock")
+                    .cancelled
+                    .contains(&chat);
+                if cancelled {
+                    break;
+                }
+                me.apply(chat, &step);
+            }
+            me.change(|s| {
+                s.streaming.remove(&chat);
+            });
+            if me
+                .state
+                .lock()
+                .expect("demo lock")
+                .cancelled
+                .contains(&chat)
+            {
+                me.settle(chat);
+            }
+        });
+    }
+
+    /// One step of a streamed answer, as the server would write it.
+    fn apply(&self, chat: u64, step: &chats::Step) {
+        use chats::Step;
+        match step {
+            Step::Progress(text) => {
+                self.chat_event(chat, json!({ "type": "progress", "text": text }))
+            }
+            Step::Chunk { id, text } => {
+                self.change(|s| {
+                    if let Some(c) = s
+                        .chats
+                        .iter_mut()
+                        .find(|c| c.summary["number"] == json!(chat))
+                        && !c.entries.iter().any(|e| e["id"] == json!(id))
+                    {
+                        c.entries.push(
+                            json!({ "kind": "assistant", "id": id, "content": "", "sources": [] }),
+                        );
+                    }
+                });
+                self.chat_event(
+                    chat,
+                    json!({ "type": "chunk", "message_id": id, "text": text }),
+                );
+            }
+            Step::Activity {
+                id,
+                pending,
+                progress,
+            } => {
+                self.change(|s| {
+                    let Some(c) = s.chats.iter_mut().find(|c| c.summary["number"] == json!(chat)) else {
+                        return;
+                    };
+                    match c.entries.iter_mut().find(|e| e["id"] == json!(id)) {
+                        Some(entry) => {
+                            entry["pending"] = json!(pending);
+                            if !pending {
+                                let title = entry["title"].as_str().unwrap_or_default().replace("Searching", "Searched");
+                                entry["title"] = json!(title);
+                                entry["progress"] = Value::Null;
+                                if let Some(steps) = entry["steps"].as_array_mut() {
+                                    for step in steps.iter_mut() {
+                                        step["pending"] = json!(false);
+                                        let summary = step["summary"].as_str().unwrap_or_default().replace("Reading", "Read").replace('…', "");
+                                        step["summary"] = json!(summary);
+                                    }
+                                }
+                                let reads = entry["steps"].as_array().map_or(0, |s| s.iter().filter(|s| s["summary"].as_str().is_some_and(|t| t.starts_with("Read"))).count());
+                                let searches = entry["steps"].as_array().map_or(0, |s| s.len() - reads);
+                                let mut details = format!("{searches} search{}", if searches == 1 { "" } else { "es" });
+                                if reads > 0 {
+                                    details.push_str(&format!(", read {reads} file{}", if reads == 1 { "" } else { "s" }));
+                                }
+                                entry["details"] = json!(details);
+                            }
+                        }
+                        None => c.entries.push(json!({
+                            "kind": "activity", "id": id,
+                            "title": "Searching Drive and Slack", "details": "1 search",
+                            "progress": progress, "services": ["Drive", "Slack"], "pending": pending,
+                            "steps": [
+                                { "summary": "Searched Drive for “budget owner”", "pending": false, "files": ["Budget 2026.xlsx"] },
+                                { "summary": "Reading Budget 2026.xlsx…", "pending": true, "files": [] },
+                            ],
+                        })),
+                    }
+                });
+                self.changed(chat);
+            }
+            Step::Finish { id, content } => {
+                self.change(|s| {
+                    if let Some(c) = s.chats.iter_mut().find(|c| c.summary["number"] == json!(chat)) {
+                        c.summary["state"] = json!("idle");
+                        c.summary["updated_at"] = json!(ago(0));
+                        match c.entries.iter_mut().find(|e| e["id"] == json!(id)) {
+                            Some(entry) => entry["content"] = json!(content),
+                            None => c.entries.push(json!({ "kind": "assistant", "id": id, "content": content, "sources": [] })),
+                        }
+                    }
+                });
+                self.changed(chat);
+            }
+        }
+    }
+
+    /// A `chat` subscription: "watching", then every update to the chat
+    /// until the client goes away, as the daemon relays them.
+    fn follow(self: &Arc<Self>, stream: &mut impl Write, chat: &str) {
+        let Ok(number) = chat.parse::<u64>() else {
+            let _ = send(
+                stream,
+                &json!({ "ok": false, "code": "bad_request", "error": "not a chat number" }),
+            );
+            return;
+        };
+        if send(stream, &json!({ "ok": true, "topics": ["chat"] })).is_err() {
+            return;
+        }
+        let watching = json!({ "event": "chat", "chat": chat, "update": { "type": "watching" } });
+        if send(stream, &watching).is_err() {
+            return;
+        }
+        let (mut seen, held, catch_up) = {
+            let state = self.state.lock().expect("demo lock");
+            let processing = state.chats.iter().any(|c| {
+                c.summary["number"] == json!(number) && c.summary["state"] == "processing"
+            });
+            (
+                state.chat_events.len(),
+                state.held,
+                number == 12 && processing,
+            )
+        };
+        // Chat 12 was being answered before it was opened: what's written
+        // so far arrives first, and the rest streams unless held.
+        if catch_up {
+            let chunk = json!({ "event": "chat", "chat": chat,
+                                "update": { "type": "chunk", "message_id": 123, "text": chats::stream_so_far() } });
+            if send(stream, &chunk).is_err() {
+                return;
+            }
+            if !held {
+                self.stream(12, chats::rest_of_stream());
+            }
+        }
+        loop {
+            let events = {
+                let mut state = self.state.lock().expect("demo lock");
+                while state.chat_events.len() == seen {
+                    state = self.changed.wait(state).expect("demo lock");
+                }
+                let events = state.chat_events[seen..].to_vec();
+                seen = state.chat_events.len();
+                events
+            };
+            for event in events.into_iter().filter(|e| e["chat"] == json!(chat)) {
+                if send(stream, &event).is_err() {
+                    return;
+                }
             }
         }
     }

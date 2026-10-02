@@ -39,7 +39,7 @@ Usage: cww-app [options]
 Options:
   --background         Start in the tray without opening the settings window
                        (how the app starts at login)
-  --page <name>        Open the settings window on a page: folders, privacy,
+  --page <name>        Open the window on a page: chat, folders, privacy,
                        activity, account, general, welcome
   --screenshot <file>  Save a PNG of the settings window and quit
   --version            Print the version
@@ -120,6 +120,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, String>
 fn page(name: &str) -> Option<Page> {
     Some(match name {
         "welcome" => Page::Welcome,
+        "chat" => Page::Chat,
         "folders" => Page::Folders,
         "privacy" => Page::Privacy,
         "activity" => Page::Activity,

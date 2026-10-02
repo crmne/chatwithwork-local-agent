@@ -61,6 +61,9 @@ fastframe-emoji = { version = "0.2.1", git = "https://github.com/crmne/fastframe
 memmap2 = "0.9"
 # Waits for the daemon's socket to appear instead of polling for it.
 notify = "8.2"
+# Answers in chats are Markdown (CommonMark with GitHub's tables and
+# strikethrough), parsed here and drawn as the web app draws them.
+pulldown-cmark = { version = "0.13", default-features = false }
 # Only for --demo, whose stand-in daemon uses the real listener.
 tokio = { version = "1.53", features = ["rt-multi-thread"], optional = true }
 tokio-util = { version = "0.7", features = ["io-util"], optional = true }
@@ -99,8 +102,10 @@ winresource = "0.1"
 demo = ["dep:tokio", "dep:tokio-util"]
 
 [dev-dependencies]
-# Drives the settings window through its accessibility tree, without a GPU.
-egui_kittest = "0.36"
+# Drives the window through its accessibility tree. The chat page's tests
+# also render it offscreen with wgpu (a software rasterizer where there is
+# one) and save PNG snapshots.
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
 tempfile = "3.27"
 
 # The stand-in daemon, and a test that runs the real one.

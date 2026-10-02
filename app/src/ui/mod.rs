@@ -8,6 +8,7 @@
 
 mod account;
 mod activity;
+pub mod chat;
 mod folders;
 mod general;
 mod privacy;
@@ -135,6 +136,7 @@ impl AppState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Welcome,
+    Chat,
     Folders,
     Privacy,
     Activity,
@@ -143,7 +145,8 @@ pub enum Page {
 }
 
 impl Page {
-    const NAV: [Page; 5] = [
+    const NAV: [Page; 6] = [
+        Page::Chat,
         Page::Folders,
         Page::Privacy,
         Page::Activity,
@@ -154,6 +157,7 @@ impl Page {
     fn title(self) -> &'static str {
         match self {
             Page::Welcome => "Welcome",
+            Page::Chat => "Chat",
             Page::Folders => "Shared Folders",
             Page::Privacy => "Always Private",
             Page::Activity => "Activity",
@@ -165,6 +169,7 @@ impl Page {
     fn icon(self) -> widgets::Icon {
         match self {
             Page::Welcome | Page::Folders => widgets::Icon::Folder,
+            Page::Chat => widgets::Icon::Chat,
             Page::Privacy => widgets::Icon::Lock,
             Page::Activity => widgets::Icon::Clock,
             Page::Account => widgets::Icon::Person,
@@ -292,6 +297,11 @@ pub struct SettingsApp {
     system_fonts: bool,
     /// Reveals a switch between light and dark from the middle outwards.
     transition: fastframe_theme::Transition,
+    /// The Chat page, made the first time it's shown.
+    chat: Option<chat::ChatPage>,
+    /// The style the window has now: the Chat page's (in this theme) or
+    /// the platform's.
+    styled_for_chat: Option<bool>,
     /// Tests switch the reveal off: a bare context sends no screenshot and
     /// its clock doesn't move, so the old theme would be held.
     reveal: bool,
@@ -310,6 +320,8 @@ impl SettingsApp {
             attached: false,
             system_fonts: !cfg!(test),
             transition: fastframe_theme::Transition::default(),
+            chat: None,
+            styled_for_chat: None,
             reveal: !cfg!(test),
             theme,
             page,
@@ -372,6 +384,13 @@ impl SettingsApp {
         }
         let status = self.shared.status();
         let p = self.theme.palette;
+        self.style_for_page(ui.ctx());
+
+        if self.page == Page::Chat {
+            self.chat_page(ui, status.as_ref());
+            self.transition.paint(ui.ctx());
+            return;
+        }
 
         if self.page != Page::Welcome {
             egui::Panel::left("navigation")
@@ -408,9 +427,72 @@ impl SettingsApp {
         self.transition.paint(ui.ctx());
     }
 
+    /// The Chat page has the web's look and fills the window; the others
+    /// follow the platform.
+    fn style_for_page(&mut self, ctx: &egui::Context) {
+        let chat = self.page == Page::Chat;
+        let wanted = chat.then_some(self.theme.dark);
+        let current = self
+            .styled_for_chat
+            .and_then(|dark| (dark != self.theme.dark || chat).then_some(dark));
+        if self.styled_for_chat.is_some() && wanted == current && chat {
+            return;
+        }
+        if !chat && self.styled_for_chat.is_none() {
+            return;
+        }
+        if chat {
+            let theme = if self.theme.dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            };
+            ctx.set_style_of(theme, chat::style(self.theme.style(), self.theme.dark));
+            self.styled_for_chat = Some(self.theme.dark);
+        } else {
+            self.theme.apply(ctx);
+            self.styled_for_chat = None;
+        }
+    }
+
+    fn chat_page(&mut self, ui: &mut Ui, status: Option<&Status>) {
+        let socket = self.shared.paths.socket_path();
+        let page = self
+            .chat
+            .get_or_insert_with(|| chat::ChatPage::new(&socket));
+        let env = chat::Env {
+            status,
+            known: self.shared.is_known(),
+            dark: self.theme.dark,
+            starting: self.general.starting,
+        };
+        let action = egui::CentralPanel::default()
+            .frame(egui::Frame::new())
+            .show(ui, |ui| page.show(ui, &env))
+            .inner;
+        match action {
+            Some(chat::Action::Settings(page)) => self.page = page,
+            Some(chat::Action::StartAgent) => self.start_agent(ui.ctx()),
+            None => {}
+        }
+    }
+
+    /// What the Chat page knows, once it has been shown.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn chat_state(&self) -> Option<&chat::state::ChatState> {
+        self.chat.as_ref().map(chat::ChatPage::state)
+    }
+
+    /// The Chat page, once it has been shown.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn chat(&mut self) -> Option<&mut chat::ChatPage> {
+        self.chat.as_mut()
+    }
+
     fn page_contents(&mut self, ui: &mut Ui, status: Option<&Status>) {
         match self.page {
             Page::Welcome => self.welcome_page(ui, status),
+            Page::Chat => {}
             Page::Folders => self.folders_page(ui, status),
             Page::Privacy => self.privacy_page(ui, status),
             Page::Activity => self.activity_page(ui, status),
@@ -769,6 +851,9 @@ impl eframe::App for SettingsApp {
 
 impl Drop for SettingsApp {
     fn drop(&mut self) {
+        if let Some(chat) = &self.chat {
+            chat.stop();
+        }
         self.shared.set_ctx(None);
     }
 }

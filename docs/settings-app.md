@@ -6,6 +6,7 @@
 
 - **Menu bar / tray item:** the state (online, paused, offline, not paired, not running), indexing progress or the last access, Pause Sharing / Resume Sharing, Settings, and Quit. The menu is the platform's own: an `NSMenu` on macOS, a Win32 menu on Windows, and DBusMenu on Linux, drawn by the panel.
 - **Settings window:** shared folders (added with the native folder picker, renamed, removed, with each folder's index state), the deny list as information, the local activity log, pairing with the browser-based device flow, start at login, and pausing.
+- **Chat:** your Chat with Work chats, drawn as the web app draws them, through the daemon's chat API; see [chat-window.md](chat-window.md).
 - **First run:** a welcome page starts the agent (`cww daemon install`), pairs, and offers to share the Documents folder. Nothing is shared until the user clicks a button that says so.
 - **Pairing** runs `cww login --json` (CONTROL.md, "Pairing"): the same flow as `cww login` and the terminal UI, which also reloads the running daemon (or starts it, if it isn't running) so the window never starts it a second time. A daemon that couldn't pick the pairing up is reported under the pairing. The device key is created by the `cww` binary that reads it, so the sandboxed daemon never writes to the keychain and macOS doesn't ask the daemon for permission to use another program's keychain item. `cww login` opens the approval page with the shared `cww::browser` helper, which only hands plain http(s) links on the server being paired with to the system; the window offers to open it again. Disconnecting runs `cww logout`.
 
@@ -86,7 +87,8 @@ cargo run -p cww-app                         # against the daemon in $CWW_HOME o
 cargo run -p cww-app --features demo -- --demo        # a stand-in daemon with sample data
 cargo run -p cww-app --features demo -- --demo-fresh  # a first run
 cargo run -p cww-app --features demo -- --demo --page activity --screenshot activity.png
+cargo run -p cww-app --features demo -- --demo --page chat   # sample chats, one answer streaming
 cargo test -p cww-app                        # includes UI tests through the accessibility tree
 ```
 
-The UI tests drive the window with `egui_kittest` against the stand-in daemon, which records the requests it gets. A test on Unix runs the real daemon and checks the app reads every answer.
+The UI tests drive the window with `egui_kittest` against the stand-in daemon, which records the requests it gets and serves synthetic chats. The Chat page's tests also render it offscreen with wgpu and keep PNG snapshots in `app/tests/snapshots`. A test on Unix runs the real daemon and checks the app reads every answer.

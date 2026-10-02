@@ -428,6 +428,7 @@ pub fn install_fonts(ctx: &egui::Context, text: &fastframe_text::TextRendering) 
     fonts
         .families
         .insert(FontFamily::Name(BOLD.into()), bold_family);
+    super::chat::tokens::add_fonts(&mut fonts);
     text.apply_to(&mut fonts);
     ctx.set_fonts(fonts);
 }
@@ -443,6 +444,7 @@ pub fn install_default_fonts(ctx: &egui::Context, text: &fastframe_text::TextRen
     fonts
         .families
         .insert(FontFamily::Name(BOLD.into()), proportional);
+    super::chat::tokens::add_fonts(&mut fonts);
     text.apply_to(&mut fonts);
     ctx.set_fonts(fonts);
 }

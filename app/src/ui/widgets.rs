@@ -14,6 +14,7 @@ use crate::model::Platform;
 /// so they match each other and scale cleanly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
+    Chat,
     Folder,
     Lock,
     Clock,
@@ -33,6 +34,13 @@ pub fn paint_icon(
     let stroke = Stroke::new(1.4 * s.max(1.0), color);
     let p = |x: f32, y: f32| -> Pos2 { center + vec2((x - 8.0) * s, (y - 8.0) * s) };
     match icon {
+        Icon::Chat => {
+            // A speech bubble with its tail at the bottom left.
+            let body = egui::Rect::from_min_max(p(1.8, 2.5), p(14.2, 11.5));
+            painter.rect_stroke(body, 3.0 * s, stroke, egui::StrokeKind::Middle);
+            let tail = vec![p(4.5, 11.5), p(3.5, 14.2), p(7.5, 11.5)];
+            painter.add(Shape::line(tail, stroke));
+        }
         Icon::Folder => {
             let outline = vec![
                 p(1.5, 3.5),
