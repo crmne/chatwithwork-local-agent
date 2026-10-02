@@ -889,10 +889,20 @@ fn conversation(
     }
     let pane = &app.chat;
     let body = area;
-    let (mut lines, marks) = transcript(app, body.width as usize, theme, now);
+    let (mut lines, marks, question) = transcript(app, body.width as usize, theme, now);
     let height = body.height as usize;
     let most = lines.len().saturating_sub(height);
-    let scroll = pane.scroll.min(most);
+    // Pinned after a send: the newest question a line under the top, its
+    // answer under it, as long as there's more below than fits.
+    let scroll = match question.filter(|_| pane.pinned) {
+        Some(at) => {
+            let start = at.saturating_sub(1).min(most);
+            let scroll = most - start;
+            pane.pinned_scroll.set(scroll);
+            scroll
+        }
+        None => pane.scroll.min(most),
+    };
     let end = lines.len() - scroll;
     let start = end.saturating_sub(height);
     lines.truncate(end);
@@ -936,12 +946,14 @@ fn link_in(line: &Line) -> Option<String> {
 }
 
 /// The conversation as lines, oldest first, with the lines a click acts on.
+/// The third value is where the newest question starts.
 fn transcript(
     app: &App,
     width: usize,
     theme: &Theme,
     now: OffsetDateTime,
-) -> (Vec<Line<'static>>, Vec<(usize, Hit)>) {
+) -> (Vec<Line<'static>>, Vec<(usize, Hit)>, Option<usize>) {
+    let mut question = None;
     let mut marks: Vec<(usize, Hit)> = Vec::new();
     let pane = &app.chat;
     let width = width.max(16);
@@ -961,7 +973,7 @@ fn transcript(
             lines.push(Line::raw(""));
             lines.push(notice_line(reason, Signal::Attention, width, theme).remove(0));
         }
-        return (lines, marks);
+        return (lines, marks, None);
     }
     if pane.transcript.is_none() && pane.loading {
         lines.push(Line::from(vec![
@@ -980,6 +992,7 @@ fn transcript(
                 attachments,
                 ..
             } => {
+                question = Some(lines.len());
                 bubble(&mut lines, content, author.as_deref(), width, theme, false);
                 attachment_lines(&mut lines, attachments, width, theme);
             }
@@ -1039,6 +1052,12 @@ fn transcript(
             Entry::Unknown => {}
         }
     }
+    // A question still on its way goes before any answer streaming in
+    // ahead of the server's copy of it: that answer is its own.
+    if let Some(text) = &pane.pending_question {
+        question = Some(lines.len());
+        bubble(&mut lines, text, None, width, theme, true);
+    }
     // Answers still being written that the last read didn't have yet.
     let mut writing = false;
     for (id, text) in &pane.streamed {
@@ -1046,9 +1065,6 @@ fn transcript(
             answer_lines(&mut lines, text, &[], width, theme);
             writing = true;
         }
-    }
-    if let Some(question) = &pane.pending_question {
-        bubble(&mut lines, question, None, width, theme, true);
     }
     if pane.working() && !live_activity {
         // As the web says it: "Writing" once the answer streams in.
@@ -1073,7 +1089,7 @@ fn transcript(
     while lines.last().is_some_and(|l| l.width() == 0) {
         lines.pop();
     }
-    (lines, marks)
+    (lines, marks, question)
 }
 
 /// The files sent with a question, under its bubble.

@@ -626,6 +626,13 @@ pub struct ChatPane {
     pub error: Option<String>,
     /// Transcript lines scrolled up from the newest.
     pub scroll: usize,
+    /// After sending, the newest question stays near the top with its
+    /// answer growing under it, as the web scrolls, until the person
+    /// scrolls themselves.
+    pub pinned: bool,
+    /// Where a pinned view was last drawn, in lines up from the newest,
+    /// so scrolling away from it starts there.
+    pub pinned_scroll: std::cell::Cell<usize>,
     /// Show every tool step under its activity line.
     pub show_steps: bool,
 }
@@ -665,6 +672,8 @@ impl Default for ChatPane {
             stopping: false,
             error: None,
             scroll: 0,
+            pinned: false,
+            pinned_scroll: std::cell::Cell::new(0),
             show_steps: false,
         }
     }
@@ -1486,7 +1495,10 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') if in_chat => self.move_selection(1),
             KeyCode::PageUp if in_chat => self.scroll_transcript(10),
             KeyCode::PageDown if in_chat => self.scroll_transcript(-10),
-            KeyCode::End if in_chat => self.chat.scroll = 0,
+            KeyCode::End if in_chat => {
+                self.chat.scroll = 0;
+                self.chat.pinned = false;
+            }
             KeyCode::Enter if in_chat && self.chat.ready() => return self.open_selected(),
             KeyCode::Char('i') if in_chat && self.chat.ready() => self.focus = Focus::Composer,
             _ => {}
@@ -2680,6 +2692,7 @@ impl App {
         self.chat.sending = true;
         self.chat.pending_question = Some(text.clone());
         self.chat.scroll = 0;
+        self.chat.pinned = true;
         let attachments = std::mem::take(&mut self.chat.attachments)
             .into_iter()
             .filter_map(|a| a.uploaded.map(|(id, _)| id))
@@ -2872,6 +2885,9 @@ impl App {
     }
 
     fn scroll_transcript(&mut self, delta: isize) {
+        if std::mem::take(&mut self.chat.pinned) {
+            self.chat.scroll = self.chat.pinned_scroll.get();
+        }
         self.chat.scroll = self.chat.scroll.saturating_add_signed(delta).min(10_000);
     }
 
@@ -2922,6 +2938,7 @@ impl App {
         chat.pending_question = None;
         chat.error = None;
         chat.scroll = 0;
+        chat.pinned = false;
         chat.stopping = false;
         chat.loading = true;
         chat.stale = false;
@@ -2948,6 +2965,7 @@ impl App {
         chat.pending_question = None;
         chat.error = None;
         chat.scroll = 0;
+        chat.pinned = false;
         chat.loading = false;
         chat.stale = false;
         chat.stopping = false;

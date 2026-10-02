@@ -2971,3 +2971,52 @@ fn a_card_that_needs_you_is_tinted_whole_never_striped() {
         "no stripe in the signal's own colour"
     );
 }
+
+#[test]
+fn a_sent_question_stays_near_the_top_while_its_answer_grows() {
+    let mut app = app();
+    open_budget(&mut app);
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(budget_transcript("idle")),
+    }));
+    assert_eq!(app.focus, Focus::Composer);
+    type_text(&mut app, "And Q4?");
+    app.update(key(KeyCode::Enter));
+    assert!(app.chat.pinned);
+    // The server takes the question, then streams the answer under it.
+    let mut taken = budget_transcript("processing");
+    taken.entries.push(Entry::User {
+        id: 76,
+        content: "And Q4?".into(),
+        author: None,
+        attachments: vec![],
+    });
+    app.update(Msg::Chat(ChatMsg::Shown {
+        chat: 42,
+        result: Ok(taken),
+    }));
+    let long: String = (1..=60)
+        .map(|n| format!("Line {n} of the answer.\n\n"))
+        .collect();
+    app.update(Msg::Chat(ChatMsg::Live {
+        chat: 42,
+        live: Live::Chunk {
+            message_id: 77,
+            text: long,
+        },
+    }));
+    let screen = render_to_string(&app, 100, 30);
+    let row = screen
+        .lines()
+        .position(|l| l.contains("And Q4?"))
+        .unwrap_or_else(|| panic!("the question in view:\n{screen}"));
+    assert!(row <= 2, "near the top, not pushed off:\n{screen}");
+    assert!(screen.contains("Line 1 of the answer."), "{screen}");
+    assert!(!screen.contains("Line 60 of the answer."), "{screen}");
+
+    // Scrolling lets go of it.
+    let (x, y) = find(&app, "Line 1 of the answer.");
+    mouse(&mut app, crossterm::event::MouseEventKind::ScrollDown, x, y);
+    assert!(!app.chat.pinned);
+}
