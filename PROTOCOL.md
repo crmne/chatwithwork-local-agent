@@ -521,22 +521,25 @@ These are enforced by the daemon whatever the server does. The defaults can be c
 | Request | Answers |
 |---|---|
 | `GET /local_agent/chats` | `chats` (newest first: `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`, `model`, `can`), `projects`, `account`, `user`, `locked_reason` |
-| `GET /local_agent/chats/<number>` | `chat`, `locked_reason`, `entries` (`user` with `attachments`, `activity` with title, details, `pending`, steps with file names and `waiting`, `assistant` with Markdown and `sources`, `notice`), and `approvals` |
-| `GET /local_agent/models` | `{"default_model_id", "models": [{"id","name","provider","description","selectable","reason"}]}` |
+| `GET /local_agent/chats/<number>` | `chat`, `locked_reason`, `entries` (`user` with `attachments`, `activity` with title, details, `pending`, steps with file names and `waiting`, `assistant` with Markdown and `sources`, `notice`), `approvals`, and `questions` |
+| `GET /local_agent/models` | `{"default_model_id", "models": [{"id","name","provider","description","rate","selectable","reason"}]}` |
 | `POST /local_agent/chats` `{"content":…}` | `201 {"chat":…}`: a new chat with its first question |
 | `POST /local_agent/chats/<number>/messages` `{"content":…}` | `202 {"chat":…}`, or `409 chat_busy` while an answer is written |
 | `POST /local_agent/chats/<number>/cancellation` | `202`: stops the answer |
 | `POST /local_agent/chats/<number>/tool_calls/<id>/approval` `{"for_rest_of_chat":…}` | `202 {"chat":…}` |
 | `POST /local_agent/chats/<number>/tool_calls/<id>/denial` `{"reason":…}` | `202 {"chat":…}` |
+| `POST /local_agent/chats/<number>/tool_calls/<id>/input` `{"input":{…}}` | `202 {"chat":…}`: answers a question (no `input` for a page to visit) |
+| `DELETE /local_agent/chats/<number>/tool_calls/<id>/input` | `202 {"chat":…}`: declines it |
 | `POST /local_agent/uploads` (multipart, one `file`) | `{"signed_id","filename","byte_size","content_type"}`, or `422 attachment_refused` |
-| `POST /local_agent/chats/<number>/retry` | `202 {"chat":…}` |
+| `POST /local_agent/chats/<number>/retry` `{"message_id":…}` | `202 {"chat":…}`, or `409 chat_busy` |
 | `POST /local_agent/chats/<number>/branches` `{"message_id":…}` | `201 {"chat":…}`: the new chat |
 | `PATCH /local_agent/chats/<number>` `{"title":…}` | `{"chat":…}` |
 | `DELETE /local_agent/chats/<number>` | `204` |
-| `POST /local_agent/chats/<number>/share` | the server's answer, usually with `url` |
+| `POST /local_agent/chats/<number>/share` | `201 {"url","expires_at","chat"}` |
+| `DELETE /local_agent/chats/<number>/share` | `{"chat":…}`: stops sharing |
 | `POST /local_agent/chat_access_request` | `202 {"granted","requested","approve_url"}` |
 
-Both ways of asking take an optional `model_id` (from `/local_agent/models`) and `attachments`, a list of `signed_id`s from uploads; a new chat also takes `project_id`. An unknown or unselectable model fails with `422 model_unavailable`. Every chat's JSON carries `model` (`{"id","name"}` or null) and `can` (`retry`, `branch`, `rename`, `delete`, `share`); a client treats a missing `can` as allowing none of them. `approvals` lists the changes the answer stopped at: `id`, `service`, `effect`, and either `decidable: true` with `summary`, `details` (`label`, `value`) and `allow_for_rest_of_chat`, or `decidable: false` with `waiting_for`. Only the person who drove that turn decides, only while the call waits (`409 already_decided` otherwise). The upload is `multipart/form-data` and can take longer than other calls; files are at most 25 MB.
+Both ways of asking take an optional `model_id` (from `/local_agent/models`) and `attachments`, a list of `signed_id`s from uploads; a new chat also takes `project_id`. An unknown or unselectable model fails with `422 model_unavailable`. `message_id` is optional for retry and branch (the latest question or answer without one). Every chat's JSON carries `model` (`{"id","name"}` or null), `share` (`{"url","expires_at"}` or null) and `can` (`retry`, `branch`, `rename`, `delete`, `share`); a client treats a missing `can` as allowing none of them. `approvals` lists the changes the answer stopped at: `id`, `service`, `effect`, and either `decidable: true` with `summary`, `details` (`label`, `value`) and `allow_for_rest_of_chat`, or `decidable: false` with `waiting_for`. `questions` lists what a tool's server asked the person (MCP elicitation): `id`, `service`, and either `decidable: true` with `message`, `kind` (`form` with `fields`, or `url` with `url` and `host`) and a `note`, or `decidable: false` with `waiting_for`; a missing required field is `422 invalid`. Only the person who drove that turn decides, only while the call waits (`409 already_decided` otherwise). The upload is `multipart/form-data` and can take longer than other calls; files are at most 25 MB.
 
 `403 chat_access_required` (with `requested` and `approve_url`) means the owner hasn't allowed chats. `403 insufficient_scope` means the token predates the permission: the daemon refreshes the token and retries once. `401` is handled the same way. Other codes (`locked`, `rate_limited`, `invalid`, `not_found`, `forbidden`) are passed to the terminal as they are. An answer that isn't this JSON means the server has no chat API, or not that call yet (an older server without models, uploads or the chat actions), and the terminal says which.
 

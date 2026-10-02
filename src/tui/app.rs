@@ -315,6 +315,8 @@ pub enum ChatMsg {
     },
 }
 
+// One message at a time goes through the channel; a read chat is the big one.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
     Key(KeyEvent),

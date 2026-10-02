@@ -33,8 +33,11 @@ pub struct ChatSummary {
     /// RFC 3339.
     pub updated_at: String,
     pub url: String,
-    /// The model it answers with; `None` from an older server.
+    /// The model the next question goes to; `None` from an older server.
     pub model: Option<ModelRef>,
+    /// Its public link while it has one, only for the person who started
+    /// it.
+    pub share: Option<ShareLink>,
     /// What this person may do with it; `None` from an older server, which
     /// offers none of it here.
     pub can: Option<Can>,
@@ -58,6 +61,14 @@ pub struct ModelRef {
     #[serde(deserialize_with = "id_string")]
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ShareLink {
+    pub url: String,
+    /// RFC 3339.
+    pub expires_at: Option<String>,
 }
 
 /// What the server lets this person do with a chat.
@@ -94,6 +105,8 @@ pub struct Model {
     pub name: String,
     pub provider: String,
     pub description: Option<String>,
+    /// "About 3 credits per answer".
+    pub rate: Option<String>,
     /// False when it can't be used right now, for `reason`.
     pub selectable: bool,
     pub reason: Option<String>,
@@ -106,6 +119,7 @@ impl Default for Model {
             name: String::new(),
             provider: String::new(),
             description: None,
+            rate: None,
             selectable: true,
             reason: None,
         }
@@ -238,6 +252,8 @@ pub struct Transcript {
     pub entries: Vec<Entry>,
     /// Changes the answer stopped at, oldest first, until each is decided.
     pub approvals: Vec<Approval>,
+    /// Questions the tools' servers asked, until each is answered.
+    pub questions: Vec<Question>,
 }
 
 impl Transcript {
@@ -246,17 +262,64 @@ impl Transcript {
         self.approvals.iter().find(|a| a.decidable)
     }
 
-    /// A step waits for the person, but not on a change to approve: the
-    /// tool's server asked them something, which is answered in the
-    /// browser for now.
-    pub fn waiting_for_answer(&self) -> Option<&Step> {
-        if self.chat.processing() || !self.approvals.is_empty() {
-            return None;
+    /// The first question this person can answer, if any.
+    pub fn next_question(&self) -> Option<&Question> {
+        self.questions.iter().find(|q| q.decidable)
+    }
+}
+
+/// A question a tool's server asked while its tool runs (MCP elicitation),
+/// as the web's question card asks it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Question {
+    pub id: u64,
+    /// "Notion".
+    pub service: String,
+    /// This person answers it; otherwise it waits for `waiting_for`.
+    pub decidable: bool,
+    pub message: String,
+    /// `form` (fill in `fields`) or `url` (visit `url`, then say so).
+    pub kind: String,
+    pub fields: Vec<Field>,
+    /// The page to visit, only `http` and `https`.
+    pub url: Option<String>,
+    pub host: Option<String>,
+    /// What to keep in mind, to show with the form.
+    pub note: Option<String>,
+    pub waiting_for: Option<String>,
+}
+
+impl Question {
+    pub fn is_url(&self) -> bool {
+        self.kind == "url"
+    }
+}
+
+/// One thing a question's form asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Field {
+    pub name: String,
+    pub title: String,
+    pub description: Option<String>,
+    /// `string`, `integer`, `number`, `boolean` or `array` (any of
+    /// `choices`).
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub required: bool,
+    pub choices: Option<Vec<String>>,
+    pub default: Option<Value>,
+}
+
+impl Field {
+    /// What the form calls it.
+    pub fn label(&self) -> &str {
+        if self.title.is_empty() {
+            &self.name
+        } else {
+            &self.title
         }
-        self.entries.iter().rev().find_map(|entry| match entry {
-            Entry::Activity { steps, .. } => steps.iter().find(|s| s.waiting),
-            _ => None,
-        })
     }
 }
 
@@ -295,12 +358,14 @@ pub struct Uploaded {
     pub content_type: String,
 }
 
-/// What sharing a chat answered: usually the link.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A chat's new public link.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
 pub struct Shared {
-    pub url: Option<String>,
-    /// The whole answer, for anything else the server says.
-    pub response: Value,
+    pub url: String,
+    /// RFC 3339.
+    pub expires_at: Option<String>,
+    pub chat: ChatSummary,
 }
 
 /// A question to ask with [`Chats::ask`].
@@ -535,20 +600,22 @@ impl Chats {
         parse(response)
     }
 
-    /// Answer the last question again. Answers with the chat.
-    pub fn retry(&self, chat: u64) -> Result<ChatSummary, Failure> {
+    /// Answer `message` again, or the latest question. Answers with the
+    /// chat; `chat_busy` while an answer is written.
+    pub fn retry(&self, chat: u64, message: Option<u64>) -> Result<ChatSummary, Failure> {
         let response = self.call(&ControlRequest::ChatRetry {
             chat: chat.to_string(),
+            message: message.map(|m| m.to_string()),
         })?;
         parse(response["chat"].clone())
     }
 
-    /// A new chat with the conversation up to `message`. Answers with the
-    /// new chat.
-    pub fn branch(&self, chat: u64, message: u64) -> Result<ChatSummary, Failure> {
+    /// A new chat with the conversation up to `message`, or all of it.
+    /// Answers with the new chat.
+    pub fn branch(&self, chat: u64, message: Option<u64>) -> Result<ChatSummary, Failure> {
         let response = self.call(&ControlRequest::ChatBranch {
             chat: chat.to_string(),
-            message: message.to_string(),
+            message: message.map(|m| m.to_string()),
         })?;
         parse(response["chat"].clone())
     }
@@ -568,17 +635,45 @@ impl Chats {
         .map(|_| ())
     }
 
+    /// Make the chat's public link, or give the one it has 30 more days.
     pub fn share(&self, chat: u64) -> Result<Shared, Failure> {
-        let mut response = self.call(&ControlRequest::ChatShare {
+        parse(self.call(&ControlRequest::ChatShare {
+            chat: chat.to_string(),
+        })?)
+    }
+
+    /// Stop sharing: the link stops working. Answers with the chat.
+    pub fn unshare(&self, chat: u64) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatUnshare {
             chat: chat.to_string(),
         })?;
-        if let Some(object) = response.as_object_mut() {
-            object.remove("ok");
-        }
-        Ok(Shared {
-            url: response["url"].as_str().map(str::to_string),
-            response,
-        })
+        parse(response["chat"].clone())
+    }
+
+    /// Answer a question from a tool's server: the form's values by field
+    /// name, or `None` once the person has been to the page it asked them
+    /// to open. Answers with the chat; `invalid` says what's missing.
+    pub fn answer(
+        &self,
+        chat: u64,
+        tool_call: u64,
+        input: Option<Value>,
+    ) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatAnswer {
+            chat: chat.to_string(),
+            tool_call: tool_call.to_string(),
+            input,
+        })?;
+        parse(response["chat"].clone())
+    }
+
+    /// Decline a question from a tool's server. Answers with the chat.
+    pub fn decline(&self, chat: u64, tool_call: u64) -> Result<ChatSummary, Failure> {
+        let response = self.call(&ControlRequest::ChatDecline {
+            chat: chat.to_string(),
+            tool_call: tool_call.to_string(),
+        })?;
+        parse(response["chat"].clone())
     }
 
     pub fn cancel(&self, chat: u64) -> Result<(), Failure> {
@@ -764,19 +859,7 @@ mod tests {
         assert_eq!(next.id, 12);
         assert_eq!(next.details[0].value, "Fix login");
         assert_eq!(transcript.approvals[1].waiting_for.as_deref(), Some("Ada"));
-        assert_eq!(
-            transcript.waiting_for_answer(),
-            None,
-            "it waits on approvals"
-        );
-
-        // Waiting with nothing to approve: the tool's server asked something.
-        let mut asking = transcript.clone();
-        asking.approvals.clear();
-        assert_eq!(
-            asking.waiting_for_answer().map(|s| s.summary.as_str()),
-            Some("Create issue in Linear")
-        );
+        assert_eq!(transcript.next_question(), None);
 
         // An older server: no model, nothing it allows.
         let old: ChatSummary = serde_json::from_value(json!({ "number": 1 })).unwrap();
@@ -790,6 +873,44 @@ mod tests {
         assert!(
             models.get("gpt-5").unwrap().selectable,
             "selectable unless said"
+        );
+    }
+
+    #[test]
+    fn parses_questions_from_a_tools_server() {
+        let transcript: Transcript = serde_json::from_value(json!({
+            "chat": { "number": 42, "share": { "url": "https://x/shared/abc", "expires_at": "2026-11-01T09:00:00Z" } },
+            "questions": [
+                { "id": 33, "service": "Linear", "decidable": false, "waiting_for": "Ada Lovelace" },
+                { "id": 32, "service": "Notion", "decidable": true,
+                  "message": "Which environment should the report cover?", "kind": "form",
+                  "fields": [
+                    { "name": "environment", "title": "Environment", "description": null, "type": "string",
+                      "required": true, "choices": ["staging", "production"], "default": null },
+                    { "name": "days", "title": "", "type": "integer", "required": false, "choices": null, "default": 7 }
+                  ],
+                  "url": null, "host": null, "note": "Only Notion sees your answer.",
+                  "answer_path": "/x", "decline_path": "/x" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            transcript.chat.share.as_ref().map(|s| s.url.as_str()),
+            Some("https://x/shared/abc")
+        );
+        let question = transcript.next_question().unwrap();
+        assert_eq!(question.id, 32);
+        assert!(!question.is_url());
+        assert_eq!(question.fields[0].kind, "string");
+        assert_eq!(
+            question.fields[0].choices.as_deref(),
+            Some(&["staging".to_string(), "production".to_string()][..])
+        );
+        assert_eq!(question.fields[1].label(), "days");
+        assert_eq!(question.fields[1].default, Some(json!(7)));
+        assert_eq!(
+            question.note.as_deref(),
+            Some("Only Notion sees your answer.")
         );
     }
 

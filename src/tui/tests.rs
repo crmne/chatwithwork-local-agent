@@ -817,6 +817,7 @@ fn summary(number: u64, title: &str, updated_at: &str) -> ChatSummary {
         updated_at: updated_at.into(),
         url: format!("https://chatwithwork.com/482139075/chats/{number}"),
         model: None,
+        share: None,
         can: None,
     }
 }
@@ -857,6 +858,7 @@ fn budget_transcript(state: &str) -> Transcript {
         chat,
         locked_reason: None,
         approvals: vec![],
+        questions: vec![],
         entries: vec![
             Entry::User {
                 id: 1,

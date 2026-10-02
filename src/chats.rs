@@ -287,28 +287,29 @@ impl ChatClient {
         )
     }
 
-    /// Answer the last question again.
-    pub fn retry(&self, chat: &str) -> Result<Value> {
+    /// Answer `message` again, or the latest question.
+    pub fn retry(&self, chat: &str, message: Option<&str>) -> Result<Value> {
         let chat = chat_number(chat)?;
+        let body = message_body(message)?;
         newer(
             self.call(
                 "POST",
                 &format!("local_agent/chats/{chat}/retry"),
-                Body::Empty,
+                Body::Json(&body),
             ),
             "can't retry answers from here yet",
         )
     }
 
-    /// A new chat with the conversation up to `message`.
-    pub fn branch(&self, chat: &str, message: &str) -> Result<Value> {
+    /// A new chat with the conversation up to `message`, or all of it.
+    pub fn branch(&self, chat: &str, message: Option<&str>) -> Result<Value> {
         let chat = chat_number(chat)?;
-        let message = message_id(message)?;
+        let body = message_body(message)?;
         newer(
             self.call(
                 "POST",
                 &format!("local_agent/chats/{chat}/branches"),
-                Body::Json(&json!({ "message_id": message.parse::<u64>().unwrap_or_default() })),
+                Body::Json(&body),
             ),
             "can't branch chats from here yet",
         )
@@ -334,7 +335,7 @@ impl ChatClient {
         )
     }
 
-    /// Share a chat: the server's answer, usually with a `url`.
+    /// Make the chat's public link: `{url, expires_at, chat}`.
     pub fn share(&self, chat: &str) -> Result<Value> {
         let chat = chat_number(chat)?;
         newer(
@@ -344,6 +345,50 @@ impl ChatClient {
                 Body::Empty,
             ),
             "can't share chats from here yet",
+        )
+    }
+
+    /// Stop sharing the chat: its link stops working.
+    pub fn unshare(&self, chat: &str) -> Result<Value> {
+        let chat = chat_number(chat)?;
+        newer(
+            self.call(
+                "DELETE",
+                &format!("local_agent/chats/{chat}/share"),
+                Body::Empty,
+            ),
+            "can't share chats from here yet",
+        )
+    }
+
+    /// Answer a question the tool's server asked: the form's values, or
+    /// nothing once the person has been to the page it asked them to open.
+    pub fn answer(&self, chat: &str, tool_call: &str, input: Option<&Value>) -> Result<Value> {
+        let (chat, tool_call) = (chat_number(chat)?, tool_call_id(tool_call)?);
+        let body = match input {
+            Some(input) => json!({ "input": input }),
+            None => json!({}),
+        };
+        newer(
+            self.call(
+                "POST",
+                &format!("local_agent/chats/{chat}/tool_calls/{tool_call}/input"),
+                Body::Json(&body),
+            ),
+            "can't answer questions from here yet",
+        )
+    }
+
+    /// Decline a question the tool's server asked.
+    pub fn decline(&self, chat: &str, tool_call: &str) -> Result<Value> {
+        let (chat, tool_call) = (chat_number(chat)?, tool_call_id(tool_call)?);
+        newer(
+            self.call(
+                "DELETE",
+                &format!("local_agent/chats/{chat}/tool_calls/{tool_call}/input"),
+                Body::Empty,
+            ),
+            "can't answer questions from here yet",
         )
     }
 
@@ -396,6 +441,16 @@ fn newer(result: Result<Value>, cannot: &str) -> Result<Value> {
         .into(),
         Ok(refusal) => refusal.into(),
         Err(e) => e,
+    })
+}
+
+/// `{"message_id": N}` for a message, or `{}` for the latest.
+fn message_body(message: Option<&str>) -> Result<Value, Refusal> {
+    Ok(match message {
+        Some(message) => {
+            json!({ "message_id": message_id(message)?.parse::<u64>().unwrap_or_default() })
+        }
+        None => json!({}),
     })
 }
 

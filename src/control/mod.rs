@@ -153,14 +153,17 @@ pub enum ControlRequest {
         content_type: Option<String>,
         data: String,
     },
-    /// Answer the last question in `chat` again.
+    /// Answer a question in `chat` again: `message`, or the latest.
     ChatRetry {
         chat: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
-    /// A new chat with `chat`'s conversation up to `message`.
+    /// A new chat with `chat`'s conversation up to `message`, or all of it.
     ChatBranch {
         chat: String,
-        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     ChatRename {
         chat: String,
@@ -169,9 +172,26 @@ pub enum ControlRequest {
     ChatDelete {
         chat: String,
     },
-    /// Share `chat`, as the web's Share does.
+    /// Share `chat` with a public link, as the web's Share does.
     ChatShare {
         chat: String,
+    },
+    /// Stop sharing `chat`.
+    ChatUnshare {
+        chat: String,
+    },
+    /// Answer a question the tool's server asked (MCP elicitation): the
+    /// form's values in `input`, or nothing for a page to visit.
+    ChatAnswer {
+        chat: String,
+        tool_call: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<Value>,
+    },
+    /// Decline a question the tool's server asked.
+    ChatDecline {
+        chat: String,
+        tool_call: String,
     },
     /// Stop the answer being written in `chat`.
     ChatCancel {
@@ -807,9 +827,24 @@ mod tests {
             (
                 ControlRequest::ChatBranch {
                     chat: "42".into(),
-                    message: "5".into(),
+                    message: Some("5".into()),
                 },
                 r#"{"cmd":"chat_branch","chat":"42","message":"5"}"#,
+            ),
+            (
+                ControlRequest::ChatRetry {
+                    chat: "42".into(),
+                    message: None,
+                },
+                r#"{"cmd":"chat_retry","chat":"42"}"#,
+            ),
+            (
+                ControlRequest::ChatAnswer {
+                    chat: "42".into(),
+                    tool_call: "32".into(),
+                    input: Some(json!({ "days": 30 })),
+                },
+                r#"{"cmd":"chat_answer","chat":"42","tool_call":"32","input":{"days":30}}"#,
             ),
         ] {
             assert_eq!(serde_json::to_string(&request).unwrap(), wire);

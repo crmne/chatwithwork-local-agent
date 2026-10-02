@@ -359,6 +359,7 @@ fn chat_api(state: &Mutex<ServerState>, origin: &str, request: ChatRequest) -> (
         || path.ends_with("/retry")
         || path.ends_with("/branches")
         || path.ends_with("/share")
+        || path.ends_with("/input")
         || (path == "/local_agent/chats/7" && matches!(method, "PATCH" | "DELETE"));
     if old_api && newer {
         return (404, Value::Null);
@@ -427,7 +428,8 @@ fn chat_api(state: &Mutex<ServerState>, origin: &str, request: ChatRequest) -> (
             (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
         }
         ("POST", "/local_agent/chats/7/retry") => {
-            st.decisions.push("retry 7".into());
+            st.decisions
+                .push(format!("retry 7 {}", posted["message_id"]));
             (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
         }
         ("POST", "/local_agent/chats/7/branches") => {
@@ -451,10 +453,32 @@ fn chat_api(state: &Mutex<ServerState>, origin: &str, request: ChatRequest) -> (
         }
         ("POST", "/local_agent/chats/7/share") => {
             st.decisions.push("share 7".into());
+            let url = format!("{origin}/shared/abc");
+            let mut shared = chat(7, "Q3 budget", "idle");
+            shared["share"] = json!({ "url": url, "expires_at": "2026-11-01T09:00:00Z" });
             (
-                200,
-                json!({ "url": format!("{origin}/shared/abc"), "visibility": "link" }),
+                201,
+                json!({ "url": url, "expires_at": "2026-11-01T09:00:00Z", "chat": shared }),
             )
+        }
+        ("DELETE", "/local_agent/chats/7/share") => {
+            st.decisions.push("unshare 7".into());
+            (200, json!({ "chat": chat(7, "Q3 budget", "idle") }))
+        }
+        ("POST", "/local_agent/chats/7/tool_calls/32/input") => {
+            if posted["input"]["environment"].is_null() && !posted["input"].is_null() {
+                return (
+                    422,
+                    json!({ "error": "invalid", "error_description": "Environment is needed." }),
+                );
+            }
+            st.decisions
+                .push(format!("answer 7 32 {}", posted["input"]));
+            (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
+        }
+        ("DELETE", "/local_agent/chats/7/tool_calls/32/input") => {
+            st.decisions.push("decline 7 32".into());
+            (202, json!({ "chat": chat(7, "Q3 budget", "processing") }))
         }
         ("GET", "/local_agent/chats") => (
             200,
@@ -1961,19 +1985,42 @@ async fn relays_models_decisions_files_and_chat_actions() {
         .await
         .unwrap();
     let c = chats.clone();
-    blocking(move || c.retry(7)).await.unwrap();
+    blocking(move || c.retry(7, None)).await.unwrap();
     let c = chats.clone();
-    let branch = blocking(move || c.branch(7, 3)).await.unwrap();
+    let branch = blocking(move || c.branch(7, Some(3))).await.unwrap();
     assert_eq!(branch.number, 9);
     let c = chats.clone();
     let renamed = blocking(move || c.rename(7, "Budget")).await.unwrap();
     assert_eq!(renamed.title, "Budget");
     let c = chats.clone();
     let shared = blocking(move || c.share(7)).await.unwrap();
-    assert_eq!(
-        shared.url.as_deref(),
-        Some(format!("{}/shared/abc", server.origin).as_str())
-    );
+    assert_eq!(shared.url, format!("{}/shared/abc", server.origin));
+    assert_eq!(shared.chat.share.unwrap().url, shared.url);
+    let c = chats.clone();
+    let unshared = blocking(move || c.unshare(7)).await.unwrap();
+    assert_eq!(unshared.share, None);
+
+    // Answering a question from a tool's server, or declining it.
+    let c = chats.clone();
+    let missing = blocking(move || c.answer(7, 32, Some(json!({ "days": "30" }))))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, "invalid");
+    assert_eq!(missing.message, "Environment is needed.");
+    let c = chats.clone();
+    blocking(move || {
+        c.answer(
+            7,
+            32,
+            Some(json!({ "environment": "production", "days": "30" })),
+        )
+    })
+    .await
+    .unwrap();
+    let c = chats.clone();
+    blocking(move || c.answer(7, 32, None)).await.unwrap();
+    let c = chats.clone();
+    blocking(move || c.decline(7, 32)).await.unwrap();
     let c = chats.clone();
     blocking(move || c.delete(7)).await.unwrap();
     assert_eq!(
@@ -1981,10 +2028,14 @@ async fn relays_models_decisions_files_and_chat_actions() {
         [
             "approve 7 12 true",
             "deny 7 12 \"Use the Web team\"",
-            "retry 7",
+            "retry 7 null",
             "branch 7 3",
             "rename 7 \"Budget\"",
             "share 7",
+            "unshare 7",
+            "answer 7 32 {\"days\":\"30\",\"environment\":\"production\"}",
+            "answer 7 32 null",
+            "decline 7 32",
             "delete 7",
         ]
     );
@@ -2011,7 +2062,7 @@ async fn relays_models_decisions_files_and_chat_actions() {
         old.message
     );
     let c = chats.clone();
-    let old = blocking(move || c.retry(7)).await.unwrap_err();
+    let old = blocking(move || c.retry(7, None)).await.unwrap_err();
     assert_eq!(old.code, "unsupported");
     assert!(old.message.contains("can't retry"), "{}", old.message);
     let c = chats.clone();

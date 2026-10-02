@@ -244,32 +244,32 @@ The terminal UI's chats go through the daemon, which asks Chat with Work as this
 {"cmd": "chats"}
 ```
 
-The server's list, as it sent it: `chats` (newest first, each with `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`, and from newer servers `model` (`{"id", "name"}` or null) and `can` (`retry`, `branch`, `rename`, `delete`, `share`, each true or false; without `can`, offer none of them)), `projects`, `account`, `user`, and `locked_reason`, the sentence the composer shows when a question can't be asked.
+The server's list, as it sent it: `chats` (newest first, each with `number`, `title`, `state`, `project`, `mine`, `updated_at`, `url`, and from newer servers `model` (`{"id", "name"}`, the model the next question goes to, or null), `share` (`{"url", "expires_at"}` while it has a public link, only for the person who started it, else null) and `can` (`retry`, `branch`, `rename`, `delete`, `share`, each true or false; without `can`, offer none of them)), `projects`, `account`, `user`, and `locked_reason`, the sentence the composer shows when a question can't be asked.
 
 ```json
 {"cmd": "chat", "chat": "42"}
 ```
 
-One chat: `chat`, `locked_reason`, `entries`, and `approvals`. Each entry has a `kind`: `user` (with `attachments`, each `filename`, `byte_size`, `content_type`), `activity` (a title such as "Searched Drive and Slack", `details`, `pending`, and `steps` with file names, `waiting` when the answer stopped there for the person and, reserved for a tool's own view, an optional `app` with `service` and `uri` that the server doesn't send yet), `assistant` (Markdown `content` and `sources`), or `notice` (a failure or running out of credits). `approvals` lists the changes the answer stopped at, oldest first: `id`, `service`, `effect`, and either `decidable: true` with `summary`, `details` (`label` and `value` pairs) and `allow_for_rest_of_chat`, or `decidable: false` with `waiting_for`, the person who decides it. A step that waits with no approval listed is a question from the tool's server, answered in the browser for now. Chat numbers are digits only.
+One chat: `chat`, `locked_reason`, `entries`, `approvals` and `questions`. Each entry has a `kind`: `user` (with `attachments`, each `filename`, `byte_size`, `content_type`), `activity` (a title such as "Searched Drive and Slack", `details`, `pending`, and `steps` with file names, `waiting` when the answer stopped there for the person and, reserved for a tool's own view, an optional `app` with `service` and `uri` that the server doesn't send yet), `assistant` (Markdown `content` and `sources`), or `notice` (a failure or running out of credits). `approvals` lists the changes the answer stopped at, oldest first: `id`, `service`, `effect`, and either `decidable: true` with `summary`, `details` (`label` and `value` pairs) and `allow_for_rest_of_chat`, or `decidable: false` with `waiting_for`, the person who decides it. `questions` lists what the tools' servers asked the person while their tools run (MCP elicitation): `id`, `service`, and either `decidable: true` with `message`, `kind` (`form`, with `fields`, or `url`, a page to open with its `url` and `host`), and a `note` to show with it, or `decidable: false` with `waiting_for`. Each field has `name`, `title`, `description`, `type` (`string`, `integer`, `number`, `boolean`, or `array` to pick any of `choices`), `required`, `choices` (or null) and `default`. Chat numbers are digits only.
 
 ```json
 {"cmd": "chat_send", "text": "And Q4?", "chat": "42"}
 ```
 
-Asks in chat 42, or in a new chat without `chat` (`project` puts a new chat in a project). `model` picks the model by its ID from `models`, and `attachments` lists files from `chat_upload` by `signed_id`. Answers `{"chat": {...}}`. Follow the chat to see the answer. A model that can't be used fails with `model_unavailable`, and a file the server won't take with `attachment_refused`.
+Asks in chat 42, or in a new chat without `chat` (`project` puts a new chat in a project). `model` picks the model by its ID from `models` (an existing chat switches to it), and `attachments` lists files from `chat_upload` by `signed_id`; with files, `text` may be empty. Answers `{"chat": {...}}`. Follow the chat to see the answer. A model that can't be used fails with `model_unavailable`, and a file the server won't take with `attachment_refused`.
 
 ```json
 {"cmd": "models"}
 ```
 
-The models a question can be asked with: `{"default_model_id": 3, "models": [{"id": 3, "name": "Claude Sonnet", "provider": "anthropic", "description": "…", "selectable": true, "reason": null}, ...]}`. `selectable: false` comes with the `reason`. IDs may be numbers or strings; pass them back as strings. A server without the choice fails with `unsupported` and a sentence saying so.
+The models a question can be asked with: `{"default_model_id": 12, "models": [{"id": 12, "name": "Gemini 3.8 Flash", "provider": "vertexai", "description": "…", "rate": "About 3 credits per answer", "selectable": true, "reason": null}, ...]}`. `selectable: false` means a question to it would be refused now, for the `reason`. IDs may be numbers or strings; pass them back as strings. A server without the choice fails with `unsupported` and a sentence saying so.
 
 ```json
 {"cmd": "chat_approve", "chat": "42", "tool_call": "12", "for_rest_of_chat": false}
 {"cmd": "chat_deny", "chat": "42", "tool_call": "12", "reason": "Use the Web team"}
 ```
 
-Approves or denies a change the answer stopped at (an entry of `approvals` with `decidable: true`), as the web's approval card does. `for_rest_of_chat` stops asking about that tool in this chat, where `allow_for_rest_of_chat` says it can; `reason` goes back to the model. The answer carries on once nothing waits. Answers `{"chat": {...}}`; `already_decided` means someone decided it first.
+Approves or denies a change the answer stopped at (an entry of `approvals` with `decidable: true`), as the web's approval card does. `for_rest_of_chat` stops asking about that tool in this chat, where `allow_for_rest_of_chat` says it can; `reason`, at most 500 characters, goes back to the model. The answer carries on once nothing waits. Answers `{"chat": {...}}`; `already_decided` means someone decided it first.
 
 ```json
 {"cmd": "chat_upload", "filename": "notes.pdf", "content_type": "application/pdf", "data": "<base64>"}
@@ -278,14 +278,22 @@ Approves or denies a change the answer stopped at (an entry of `approvals` with 
 Uploads a file for a question. The daemon can only read shared folders, so the client reads the file and sends its bytes, base64-encoded, in `data`; files can be at most 25 MB, Chat with Work's limit, and only this request may be longer than 16 KiB. The daemon keeps only the file's own name. Answers `{"signed_id", "filename", "byte_size", "content_type"}`; pass `signed_id` in `chat_send`'s `attachments`. The upload may take a while, so wait for the answer without a timeout.
 
 ```json
+{"cmd": "chat_answer", "chat": "42", "tool_call": "32", "input": {"environment": "production", "days": 30}}
+{"cmd": "chat_decline", "chat": "42", "tool_call": "32"}
+```
+
+Answers or declines a question from `questions`, as the web's question card does. `input` holds the form's values by field name (strings, numbers or booleans); leave it out for a `url` question once the person has opened the page. A missing required field fails with `invalid` and the server's sentence. Both answer `{"chat": {...}}`, and the answer carries on once nothing waits.
+
+```json
 {"cmd": "chat_retry", "chat": "42"}
 {"cmd": "chat_branch", "chat": "42", "message": "5"}
 {"cmd": "chat_rename", "chat": "42", "title": "Q3 budget"}
 {"cmd": "chat_delete", "chat": "42"}
 {"cmd": "chat_share", "chat": "42"}
+{"cmd": "chat_unshare", "chat": "42"}
 ```
 
-What the chat's `can` allows: answer the last question again (`{"chat"}`), start a new chat with the conversation up to message 5 (`{"chat"}`, the new one), rename it (`{"chat"}`), delete it (`{}`), and share it (the server's answer, usually with the link in `url`). A server without one of these fails with `unsupported` and a sentence saying so.
+What the chat's `can` allows: answer a question again (`message`, or the latest; `{"chat"}`, or `chat_busy` while an answer is written), start a new chat with the conversation up to `message` (or all of it; `{"chat"}`, the new one), rename it (`{"chat"}`), delete it (`{}`), make its public link (`{"url", "expires_at", "chat"}`; again gives the same link 30 more days), and stop sharing it (`{"chat"}`). A server without one of these fails with `unsupported` and a sentence saying so.
 
 ```json
 {"cmd": "chat_cancel", "chat": "42"}

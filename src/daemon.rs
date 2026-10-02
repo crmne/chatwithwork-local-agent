@@ -57,6 +57,9 @@ struct Daemon {
 /// The longest question the terminal may send, as the server allows.
 const MAX_QUESTION_CHARS: usize = 20_000;
 
+/// The longest reason for denying a change, as the server keeps it.
+const MAX_REASON_CHARS: usize = 500;
+
 /// The most files one question carries.
 const MAX_ATTACHMENTS: usize = 10;
 
@@ -498,7 +501,8 @@ impl Daemon {
     async fn send_question(&self, question: Question) -> Result<Value> {
         let mut question = question;
         question.text = question.text.trim().to_string();
-        if question.text.is_empty() {
+        // Files can go without a word, as in the composer.
+        if question.text.is_empty() && question.attachments.is_empty() {
             return Err(Refusal::new("invalid", "Write a question first").into());
         }
         if question.text.chars().count() > MAX_QUESTION_CHARS {
@@ -801,9 +805,13 @@ impl ControlHandler for Daemon {
             } => {
                 if reason
                     .as_ref()
-                    .is_some_and(|r| r.chars().count() > MAX_QUESTION_CHARS)
+                    .is_some_and(|r| r.chars().count() > MAX_REASON_CHARS)
                 {
-                    return Err(Refusal::new("invalid", "That reason is too long").into());
+                    return Err(Refusal::new(
+                        "invalid",
+                        format!("Say it in at most {MAX_REASON_CHARS} characters"),
+                    )
+                    .into());
                 }
                 self.chat(move |client| client.deny(&chat, &tool_call, reason.as_deref()))
                     .await
@@ -813,11 +821,12 @@ impl ControlHandler for Daemon {
                 content_type,
                 data,
             } => self.upload(filename, content_type, data).await,
-            ControlRequest::ChatRetry { chat } => {
-                self.chat(move |client| client.retry(&chat)).await
+            ControlRequest::ChatRetry { chat, message } => {
+                self.chat(move |client| client.retry(&chat, message.as_deref()))
+                    .await
             }
             ControlRequest::ChatBranch { chat, message } => {
-                self.chat(move |client| client.branch(&chat, &message))
+                self.chat(move |client| client.branch(&chat, message.as_deref()))
                     .await
             }
             ControlRequest::ChatRename { chat, title } => {
@@ -836,6 +845,28 @@ impl ControlHandler for Daemon {
             }
             ControlRequest::ChatShare { chat } => {
                 self.chat(move |client| client.share(&chat)).await
+            }
+            ControlRequest::ChatUnshare { chat } => {
+                self.chat(move |client| client.unshare(&chat)).await
+            }
+            ControlRequest::ChatAnswer {
+                chat,
+                tool_call,
+                input,
+            } => {
+                if input.as_ref().is_some_and(|i| !i.is_object()) {
+                    return Err(Refusal::new(
+                        "bad_request",
+                        "bad request: input is the form's fields, by name",
+                    )
+                    .into());
+                }
+                self.chat(move |client| client.answer(&chat, &tool_call, input.as_ref()))
+                    .await
+            }
+            ControlRequest::ChatDecline { chat, tool_call } => {
+                self.chat(move |client| client.decline(&chat, &tool_call))
+                    .await
             }
             ControlRequest::ChatCancel { chat } => {
                 self.chat(move |client| client.cancel(&chat)).await
