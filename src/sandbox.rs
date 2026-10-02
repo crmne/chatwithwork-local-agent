@@ -125,6 +125,17 @@ fn existing(paths: &[&str]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The directory `/etc/resolv.conf` really lives in. It is often a link out
+/// of `/etc`: systemd-resolved and NetworkManager keep it under `/run`.
+/// The static Linux builds read it themselves (musl has no NSS), so without
+/// it every name fails to resolve. The whole directory, because its owner
+/// replaces the file by renaming a new one over it.
+#[cfg(target_os = "linux")]
+fn resolver_dir(resolv_conf: &std::path::Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(resolv_conf).ok()?;
+    real.parent().map(PathBuf::from)
+}
+
 #[cfg(target_os = "linux")]
 mod sys {
     use super::*;
@@ -180,6 +191,10 @@ mod sys {
             "/dev/null",
             "/dev/urandom",
         ]);
+        let system: Vec<PathBuf> = system
+            .into_iter()
+            .chain(resolver_dir(std::path::Path::new("/etc/resolv.conf")))
+            .collect();
         let status = Ruleset::default()
             .handle_access(all)
             .and_then(|r| r.create())
@@ -361,6 +376,22 @@ mod sys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn follows_resolv_conf_to_the_directory_it_lives_in() {
+        let run = tempfile::tempdir().unwrap();
+        let etc = tempfile::tempdir().unwrap();
+        let stub = run.path().join("stub-resolv.conf");
+        std::fs::write(&stub, "nameserver 127.0.0.53\n").unwrap();
+        let link = etc.path().join("resolv.conf");
+        std::os::unix::fs::symlink(&stub, &link).unwrap();
+        assert_eq!(
+            resolver_dir(&link),
+            Some(std::fs::canonicalize(run.path()).unwrap())
+        );
+        assert_eq!(resolver_dir(&etc.path().join("missing")), None);
+    }
 
     #[test]
     fn plans_cover_folders_inside_their_roots() {
