@@ -28,7 +28,8 @@ use crate::ui::{AppState, Page, SettingsApp, Shared, theme};
 pub struct Options {
     /// Open the settings window at start (not when started at login).
     pub open_settings: bool,
-    /// Started at login: the panel may not be up yet.
+    /// Started at login: a running app is only pinged, not asked for its
+    /// window.
     pub background: bool,
     /// Open on this page.
     pub page: Option<Page>,
@@ -58,7 +59,6 @@ struct Shell<'a> {
     status: Option<Status>,
     tray: Option<Tray>,
     tray_failed: bool,
-    background: bool,
     window: Option<EframeWinitApplication<'a>>,
     pending: Option<EframeWinitApplication<'a>>,
     want_window: bool,
@@ -121,7 +121,6 @@ pub fn run(paths: Paths, options: Options) -> anyhow::Result<()> {
         status: None,
         tray: None,
         tray_failed: false,
-        background: options.background,
         window: None,
         pending: None,
         want_window: options.open_settings || !onboarded || options.screenshot.is_some(),
@@ -200,7 +199,7 @@ impl Shell<'_> {
             return;
         }
         let view = TrayView::new(self.status.as_ref());
-        self.tray = Tray::new(self.events.clone(), &view, self.background);
+        self.tray = Tray::new(self.events.waker().clone(), &view);
         if self.tray.is_none() {
             self.tray_failed = true;
             // The window is the only way in.
@@ -209,7 +208,9 @@ impl Shell<'_> {
     }
 
     fn drain(&mut self, event_loop: &ActiveEventLoop) {
-        while let Ok(event) = self.rx.try_recv() {
+        let mut events = self.tray.as_ref().map(Tray::events).unwrap_or_default();
+        events.extend(self.rx.try_iter());
+        for event in events {
             match event {
                 AppEvent::Status(status) => {
                     self.shared.set_status(status.clone());
@@ -254,7 +255,9 @@ impl Shell<'_> {
             release_memory();
         }
         event_loop.set_control_flow(ControlFlow::Wait);
-        if self.tray.is_none() || self.screenshot.is_some() {
+        // Without a panel showing the tray there is no way back to the
+        // window, so closing it quits.
+        if !self.tray.as_ref().is_some_and(Tray::is_shown) || self.screenshot.is_some() {
             self.quit = true;
             event_loop.exit();
         }

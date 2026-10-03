@@ -4,7 +4,7 @@
 
 ## What it does
 
-- **Menu bar / tray item:** the state (online, paused, offline, not paired, not running), indexing progress or the last access, Pause Sharing / Resume Sharing, Settings, and Quit. The menu is the platform's own: an `NSMenu` on macOS, a Win32 menu on Windows, and DBusMenu on Linux, drawn by the panel.
+- **Menu bar / tray item:** the state (online, paused, offline, not paired, not running), indexing progress or the last access, Pause Sharing / Resume Sharing, Settings, and Quit. The menu is the platform's own: an `NSMenu` on macOS, a Win32 menu on Windows, and DBusMenu on Linux, drawn by the panel. The state and its detail are greyed-out lines, Pause Sharing is greyed out while there is no paired agent to pause, and the icon fades while nothing is being served.
 - **Settings window:** shared folders (added with the native folder picker, renamed, removed, with each folder's index state), the deny list as information, the local activity log, pairing with the browser-based device flow, start at login, and pausing.
 - **Chat:** your Chat with Work chats, drawn as the web app draws them, through the daemon's chat API; see [chat-window.md](chat-window.md).
 - **First run:** a welcome page starts the agent (`cww daemon install`), pairs, and offers to share the Documents folder. Nothing is shared until the user clicks a button that says so.
@@ -32,11 +32,11 @@ The candidates, against what the app needs:
 | Tauri | Web page in a web view | Small binary, large process | A web view stays resident | Browser's | MIT/Apache | No |
 | SwiftUI + WinUI + GTK, one per platform | Fully native | Three small apps | Good | Native | Mixed | No, and three UIs to keep in step |
 
-**egui wins.** It is what Spotifast and ZapFast use (eframe 0.36, glow, AccessKit, `tray-icon`, `ksni`, `rfd`), so the owner already maintains this stack; it is one Rust codebase for three platforms; it is MIT/Apache like the rest of the repository; and it can be made to use no CPU at all when idle (below). Fully native UIs would look best, but three UI codebases in Swift, C#/C++ and Rust are a poor trade for a small settings window, and SwiftUI can't be built in Linux CI.
+**egui wins.** It is what Spotifast and ZapFast use (eframe 0.36, glow, AccessKit, fastframe, `rfd`), so the owner already maintains this stack; it is one Rust codebase for three platforms; it is MIT/Apache like the rest of the repository; and it can be made to use no CPU at all when idle (below). Fully native UIs would look best, but three UI codebases in Swift, C#/C++ and Rust are a poor trade for a small settings window, and SwiftUI can't be built in Linux CI.
 
 To make up most of the difference in looks, the parts people touch most are native, and the window follows each platform:
 
-- The tray menu is the platform's own (`tray-icon`/`muda` on macOS and Windows, `ksni` on Linux), not drawn by egui.
+- The tray menu is the platform's own, not drawn by egui, through [fastframe-tray](https://github.com/crmne/fastframe/tree/main/crates/fastframe-tray), which ZapFast and Spotifast share: `tray-icon`/`muda` on macOS and Windows, a `ksni` StatusNotifierItem on Linux.
 - The folder picker is the platform's own (`rfd`: `NSOpenPanel`, `IFileDialog`, the XDG portal).
 - The window uses the system UI font (San Francisco, Segoe UI, or the fontconfig `sans-serif`) with the system's color emoji (in folder names, for instance), the user's accent color (macOS and Windows accent settings, GNOME 47's accent), light or dark to match the system, and each platform's control heights, corner radii, grouped-row style, switches, and dialog button order (Cancel last on Windows, first on macOS and GNOME).
 - Scrolling feels like the platform's, through [fastframe-scroll](https://github.com/crmne/fastframe/tree/main/crates/fastframe-scroll), in every scroll area of the window (the settings pages, the chat, its sidebar and composer): a wheel notch scrolls 120 points, as far as in other apps, instead of egui's 40. On Linux a touchpad gesture goes 1.8 times further, glides on after the fingers lift until it slows to a stop (a click or a wheel notch stops it), and holds the axis it started on. macOS and Windows touchpads keep the system's own acceleration and momentum (Windows sends precision touchpad scrolling as fractions of a wheel notch, which the wheel step scales too). A glide repaints only while it moves, so an untouched window still uses no CPU.
@@ -51,7 +51,7 @@ The daemon pushes status changes and audit entries (`subscribe` in CONTROL.md) i
 | Thread | Blocked in |
 |---|---|
 | main (winit event loop) | `epoll_wait`, until a tray click or a status change wakes it |
-| tray (Linux: ksni's D-Bus thread) | D-Bus |
+| tray (`cww-app`: ksni's D-Bus thread on Linux, a Win32 message loop on Windows; on macOS the item lives on the main thread) | D-Bus, or `GetMessage` |
 | `cww-watch` | reading the daemon's socket; while the daemon is down, a file-system watch on the socket's directory |
 | `fastframe-instance` | `accept`, for a second launch asking for the window |
 
@@ -64,6 +64,8 @@ Measured on Linux (Arch, Hyprland, release build), per-thread context switches f
 | Tray only, daemon running | 0 context switches, 0 ms CPU, 11 MB resident |
 | After opening and closing the window | 0 context switches (one tokio wake-up in ksni), 0 ms CPU |
 | Window open, untouched | 0 ms CPU; about one wake-up a second from Hyprland's ping of every window |
+
+Since the move to fastframe-tray and fastframe-instance, the tray-only state was measured again the same way, headless: the release build with `--demo --background`, on a private session bus with a stand-in StatusNotifierWatcher (so the item registers, with no panel drawing it), from 50 s after start (once the demo's scripted events are over) for 60 s. Every thread, the stand-in daemon's included, had 0 context switches and 0 CPU ticks, at 15 MB resident. The window states were not measured again, since that needs a window on screen.
 
 On macOS (27, Apple silicon), `top` counted no idle wake-ups and no CPU time over 90 seconds in the tray, with a 13 MB footprint. On Windows 11, against the real daemon, the tray-only app had a 12 MB working set (2 MB private) and used one 15.6 ms scheduler tick of CPU in 60 seconds, while the daemon was still reporting its first index pass; against the stand-in daemon it used none.
 
@@ -85,8 +87,8 @@ If an app holds the lock but does not answer within three seconds (hung, say), t
 
 ## Platform notes
 
-- **Linux:** each release's `cww-app-vX.Y.Z-<arch>-unknown-linux-gnu.tar.gz` (and CI's Linux build) carries `cww-app`, `cww` (in the release archives), `cww-app.desktop` and its icon, `cww-app.svg`. The release builds need glibc 2.35 or newer. To install them by hand, put the binary on the `PATH`, the entry in `~/.local/share/applications/`, and the icon in `~/.local/share/icons/hicolor/scalable/apps/`, where the entry's `Icon=cww-app` finds it. The tray item is a StatusNotifierItem, which Waybar, KDE, and GNOME with the AppIndicator extension show. Without a tray host the app opens its window and quits when it closes. Dark mode comes from the `org.gnome.desktop.interface color-scheme` setting when the windowing system doesn't report it.
-- **macOS:** the app must be in a bundle (`packaging/macos/bundle.sh`) for Finder, Launchpad and notarization; `cww` ships inside it, next to `cww-app`. Releases ship it, as `Chat with Work.app`, notarized and stapled in `chat-with-work-vX.Y.Z-macos-universal.dmg` and `.zip`, and as the Homebrew cask `crmne/tap/chat-with-work`. Where people open it, the app is "Chat with Work": the macOS bundle, the Windows `Chat with Work.exe`, and the Linux launcher entry (which runs `cww-app`, with `cww` among its keywords); the daemon, the command line and the Linux files stay `cww`.
+- **Linux:** each release's `cww-app-vX.Y.Z-<arch>-unknown-linux-gnu.tar.gz` (and CI's Linux build) carries `cww-app`, `cww` (in the release archives), `cww-app.desktop` and its icon, `cww-app.svg`. The release builds need glibc 2.35 or newer. To install them by hand, put the binary on the `PATH`, the entry in `~/.local/share/applications/`, and the icon in `~/.local/share/icons/hicolor/scalable/apps/`, where the entry's `Icon=cww-app` finds it. The tray item is a StatusNotifierItem, which Waybar, KDE, and GNOME with the AppIndicator extension show. The item registers even before the panel is up (at login the app may start first) and appears once a panel shows it. While no panel shows it (a desktop without a tray, such as stock GNOME), the app opens its window when started from the launcher, and closing the window quits it, since there would be no way back. A left click opens the window and a right click the menu. The panel draws the app's tray glyph, not the installed `cww-app` icon, so the faded state shows. Dark mode comes from the `org.gnome.desktop.interface color-scheme` setting when the windowing system doesn't report it.
+- **macOS:** the app must be in a bundle (`packaging/macos/bundle.sh`) for Finder, Launchpad and notarization; `cww` ships inside it, next to `cww-app`. Releases ship it, as `Chat with Work.app`, notarized and stapled in `chat-with-work-vX.Y.Z-macos-universal.dmg` and `.zip`, and as the Homebrew cask `crmne/tap/chat-with-work`. Where people open it, the app is "Chat with Work": the macOS bundle, the Windows `Chat with Work.exe`, and the Linux launcher entry (which runs `cww-app`, with `cww` among its keywords); the daemon, the command line and the Linux files stay `cww`. Any click on the menu bar item opens its menu, as menu bar items do, and Settings opens the window. The item is made when the app starts, which also makes the app active, even for a start at login that opens no window.
 - **Windows:** the tray icon is in the notification area; a left click opens the window and a right click the menu. The app talks to the daemon over its named pipe, through the `cww` crate's client, which checks the pipe belongs to the current user.
 
 ## Development

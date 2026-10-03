@@ -65,6 +65,10 @@ fastframe-instance = { version = "0.4.0", git = "https://github.com/crmne/fastfr
 # as in other apps, and on Linux touchpad gestures keep their speed and
 # glide on after the fingers lift.
 fastframe-scroll = { version = "0.4.0", git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
+# The tray item with the platform's own menu: a StatusNotifierItem on
+# Linux (Waybar, KDE, GNOME with the AppIndicator extension), the
+# notification area on Windows, and the menu bar on macOS.
+fastframe-tray = { version = "0.4.0", git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 # Maps the system UI font instead of reading it: San Francisco is 8 MB.
 memmap2 = "0.9"
 # Waits for the daemon's socket to appear instead of polling for it.
@@ -82,20 +86,12 @@ tokio = { version = "1.53", features = ["rt-multi-thread"], optional = true }
 tokio-util = { version = "0.7", features = ["io-util"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# StatusNotifierItem over D-Bus, which Waybar, KDE, GNOME (with the
-# AppIndicator extension) and most Linux panels show.
-ksni = { version = "0.3", features = ["blocking"] }
 # Not used directly. zbus runs AccessKit's screen reader bridge on this
 # pool, and in blocking 1.7.0 an idle pool thread never exits: its exit test
 # needs the pool to be over its 500-thread limit as well as idle, so it
 # wakes every 500 ms for the life of the process once the window has been
 # opened. 1.6.2 lets idle threads exit. Drop this once a fixed release is out.
 blocking = "=1.6.2"
-
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-# NSStatusItem on macOS and the notification area on Windows, with native
-# menus (muda).
-tray-icon = { version = "0.25", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
