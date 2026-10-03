@@ -113,15 +113,17 @@ fn only_folders_that_allow_changes_are_writable() {
         let output = Command::new(env!("CARGO_BIN_EXE_cww"))
             .env("CWW_HOME", &home)
             .env("XDG_DATA_HOME", &xdg)
+            .env("CWW_LOG", "debug")
             .args(args)
             .output()
             .unwrap();
-        let out = String::from_utf8_lossy(&output.stdout).into_owned();
-        assert!(
-            output.status.success(),
-            "{out}\n{}",
+        // The log goes along, so a refusal's reason shows when a check fails.
+        let out = format!(
+            "{}\n--- log ---\n{}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(output.status.success(), "{out}");
         out
     };
     let probe = |dir: &std::path::Path| dir.join("probe.txt").display().to_string();
