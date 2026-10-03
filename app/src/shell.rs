@@ -199,7 +199,8 @@ impl Shell<'_> {
             return;
         }
         let view = TrayView::new(self.status.as_ref());
-        self.tray = Tray::new(self.events.waker().clone(), &view);
+        let window = self.want_window || self.window.is_some();
+        self.tray = Tray::new(self.events.waker().clone(), &view, window);
         if self.tray.is_none() {
             self.tray_failed = true;
             // The window is the only way in.

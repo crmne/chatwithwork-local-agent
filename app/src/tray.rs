@@ -83,8 +83,9 @@ fn app_event(event: Event) -> Option<AppEvent> {
 impl Tray {
     /// Registers the item. Call on the main thread once the event loop
     /// runs: macOS makes the item then. `None` when the system has no tray
-    /// to offer at all.
-    pub fn new(waker: Waker, view: &TrayView) -> Option<Self> {
+    /// to offer at all. Without a window to open (a start in the background
+    /// at login), the macOS item is made without bringing the app forward.
+    pub fn new(waker: Waker, view: &TrayView, window: bool) -> Option<Self> {
         let platform = Platform::current();
         let (icon, template_icon) = icons(view.dimmed);
         let mut tray = fastframe_tray::Tray::spawn(
@@ -103,7 +104,12 @@ impl Tray {
         )?;
         tray.set_tooltip(tooltip(view, platform));
         // Makes the macOS item; elsewhere the item runs on its own thread.
-        tray.attach();
+        // Only a launch that opens a window takes the front.
+        if window {
+            tray.attach();
+        } else {
+            tray.create_item();
+        }
         Some(Self {
             tray,
             view: view.clone(),

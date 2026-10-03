@@ -65,6 +65,8 @@ pub fn claim(slot: &Slot, background: bool, events: Events) -> anyhow::Result<St
             log::info!("already running; handed the launch over");
             Ok(Start::HandedOver)
         }
+        // The running copy refused this launch's request: nothing to do.
+        Claim::Declined => Ok(Start::HandedOver),
         Claim::Unanswered => anyhow::bail!(
             "Chat with Work is already running but did not answer in {} seconds. \
              Quit it from its menu, or end the cww-app process, and open it again.",
