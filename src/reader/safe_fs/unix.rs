@@ -334,6 +334,13 @@ impl ChangeDir {
         }
     }
 
+    /// Whether `name` is a program by its content, whatever it is called.
+    /// On Unix the execute bit decides what runs ([`EntryStat::executable`]),
+    /// so content doesn't add anything here; Windows reads the header.
+    pub fn is_program(&self, _name: &OsStr) -> Result<bool, ToolError> {
+        Ok(false)
+    }
+
     /// Read the regular file `name`, at most `cap` bytes.
     pub fn read(&self, name: &OsStr, cap: u64) -> Result<(Vec<u8>, EntryStat), ToolError> {
         let before = self.entry(name)?.ok_or_else(not_found)?;

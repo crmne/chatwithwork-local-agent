@@ -77,6 +77,47 @@ fn unavailable(detail: impl std::fmt::Display) -> ToolError {
     )
 }
 
+/// The well-known SIDs Explorer's Recycle Bin folders belong to, besides
+/// the user's own: `SYSTEM` and `Administrators`.
+const BIN_ADMINS: [&str; 2] = ["S-1-5-18", "S-1-5-32-544"];
+
+/// Rights anyone may have on a Recycle Bin folder without seeing or
+/// changing what is in it: synchronize, read its permissions, read its
+/// attributes and extended attributes, traverse it.
+const HARMLESS_RIGHTS: u32 = 0x0010_0000 | 0x0002_0000 | 0x0080 | 0x0008 | 0x0020;
+
+/// Whether a Recycle Bin folder is the user's own, as Explorer makes it:
+/// owned by the user (or by `SYSTEM` or `Administrators`), with a DACL that
+/// gives no one else any right to list, read, add, change or delete what
+/// is in it. `grants` is the DACL's allow entries as `(SID, rights)`, or
+/// `None` for a null DACL; `unusual` says it has entries this check can't
+/// read. Pure, so it is tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn check_private_bin(
+    user: &str,
+    owner: &str,
+    grants: Option<&[(String, u32)]>,
+    unusual: bool,
+) -> Result<(), String> {
+    let trusted = |sid: &str| sid == user || BIN_ADMINS.contains(&sid);
+    if !trusted(owner) {
+        return Err(format!("it belongs to {owner}"));
+    }
+    let Some(grants) = grants else {
+        return Err("anyone may use it (it has no access list)".into());
+    };
+    if unusual {
+        return Err("its access list has entries cww can't check".into());
+    }
+    if let Some((sid, _)) = grants
+        .iter()
+        .find(|(sid, rights)| !trusted(sid) && rights & !HARMLESS_RIGHTS != 0)
+    {
+        return Err(format!("{sid} may use it"));
+    }
+    Ok(())
+}
+
 /// `name` with a number added before its extension, for the `n`th try:
 /// `notes.md`, then `notes.2.md` (Linux, as GNOME does) or `notes 2.md`
 /// (macOS, as Finder does). The result fits in `max` bytes.
@@ -108,6 +149,55 @@ fn numbered(name: &str, n: u32, is_dir: bool, max: usize) -> String {
         ext
     };
     format!("{stem}{suffix}{ext}")
+}
+
+#[cfg(test)]
+mod bin_tests {
+    use super::*;
+
+    const ME: &str = "S-1-5-21-1-2-3-1001";
+
+    fn grants(list: &[(&str, u32)]) -> Vec<(String, u32)> {
+        list.iter().map(|(s, m)| (s.to_string(), *m)).collect()
+    }
+
+    #[test]
+    fn accepts_a_recycle_bin_as_explorer_makes_it() {
+        let explorer = grants(&[
+            ("S-1-5-18", 0x001F_01FF),
+            ("S-1-5-32-544", 0x001F_01FF),
+            (ME, 0x001F_01FF),
+        ]);
+        assert_eq!(check_private_bin(ME, ME, Some(&explorer), false), Ok(()));
+        assert_eq!(
+            check_private_bin(ME, "S-1-5-32-544", Some(&explorer), false),
+            Ok(())
+        );
+        // Traverse and read-attributes for everyone reveal nothing.
+        let traverse = grants(&[(ME, 0x001F_01FF), ("S-1-1-0", 0x0010_00A0)]);
+        assert_eq!(check_private_bin(ME, ME, Some(&traverse), false), Ok(()));
+    }
+
+    #[test]
+    fn refuses_a_recycle_bin_others_can_use() {
+        let mine = grants(&[(ME, 0x001F_01FF)]);
+        let other = "S-1-5-21-1-2-3-1002";
+        assert!(check_private_bin(ME, other, Some(&mine), false).is_err());
+        assert!(check_private_bin(ME, ME, None, false).is_err());
+        assert!(check_private_bin(ME, ME, Some(&mine), true).is_err());
+        for (sid, rights) in [
+            ("S-1-1-0", 0x0012_0089),  // Everyone: read
+            ("S-1-5-32-545", 0x0002),  // Users: add files
+            ("S-1-5-11", 0x0001_0000), // Authenticated Users: delete
+            (other, 0x1000_0000),      // someone: generic all
+        ] {
+            let list = grants(&[(ME, 0x001F_01FF), (sid, rights)]);
+            assert!(
+                check_private_bin(ME, ME, Some(&list), false).is_err(),
+                "{sid} {rights:#x}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

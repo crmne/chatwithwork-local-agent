@@ -282,7 +282,8 @@ pub struct EntryStat {
     pub links: u64,
     /// Unix permission bits; 0 on Windows.
     pub mode: u32,
-    /// Owned by a user other than the daemon's (never on Windows).
+    /// Owned by a user other than the daemon's: another UID on Unix, an
+    /// owner SID other than the user's on Windows.
     pub foreign: bool,
     /// Marked read-only: no write bit on Unix, the read-only attribute on
     /// Windows.
@@ -292,7 +293,8 @@ pub struct EntryStat {
 }
 
 impl EntryStat {
-    /// Any execute bit set (Unix).
+    /// Any execute bit set (Unix). Windows has no execute bit; there the
+    /// writer asks [`ChangeDir::is_program`] and goes by the name.
     pub fn executable(&self) -> bool {
         self.mode & 0o111 != 0
     }

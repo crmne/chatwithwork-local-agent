@@ -557,7 +557,7 @@ impl Writer {
                  names could be outside the shared folder.",
             ));
         }
-        if stat.executable() && !trashing {
+        if !trashing && is_program(&target.dir, target.name(), stat)? {
             return Err(ToolError::new(
                 ErrorCode::NotChangeable,
                 "This file is executable, and cww never changes programs.",
@@ -1038,7 +1038,7 @@ impl Writer {
                 }
                 EntryKind::File => {
                     tree.bytes += stat.size;
-                    if stat.links > 1 || stat.executable() || name.to_str().is_none() {
+                    if stat.links > 1 || name.to_str().is_none() || is_program(dir, &name, &stat)? {
                         tree.uncopyable = true;
                     }
                 }
@@ -1295,6 +1295,16 @@ impl Writer {
     }
 }
 
+/// Whether the file `name` in `dir` is a program: an execute bit (Unix), a
+/// name that runs ([`kinds::is_executable_name`]), or a Windows program's
+/// header, whatever its name (Windows).
+fn is_program(dir: &ChangeDir, name: &OsStr, stat: &EntryStat) -> Result<bool, ToolError> {
+    if stat.executable() || name.to_str().is_some_and(kinds::is_executable_name) {
+        return Ok(true);
+    }
+    dir.is_program(name)
+}
+
 /// How many of [`GIT_MARKERS`] `dir` holds, each as the kind Git wants,
 /// leaving out the one whose folded name is `except`.
 fn git_markers(dir: &ChangeDir, except: Option<&str>) -> Result<usize, ToolError> {
@@ -1342,7 +1352,7 @@ fn copy_tree(from: &ChangeDir, to: &ChangeDir, cap: u64, depth: usize) -> Result
     }
     for (name, stat) in from.entries()? {
         match stat.kind {
-            EntryKind::File if stat.links > 1 || stat.executable() => {
+            EntryKind::File if stat.links > 1 || is_program(from, &name, &stat)? => {
                 return Err(ToolError::new(
                     ErrorCode::NotChangeable,
                     "The folder holds programs or files with more than one hard link, so it \

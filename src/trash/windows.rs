@@ -10,12 +10,16 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
-use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, GetDriveTypeW,
+    GetVolumePathNameW, READ_CONTROL, SYNCHRONIZE,
+};
 
-use super::{Trash, unavailable};
+use super::{Trash, check_private_bin, unavailable};
 use crate::error::ToolError;
 use crate::reader::safe_fs::rename_handle;
 
@@ -123,11 +127,10 @@ fn recycle_bin(real: &Path) -> Result<PathBuf, String> {
         return Err(format!("{} is not a folder", root.display()));
     }
     let sid = crate::win::current_user_sid().map_err(|e| format!("{e:#}"))?;
-    let bin = root.join(sid);
-    // Explorer makes it on the first delete; the inherited ACL is the one
-    // Explorer's gets.
+    let bin = root.join(&sid);
+    // Explorer makes it on the first delete; make it as Explorer does.
     if std::fs::symlink_metadata(&bin).is_err()
-        && let Err(e) = std::fs::create_dir(&bin)
+        && let Err(e) = create_private_dir(&bin, &sid)
         && e.kind() != std::io::ErrorKind::AlreadyExists
     {
         return Err(format!("creating {}: {e}", bin.display()));
@@ -136,7 +139,63 @@ fn recycle_bin(real: &Path) -> Result<PathBuf, String> {
     if !meta.is_dir() || meta.file_type().is_symlink() {
         return Err(format!("{} is not a folder", bin.display()));
     }
+    // Someone else could have made it first, open to them: what goes in
+    // must stay the user's.
+    let opened = OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&bin)
+        .map_err(|e| format!("opening {}: {e}", bin.display()))?;
+    let security = crate::win::file_security(&opened).map_err(|e| format!("{e:#}"))?;
+    let grants: Option<Vec<(String, u32)>> = security
+        .grants
+        .map(|g| g.into_iter().map(|g| (g.sid, g.mask)).collect());
+    check_private_bin(&sid, &security.owner, grants.as_deref(), security.unusual)
+        .map_err(|why| format!("{} isn't private to this user: {why}", bin.display()))?;
     Ok(bin)
+}
+
+/// Make `path` with the access list Explorer gives a Recycle Bin folder:
+/// owned by the user, full control for `SYSTEM`, `Administrators` and the
+/// user, nothing inherited from above.
+fn create_private_dir(path: &Path, sid: &str) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+    let sddl = crate::win::wide(&format!(
+        "O:{sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})"
+    ));
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd,
+        bInheritHandle: 0,
+    };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let made = unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) };
+    let result = if made == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    unsafe {
+        LocalFree(sd);
+    }
+    result
 }
 
 /// Six characters like Explorer's.

@@ -274,6 +274,17 @@ fn refuses_programs_and_binary_files() {
         code(write(&f, "docs:tool.sh", "rm -rf ~\n", WriteMode::Replace)),
         ErrorCode::NotChangeable
     );
+    // Nor moved, even without an execute bit when its name runs, so a
+    // program can't be renamed out of what marks it as one.
+    fs::write(f.docs.join("plugin.so"), "ELF").unwrap();
+    let moved = f.writer.move_entry(&MoveRequest {
+        from: "docs:plugin.so".into(),
+        to: "docs:plugin.txt".into(),
+        replace: false,
+        dry_run: false,
+    });
+    assert_eq!(code(moved), ErrorCode::NotChangeable);
+    assert!(f.docs.join("plugin.so").exists());
     // Nor a file that isn't text.
     fs::write(f.docs.join("blob.dat"), [0u8, 159, 146, 150]).unwrap();
     assert_eq!(

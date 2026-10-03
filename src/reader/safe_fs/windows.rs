@@ -33,8 +33,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_READ_ATTRIBUTES,
     FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
     FileAttributeTagInfo, FileIdBothDirectoryInfo, FileRenameInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, SYNCHRONIZE,
-    SetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, READ_CONTROL,
+    SYNCHRONIZE, SetFileInformationByHandle,
 };
 
 use super::{
@@ -464,10 +464,55 @@ fn stat_of(file: &File) -> io::Result<EntryStat> {
         modified: unix_time(filetime(info.ftLastWriteTime)),
         links: info.nNumberOfLinks as u64,
         mode: 0,
-        foreign: false,
+        foreign: is_foreign(file),
         readonly: info.dwFileAttributes & FILE_ATTRIBUTE_READONLY != 0,
         identity: identity_of(&info),
     })
+}
+
+/// Volumes that keep owners and ACLs have this flag (NTFS, ReFS; not FAT).
+const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
+
+/// Owned by someone other than the user the daemon runs as. A file whose
+/// owner can't be read counts as someone else's, unless its volume keeps
+/// no owners at all (FAT). The handle needs `READ_CONTROL`.
+fn is_foreign(file: &File) -> bool {
+    match crate::win::file_owner_sid(file) {
+        Ok(owner) => crate::win::user_sid() != Some(owner.as_str()),
+        Err(_) => volume_flags(file).is_none_or(|flags| flags & FILE_PERSISTENT_ACLS != 0),
+    }
+}
+
+/// The file system flags of the volume `file` is on.
+fn volume_flags(file: &File) -> Option<u32> {
+    let mut flags = 0u32;
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW(
+            raw(file),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ok != 0).then_some(flags)
+}
+
+/// Whether the file `name` starts as a Windows program does (`MZ`, the
+/// header of every `.exe`, `.dll`, `.scr` and `.sys`), whatever its name.
+fn has_program_header(file: &mut File) -> io::Result<bool> {
+    let mut head = [0u8; 2];
+    let mut read = 0;
+    while read < head.len() {
+        match file.read(&mut head[read..])? {
+            0 => break,
+            n => read += n,
+        }
+    }
+    Ok(read == 2 && head == *b"MZ")
 }
 
 fn is_missing(err: &io::Error) -> bool {
@@ -517,7 +562,10 @@ impl ChangeDir {
     /// other alias for an entry with a different name is refused, so every
     /// check that sees an entry sees it by its own name.
     pub fn entry(&self, name: &OsStr) -> Result<Option<EntryStat>, ToolError> {
-        let file = match open_with(&self.child(name), FILE_READ_ATTRIBUTES | SYNCHRONIZE) {
+        let file = match open_with(
+            &self.child(name),
+            FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        ) {
             Ok(file) => file,
             Err(e) if is_missing(&e) => return Ok(None),
             Err(e) => return Err(change_error(&e)),
@@ -528,6 +576,17 @@ impl ChangeDir {
             return Err(short_name());
         }
         Ok(Some(stat))
+    }
+
+    /// Whether the regular file `name` is a Windows program by its
+    /// content (an `MZ` header), whatever it is called.
+    pub fn is_program(&self, name: &OsStr) -> Result<bool, ToolError> {
+        let (mut file, stat) =
+            self.open_child(name, windows_sys::Win32::Foundation::GENERIC_READ)?;
+        if stat.kind != EntryKind::File {
+            return Ok(false);
+        }
+        has_program_header(&mut file).map_err(|e| io_error(&e, "reading the file"))
     }
 
     pub fn read(&self, name: &OsStr, cap: u64) -> Result<(Vec<u8>, EntryStat), ToolError> {
@@ -680,7 +739,10 @@ impl ChangeDir {
 
     pub fn rename(&self, name: &OsStr, to: &ChangeDir, to_name: &OsStr) -> Result<(), RenameError> {
         let (file, _) = self
-            .open_child(name, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .open_child(
+                name,
+                DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+            )
             .map_err(RenameError::Other)?;
         rename_handle(&file, &to.child(to_name)).map_err(|e| {
             if e.raw_os_error() == Some(ERROR_NOT_SAME_DEVICE as i32) {
@@ -699,7 +761,10 @@ impl ChangeDir {
         trash: &Trash,
         stat: &EntryStat,
     ) -> Result<PathBuf, ToolError> {
-        let (file, _) = self.open_child(name, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)?;
+        let (file, _) = self.open_child(
+            name,
+            DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+        )?;
         let real = final_path(&file).map_err(|e| io_error(&e, "checking the path"))?;
         trash.put(
             &file,
@@ -773,22 +838,9 @@ fn mark_from_internet(file: &File, path: &Path) -> io::Result<()> {
 }
 
 fn has_named_streams(file: &File) -> bool {
-    let mut flags = 0u32;
-    let ok = unsafe {
-        windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW(
-            raw(file),
-            std::ptr::null_mut(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut flags,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
     // If the volume can't be asked, assume it has them: refuse rather than
     // write a file without the mark.
-    ok == 0 || flags & FILE_NAMED_STREAMS != 0
+    volume_flags(file).is_none_or(|flags| flags & FILE_NAMED_STREAMS != 0)
 }
 
 /// Rename the open `file` to `target` (a full path), never replacing
