@@ -1,27 +1,38 @@
 //! The trash on Linux (freedesktop.org) and macOS.
+//!
+//! Every trash directory is opened as a handle, never through a link at
+//! any step cww makes or checks, and must belong to the user; records are
+//! written and items renamed relative to those handles, so nothing that
+//! swaps a directory for a link later can redirect them.
 
 use std::fs;
 use std::io::Write;
-use std::os::fd::BorrowedFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, Stat};
 use rustix::io::Errno;
 
-use super::{Trash, numbered, unavailable};
+use super::{Trash, numbered, randomized, unavailable};
 use crate::error::ToolError;
 use crate::reader::safe_fs::rename_noreplace;
 
+/// Numbered names tried before random ones.
+const NUMBERED_TRIES: u32 = 1000;
+/// Random names tried after that.
+const RANDOM_TRIES: u32 = 64;
+
 /// Where items from one filesystem go.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 struct Location {
     /// The directory the sandbox must allow changes in.
     base: PathBuf,
     /// Where items are moved to.
     files: PathBuf,
+    files_fd: OwnedFd,
     /// Where their `.trashinfo` records go (freedesktop only).
-    info: Option<PathBuf>,
+    info: Option<(PathBuf, OwnedFd)>,
     /// The top of the filesystem, for trash directories outside the home
     /// trash: records there name the item relative to it.
     topdir: Option<PathBuf>,
@@ -63,30 +74,41 @@ impl Trash {
     ) -> Result<PathBuf, ToolError> {
         let near = original.parent().unwrap_or(original);
         let location = location(self, dev, near).map_err(unavailable)?;
+        let shown = original
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(name);
         let max = if location.info.is_some() {
             255 - ".trashinfo".len()
         } else {
             255
         };
-        for n in 0..1000 {
-            let candidate = numbered(name, n, is_dir, max);
+        for n in 0..NUMBERED_TRIES + RANDOM_TRIES {
+            let candidate = if n < NUMBERED_TRIES {
+                numbered(shown, n, is_dir, max)
+            } else {
+                randomized(shown, is_dir, max)
+            };
             let record = match &location.info {
-                Some(info) => match write_record(info, &candidate, original, &location) {
-                    Ok(path) => Some(path),
-                    Err(Errno::EXIST) => continue,
-                    Err(e) => return Err(unavailable(format!("writing the trash record: {e}"))),
-                },
+                Some((_, info)) => {
+                    match write_record(info.as_fd(), &candidate, original, &location) {
+                        Ok(record) => Some(record),
+                        Err(Errno::EXIST) => continue,
+                        Err(e) => {
+                            return Err(unavailable(format!("writing the trash record: {e}")));
+                        }
+                    }
+                }
                 None => None,
             };
-            let target = location.files.join(&candidate);
-            let moved = rename_noreplace(dir, name, rustix::fs::CWD, &target);
+            let moved = rename_noreplace(dir, name, location.files_fd.as_fd(), &*candidate);
             if moved.is_err()
-                && let Some(record) = &record
+                && let (Some(record), Some((_, info))) = (&record, &location.info)
             {
-                let _ = fs::remove_file(record);
+                let _ = rustix::fs::unlinkat(info, record.as_str(), AtFlags::empty());
             }
             match moved {
-                Ok(()) => return Ok(target),
+                Ok(()) => return Ok(location.files.join(&candidate)),
                 Err(Errno::EXIST | Errno::NOTEMPTY) => continue,
                 Err(e) => return Err(unavailable(format!("moving to the trash: {e}"))),
             }
@@ -95,16 +117,18 @@ impl Trash {
     }
 }
 
-/// Write `<info>/<name>.trashinfo`, refusing to overwrite one.
+/// Write `<name>.trashinfo` in the open `info` directory, refusing to
+/// overwrite one. Returns the record's name.
 fn write_record(
-    info: &Path,
+    info: BorrowedFd<'_>,
     name: &str,
     original: &Path,
     location: &Location,
-) -> Result<PathBuf, Errno> {
-    let path = info.join(format!("{name}.trashinfo"));
-    let fd = rustix::fs::open(
-        &path,
+) -> Result<String, Errno> {
+    let record_name = format!("{name}.trashinfo");
+    let fd = rustix::fs::openat(
+        info,
+        record_name.as_str(),
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::from_raw_mode(0o600),
     )?;
@@ -123,10 +147,10 @@ fn write_record(
         .and_then(|()| file.sync_all());
     if let Err(e) = written {
         drop(file);
-        let _ = fs::remove_file(&path);
+        let _ = rustix::fs::unlinkat(info, record_name.as_str(), AtFlags::empty());
         return Err(Errno::from_io_error(&e).unwrap_or(Errno::IO));
     }
-    Ok(path)
+    Ok(record_name)
 }
 
 /// A path as the trash spec wants it: percent-encoded, slashes kept.
@@ -153,10 +177,39 @@ fn uid() -> u32 {
     rustix::process::getuid().as_raw()
 }
 
-/// A trash directory: make it (0700) if it's missing, then insist it is a
-/// real directory of ours, not a link someone left there.
-fn ensure_dir(path: &Path, recursive: bool) -> Result<(), String> {
+/// How trash directories are opened: never through a link. On Linux as
+/// `O_PATH` handles, which are enough to create, rename and check relative
+/// to them, and which Landlock lets the daemon open without the right to
+/// list the trash (it only takes items in).
+#[cfg(target_os = "linux")]
+const DIR_FLAGS: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+#[cfg(not(target_os = "linux"))]
+const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// Insist an open directory is ours.
+fn check_own(fd: &OwnedFd, shown: &Path) -> Result<Stat, String> {
+    let stat = rustix::fs::fstat(fd).map_err(|e| format!("checking {}: {e}", shown.display()))?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+        return Err(format!("{} is not a directory", shown.display()));
+    }
+    if stat.st_uid != uid() {
+        return Err(format!("{} belongs to another user", shown.display()));
+    }
+    Ok(stat)
+}
+
+/// A trash directory at `path`: made (0700, with its parents when
+/// `recursive`) if it's missing, then opened without following a link and
+/// checked to be a directory of ours.
+fn open_own_dir(path: &Path, recursive: bool) -> Result<OwnedFd, String> {
     if fs::symlink_metadata(path).is_err() {
+        use std::os::unix::fs::DirBuilderExt;
         let mut builder = fs::DirBuilder::new();
         builder.mode(0o700).recursive(recursive);
         if let Err(e) = builder.create(path)
@@ -165,15 +218,27 @@ fn ensure_dir(path: &Path, recursive: bool) -> Result<(), String> {
             return Err(format!("creating {}: {e}", path.display()));
         }
     }
-    let meta =
-        fs::symlink_metadata(path).map_err(|e| format!("checking {}: {e}", path.display()))?;
-    if !meta.file_type().is_dir() {
-        return Err(format!("{} is not a directory", path.display()));
+    let fd = rustix::fs::open(path, DIR_FLAGS, Mode::empty()).map_err(|e| match e {
+        Errno::LOOP | Errno::NOTDIR => format!("{} is not a directory", path.display()),
+        e => format!("opening {}: {e}", path.display()),
+    })?;
+    check_own(&fd, path)?;
+    Ok(fd)
+}
+
+/// The directory `name` in the open `parent`: made (0700) if it's missing,
+/// opened without following a link, and checked to be ours.
+fn open_own_subdir(parent: &OwnedFd, name: &str, shown: &Path) -> Result<OwnedFd, String> {
+    match rustix::fs::mkdirat(parent, name, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(e) => return Err(format!("creating {}: {e}", shown.display())),
     }
-    if meta.uid() != uid() {
-        return Err(format!("{} belongs to another user", path.display()));
-    }
-    Ok(())
+    let fd = rustix::fs::openat(parent, name, DIR_FLAGS, Mode::empty()).map_err(|e| match e {
+        Errno::LOOP | Errno::NOTDIR => format!("{} is not a directory", shown.display()),
+        e => format!("opening {}: {e}", shown.display()),
+    })?;
+    check_own(&fd, shown)?;
+    Ok(fd)
 }
 
 fn device(path: &Path) -> Result<u64, String> {
@@ -187,25 +252,30 @@ fn device(path: &Path) -> Result<u64, String> {
 #[cfg(not(target_os = "macos"))]
 fn location(trash: &Trash, dev: u64, near: &Path) -> Result<Location, String> {
     let home = trash.home.as_ref().ok_or("no home trash")?;
-    ensure_dir(home, true)?;
+    let home_fd = open_own_dir(home, true)?;
     if device(home)? == dev {
-        return freedesktop(home.clone(), None);
+        return freedesktop(home.clone(), home_fd, None);
     }
     let top = topdir(near, dev).ok_or("the item's filesystem has no top directory")?;
-    let base = topdir_trash(&top, uid())?;
-    freedesktop(base, Some(top))
+    let (base, base_fd) = topdir_trash(&top, uid())?;
+    freedesktop(base, base_fd, Some(top))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn freedesktop(base: PathBuf, topdir: Option<PathBuf>) -> Result<Location, String> {
+fn freedesktop(
+    base: PathBuf,
+    base_fd: OwnedFd,
+    topdir: Option<PathBuf>,
+) -> Result<Location, String> {
     let files = base.join("files");
     let info = base.join("info");
-    ensure_dir(&files, false)?;
-    ensure_dir(&info, false)?;
+    let files_fd = open_own_subdir(&base_fd, "files", &files)?;
+    let info_fd = open_own_subdir(&base_fd, "info", &info)?;
     Ok(Location {
         base,
         files,
-        info: Some(info),
+        files_fd,
+        info: Some((info, info_fd)),
         topdir,
     })
 }
@@ -224,33 +294,47 @@ fn topdir(near: &Path, dev: u64) -> Option<PathBuf> {
     top.map(Path::to_path_buf)
 }
 
-/// `$topdir/.Trash/$uid` if an administrator set up a sticky `.Trash`
-/// (and it isn't a link), else `$topdir/.Trash-$uid`.
+/// Whether a `$topdir/.Trash` may hold users' trashes, as the spec asks:
+/// a real directory (not a link), with the sticky bit, and, so no other
+/// user can have made it to collect what is deleted, owned by root.
 #[cfg(not(target_os = "macos"))]
-fn topdir_trash(top: &Path, uid: u32) -> Result<PathBuf, String> {
+fn shared_trash_ok(stat: &Stat) -> bool {
+    FileType::from_raw_mode(stat.st_mode) == FileType::Directory
+        && stat.st_mode & 0o1000 != 0
+        && stat.st_uid == 0
+}
+
+/// `$topdir/.Trash/$uid` if an administrator set up `.Trash` as the spec
+/// asks ([`shared_trash_ok`]), else `$topdir/.Trash-$uid`. Every step is
+/// opened relative to the one before, never through a link.
+#[cfg(not(target_os = "macos"))]
+fn topdir_trash(top: &Path, uid: u32) -> Result<(PathBuf, OwnedFd), String> {
+    let top_fd = rustix::fs::open(top, DIR_FLAGS, Mode::empty())
+        .map_err(|e| format!("opening {}: {e}", top.display()))?;
     let shared = top.join(".Trash");
-    if let Ok(meta) = fs::symlink_metadata(&shared)
-        && meta.file_type().is_dir()
-        && meta.mode() & 0o1000 != 0
+    if let Ok(shared_fd) = rustix::fs::openat(&top_fd, ".Trash", DIR_FLAGS, Mode::empty())
+        && rustix::fs::fstat(&shared_fd).is_ok_and(|s| shared_trash_ok(&s))
     {
         let mine = shared.join(uid.to_string());
-        if ensure_dir(&mine, false).is_ok() {
-            return Ok(mine);
+        if let Ok(fd) = open_own_subdir(&shared_fd, &uid.to_string(), &mine) {
+            return Ok((mine, fd));
         }
     }
-    let mine = top.join(format!(".Trash-{uid}"));
-    ensure_dir(&mine, false)?;
-    Ok(mine)
+    let name = format!(".Trash-{uid}");
+    let mine = top.join(&name);
+    let fd = open_own_subdir(&top_fd, &name, &mine)?;
+    Ok((mine, fd))
 }
 
 #[cfg(target_os = "macos")]
 fn location(trash: &Trash, dev: u64, near: &Path) -> Result<Location, String> {
     let home = trash.home.as_ref().ok_or("no home trash")?;
-    ensure_dir(home, true)?;
+    let home_fd = open_own_dir(home, true)?;
     if device(home)? == dev {
         return Ok(Location {
             base: home.clone(),
             files: home.clone(),
+            files_fd: home_fd,
             info: None,
             topdir: None,
         });
@@ -262,17 +346,17 @@ fn location(trash: &Trash, dev: u64, near: &Path) -> Result<Location, String> {
     if device(&mount)? != dev {
         return Err(format!("{} is not the item's volume", mount.display()));
     }
+    let mount_fd = rustix::fs::open(&mount, DIR_FLAGS, Mode::empty())
+        .map_err(|e| format!("opening {}: {e}", mount.display()))?;
     let trashes = mount.join(".Trashes");
-    let meta = fs::symlink_metadata(&trashes)
+    let trashes_fd = rustix::fs::openat(&mount_fd, ".Trashes", DIR_FLAGS, Mode::empty())
         .map_err(|e| format!("{} has no .Trashes: {e}", mount.display()))?;
-    if !meta.file_type().is_dir() {
-        return Err(format!("{} is not a directory", trashes.display()));
-    }
     let mine = trashes.join(uid().to_string());
-    ensure_dir(&mine, false)?;
+    let fd = open_own_subdir(&trashes_fd, &uid().to_string(), &mine)?;
     Ok(Location {
         base: mine.clone(),
         files: mine,
+        files_fd: fd,
         info: None,
         topdir: None,
     })
@@ -383,6 +467,41 @@ mod tests {
         assert_eq!(read_dir(&home), ["notes 1 2.md", "notes 1.md", "sub"]);
     }
 
+    /// After a thousand items of the same name, names get a random part
+    /// instead of failing.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn finds_a_name_after_a_thousand_of_the_same() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let home = base.join("Trash");
+        let work = base.join("work");
+        fs::create_dir_all(home.join("info")).unwrap();
+        fs::create_dir_all(home.join("files")).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        for n in 0..NUMBERED_TRIES {
+            let name = numbered("notes.md", n, false, 245);
+            fs::write(home.join("info").join(format!("{name}.trashinfo")), "").unwrap();
+        }
+        fs::write(work.join("notes.md"), "last").unwrap();
+        let trash = Trash::new(Some(home.clone()));
+        let fd = dir_fd(&work);
+        let dev = fs::metadata(&work).unwrap().dev();
+        let went = trash
+            .put(fd.as_fd(), "notes.md", &work.join("notes.md"), dev, false)
+            .unwrap();
+        assert_eq!(fs::read_to_string(&went).unwrap(), "last");
+        let name = went.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("notes.") && name.ends_with(".md"),
+            "{name}"
+        );
+        assert!(
+            home.join("info").join(format!("{name}.trashinfo")).exists(),
+            "{name}"
+        );
+    }
+
     #[test]
     fn refuses_a_trash_that_is_a_link() {
         let tmp = tempfile::tempdir().unwrap();
@@ -423,35 +542,76 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn topdir_trash_prefers_a_sticky_shared_trash() {
+    fn topdir_trash_uses_only_a_shared_trash_root_set_up() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let top = tmp.path().canonicalize().unwrap();
+        let private = top.join(format!(".Trash-{}", uid()));
         // Without .Trash: a private .Trash-$uid.
-        assert_eq!(
-            topdir_trash(&top, uid()).unwrap(),
-            top.join(format!(".Trash-{}", uid()))
-        );
-        // A .Trash without the sticky bit is ignored.
+        assert_eq!(topdir_trash(&top, uid()).unwrap().0, private);
+        // A .Trash without the sticky bit is ignored, and so is a sticky
+        // one any user could have made: only root's counts.
         fs::create_dir(top.join(".Trash")).unwrap();
-        assert_eq!(
-            topdir_trash(&top, uid()).unwrap(),
-            top.join(format!(".Trash-{}", uid()))
-        );
-        // With it, $uid inside it.
+        assert_eq!(topdir_trash(&top, uid()).unwrap().0, private);
         fs::set_permissions(top.join(".Trash"), fs::Permissions::from_mode(0o1777)).unwrap();
-        assert_eq!(
-            topdir_trash(&top, uid()).unwrap(),
-            top.join(".Trash").join(uid().to_string())
-        );
+        if uid() != 0 {
+            assert_eq!(topdir_trash(&top, uid()).unwrap().0, private);
+        }
         // A link named .Trash is never used.
         let other = tempfile::tempdir().unwrap();
         let top2 = other.path().canonicalize().unwrap();
         std::os::unix::fs::symlink(top.join(".Trash"), top2.join(".Trash")).unwrap();
         assert_eq!(
-            topdir_trash(&top2, uid()).unwrap(),
+            topdir_trash(&top2, uid()).unwrap().0,
             top2.join(format!(".Trash-{}", uid()))
         );
+        // Nor a .Trash-$uid that is a link.
+        let third = tempfile::tempdir().unwrap();
+        let top3 = third.path().canonicalize().unwrap();
+        std::os::unix::fs::symlink(&top, top3.join(format!(".Trash-{}", uid()))).unwrap();
+        assert!(topdir_trash(&top3, uid()).is_err());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn a_shared_trash_must_be_roots_sticky_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut stat = rustix::fs::stat(tmp.path()).unwrap();
+        stat.st_mode = (stat.st_mode & !0o7777) | 0o1777;
+        stat.st_uid = 0;
+        assert!(shared_trash_ok(&stat));
+        let mut not_root = stat;
+        not_root.st_uid = 1000;
+        assert!(!shared_trash_ok(&not_root));
+        let mut not_sticky = stat;
+        not_sticky.st_mode &= !0o1000;
+        assert!(!shared_trash_ok(&not_sticky));
+    }
+
+    /// The files and info directories are used by handle: one that is a
+    /// link to elsewhere is refused, never followed.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn refuses_trash_subdirectories_that_are_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let home = base.join("Trash");
+        let elsewhere = base.join("elsewhere");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.join("files")).unwrap();
+        let work = base.join("work");
+        fs::create_dir_all(&work).unwrap();
+        fs::write(work.join("a.txt"), "a").unwrap();
+        let trash = Trash::new(Some(home));
+        let fd = dir_fd(&work);
+        let dev = fs::metadata(&work).unwrap().dev();
+        let err = trash
+            .put(fd.as_fd(), "a.txt", &work.join("a.txt"), dev, false)
+            .unwrap_err();
+        assert_eq!(err.code, crate::error::ErrorCode::TrashUnavailable);
+        assert!(work.join("a.txt").exists());
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     #[cfg(not(target_os = "macos"))]

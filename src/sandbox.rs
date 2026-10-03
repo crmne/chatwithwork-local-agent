@@ -369,11 +369,30 @@ mod sys {
             ));
         }
         if !plan.trash.is_empty() {
-            // Items are renamed into the trash; nothing there is read.
+            // Items are renamed into the trash; nothing there is read. The
+            // trash directory itself is opened (not listed) to rename
+            // relative to it.
             rules.push_str(&format!(
                 "(allow file-write-create{})\n",
                 subpaths(&plan.trash)
             ));
+            // A volume's `.Trashes/<uid>` is opened from the volume's root
+            // down, one directory at a time.
+            let mut opened: Vec<&Path> = Vec::new();
+            for trash in &plan.trash {
+                opened.push(trash);
+                if let Some(trashes) = trash.parent()
+                    && trashes.file_name().is_some_and(|n| n == ".Trashes")
+                {
+                    opened.push(trashes);
+                    opened.extend(trashes.parent());
+                }
+            }
+            let literals: String = opened
+                .iter()
+                .map(|p| format!(" (literal {})", quote(p)))
+                .collect();
+            rules.push_str(&format!("(allow file-read-data{literals})\n"));
         }
         rules.push_str(&format!(
             "(allow file-read* file-write*{})\n",
@@ -499,6 +518,7 @@ mod tests {
         assert!(profile.contains(r#"(subpath "/Users/u/My \"odd\" folder")"#));
         assert!(profile.contains(r#"(allow file-read* file-write* (subpath "/Users/u/Drafts"))"#));
         assert!(profile.contains(r#"(subpath "/Users/u/.Trash"))"#));
+        assert!(profile.contains(r#"(allow file-read-data (literal "/Users/u/.Trash"))"#));
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("com.apple.SecurityServer"));
     }

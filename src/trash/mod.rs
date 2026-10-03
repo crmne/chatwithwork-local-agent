@@ -123,16 +123,34 @@ fn check_private_bin(
 /// (macOS, as Finder does). The result fits in `max` bytes.
 #[cfg(unix)]
 fn numbered(name: &str, n: u32, is_dir: bool, max: usize) -> String {
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((stem, ext)) if !is_dir && !stem.is_empty() => (stem, format!(".{ext}")),
-        _ => (name, String::new()),
-    };
     let suffix = if n == 0 {
         String::new()
     } else if cfg!(target_os = "macos") {
         format!(" {}", n + 1)
     } else {
         format!(".{}", n + 1)
+    };
+    suffixed(name, &suffix, is_dir, max)
+}
+
+/// `name` with a random suffix before its extension (`notes.3f9a01c2.md`),
+/// for when the numbered names are all taken.
+#[cfg(unix)]
+fn randomized(name: &str, is_dir: bool, max: usize) -> String {
+    use ring::rand::SecureRandom;
+    let mut bytes = [0u8; 4];
+    let _ = ring::rand::SystemRandom::new().fill(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let sep = if cfg!(target_os = "macos") { " " } else { "." };
+    suffixed(name, &format!("{sep}{hex}"), is_dir, max)
+}
+
+/// `name` with `suffix` before its extension, cut to fit in `max` bytes.
+#[cfg(unix)]
+fn suffixed(name: &str, suffix: &str, is_dir: bool, max: usize) -> String {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !is_dir && !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
     };
     let room = max.saturating_sub(suffix.len() + ext.len());
     let mut stem = stem.to_string();
@@ -222,6 +240,17 @@ mod tests {
             assert_eq!(folder, "v1.2.2");
             assert_eq!(hidden, ".env.2");
         }
+    }
+
+    #[test]
+    fn random_names_keep_the_extension() {
+        let a = randomized("notes.md", false, 255);
+        let b = randomized("notes.md", false, 255);
+        assert_ne!(a, b);
+        assert!(a.starts_with("notes") && a.ends_with(".md"), "{a}");
+        assert_eq!(a.len(), "notes.12345678.md".len());
+        let long = format!("{}.txt", "x".repeat(300));
+        assert!(randomized(&long, false, 245).len() <= 245);
     }
 
     #[test]

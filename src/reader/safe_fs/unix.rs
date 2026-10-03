@@ -620,8 +620,7 @@ fn entry_stat(stat: &Stat) -> EntryStat {
 
 /// Rename without replacing whatever is at the target:
 /// `renameat2(RENAME_NOREPLACE)` on Linux, `renameatx_np(RENAME_EXCL)` on
-/// macOS. On a Linux filesystem without it, look first; changes run one at
-/// a time, so only another program could slip in between.
+/// macOS. On a Linux filesystem without it, see [`rename_noreplace_fallback`].
 pub fn rename_noreplace<P: rustix::path::Arg + Copy, Q: rustix::path::Arg + Copy>(
     from_dir: BorrowedFd<'_>,
     from: P,
@@ -630,13 +629,40 @@ pub fn rename_noreplace<P: rustix::path::Arg + Copy, Q: rustix::path::Arg + Copy
 ) -> Result<(), Errno> {
     match rustix::fs::renameat_with(from_dir, from, to_dir, to, RenameFlags::NOREPLACE) {
         Err(Errno::INVAL | Errno::NOSYS) if cfg!(target_os = "linux") => {
-            match rustix::fs::statat(to_dir, to, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(_) => Err(Errno::EXIST),
-                Err(Errno::NOENT) => rustix::fs::renameat(from_dir, from, to_dir, to),
-                Err(e) => Err(e),
-            }
+            rename_noreplace_fallback(from_dir, from, to_dir, to)
         }
         other => other,
+    }
+}
+
+/// A rename that never replaces anything, without `RENAME_NOREPLACE`. A
+/// file is linked under the new name, which fails if anything has it, then
+/// unlinked from the old one. A folder can't be linked, and neither can a
+/// file on a filesystem without hard links: there, look first, then
+/// rename; changes run one at a time, so only another program could slip
+/// in between.
+fn rename_noreplace_fallback<P: rustix::path::Arg + Copy, Q: rustix::path::Arg + Copy>(
+    from_dir: BorrowedFd<'_>,
+    from: P,
+    to_dir: BorrowedFd<'_>,
+    to: Q,
+) -> Result<(), Errno> {
+    match rustix::fs::linkat(from_dir, from, to_dir, to, AtFlags::empty()) {
+        Ok(()) => match rustix::fs::unlinkat(from_dir, from, AtFlags::empty()) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Leave things as they were.
+                let _ = rustix::fs::unlinkat(to_dir, to, AtFlags::empty());
+                Err(e)
+            }
+        },
+        Err(e @ (Errno::EXIST | Errno::XDEV | Errno::NOENT | Errno::LOOP)) => Err(e),
+        // A folder (EPERM on Linux), or no hard links here.
+        Err(_) => match rustix::fs::statat(to_dir, to, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => Err(Errno::EXIST),
+            Err(Errno::NOENT) => rustix::fs::renameat(from_dir, from, to_dir, to),
+            Err(e) => Err(e),
+        },
     }
 }
 
@@ -956,6 +982,40 @@ mod tests {
                 assert_eq!(hard.links, 2);
             }
         }
+    }
+
+    /// Without `RENAME_NOREPLACE`, files move by link and unlink, which
+    /// never replaces anything; folders fall back to looking first.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn renames_without_noreplace_never_replace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = rustix::fs::open(
+            tmp.path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let fd = dir.as_fd();
+        std::fs::write(tmp.path().join("a"), "a").unwrap();
+        std::fs::write(tmp.path().join("b"), "b").unwrap();
+        assert_eq!(
+            rename_noreplace_fallback(fd, "a", fd, "b"),
+            Err(Errno::EXIST)
+        );
+        assert_eq!(std::fs::read_to_string(tmp.path().join("b")).unwrap(), "b");
+        rename_noreplace_fallback(fd, "a", fd, "c").unwrap();
+        assert!(!tmp.path().join("a").exists());
+        assert_eq!(std::fs::read_to_string(tmp.path().join("c")).unwrap(), "a");
+        let meta = std::fs::metadata(tmp.path().join("c")).unwrap();
+        assert_eq!(std::os::unix::fs::MetadataExt::nlink(&meta), 1);
+        std::fs::create_dir(tmp.path().join("d")).unwrap();
+        assert_eq!(
+            rename_noreplace_fallback(fd, "d", fd, "b"),
+            Err(Errno::EXIST)
+        );
+        rename_noreplace_fallback(fd, "d", fd, "e").unwrap();
+        assert!(tmp.path().join("e").is_dir());
     }
 
     #[test]
