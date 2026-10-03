@@ -1,5 +1,5 @@
 //! The sidebar (`sidebar.css`, `account_switcher.css`, `sidebar_pins.css`):
-//! the logotype and its toggle, the organization, New chat and Chats, the
+//! the logotype and its toggle, New chat and Chats, the
 //! search field, the Recent chats, what's pinned (and a picker of every
 //! project behind "All projects"), and your
 //! name at the foot, with the credits when they run low, opening the menu
@@ -120,16 +120,9 @@ impl Sidebar<'_> {
         }
         let mut y = rect.top() + 56.0;
 
-        // The organization, as the web's switcher shows it.
-        let account = state.list.account.name.trim().to_string();
-        if !account.is_empty() {
-            let row = Rect::from_min_max(
-                pos2(rect.left() + 8.0, y),
-                pos2(inner_right - 8.0, y + 36.0),
-            );
-            self.organization(ui, row, &account);
-            y += 36.0 + 8.0;
-        }
+        // The web's organization switcher shows only to someone in more than
+        // one organization. The chat API names only the one this computer is
+        // paired with, so the sidebar shows what the web shows someone in one.
 
         // New chat, and Chats on the web.
         y += 4.0;
@@ -370,51 +363,6 @@ impl Sidebar<'_> {
             state.projects_menu = false;
         }
         event
-    }
-
-    /// `.account-switcher__button`: the organization's initial in a mono
-    /// tag, and its name. Only one is known here, so it doesn't switch.
-    fn organization(&self, ui: &mut Ui, row: Rect, name: &str) {
-        let p = self.palette;
-        let painter = ui.painter().clone();
-        widgets::label(ui, row, &format!("Organization: {name}"));
-        let mark = Rect::from_min_size(
-            pos2(row.left() + 8.0, row.center().y - 12.0),
-            vec2(24.0, 24.0),
-        );
-        painter.rect_filled(mark, tokens::RADIUS_TAG, p.surface);
-        painter.rect_stroke(
-            mark.shrink(0.5),
-            tokens::RADIUS_TAG - 0.5,
-            egui::Stroke::new(1.0, p.line_strong),
-            egui::StrokeKind::Middle,
-        );
-        let initial: String = name.chars().take(1).flat_map(char::to_uppercase).collect();
-        let galley = paint::layout(
-            &painter,
-            paint::job(
-                &initial,
-                Type::mono(11.0, 16.5).weight(500.0),
-                p.ink,
-                f32::INFINITY,
-            ),
-        );
-        painter.galley(mark.center() - galley.size() / 2.0, galley, p.ink);
-        let x = mark.right() + 10.0;
-        let galley = paint::layout(
-            &painter,
-            paint::line_job(
-                name,
-                scale::SMALL.weight(550.0),
-                p.ink,
-                row.right() - 8.0 - x,
-            ),
-        );
-        painter.galley(
-            pos2(x, row.center().y - galley.size().y / 2.0),
-            galley,
-            p.ink,
-        );
     }
 
     /// `.sidebar__link--new`. True when clicked.

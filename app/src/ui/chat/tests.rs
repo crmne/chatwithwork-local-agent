@@ -474,11 +474,14 @@ fn the_webs_logos_come_from_the_server_once_and_are_kept() {
 }
 
 #[test]
-fn the_sidebar_shows_the_organization_and_whats_pinned_as_the_web_does() {
+fn the_sidebar_shows_whats_pinned_as_the_web_does() {
     OPENED.with(|o| o.borrow_mut().clear());
     let mut fx = fixture(Options::default());
     fx.ready();
-    fx.wait_for_label("Organization: Northwind");
+    fx.wait_for_label("Pinned");
+    // The web shows the organization only to someone in more than one,
+    // which the chat API doesn't say: none, as for someone in one.
+    assert!(fx.harness.query_by_label_contains("Northwind").is_none());
     for label in ["Recent", "Pinned", "All projects", "Falcon"] {
         fx.harness.get_by_label(label);
     }
