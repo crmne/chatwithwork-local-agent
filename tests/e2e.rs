@@ -2246,30 +2246,25 @@ async fn keeps_the_chat_list_current_for_the_terminal() {
     let tools = s.request("tools/list", json!({})).await;
     assert!(tools["result"]["tools"].is_array(), "{tools}");
 
-    // The last watcher gone, the daemon unsubscribes at once. Windows has
-    // no way to hang up a pipe another thread reads (Events::closer), so
-    // there it happens at the next heartbeat instead.
+    // The last watcher gone, the daemon unsubscribes at once.
     hang_up(&first_closer);
     hang_up(&second_closer);
-    #[cfg(unix)]
-    {
-        let mut unsubscribed = false;
-        for _ in 0..20 {
-            let Some(text) = tokio::time::timeout(Duration::from_secs(10), next_text(&mut s.ws))
-                .await
-                .ok()
-                .flatten()
-            else {
-                break;
-            };
-            let frame: Value = serde_json::from_str(&text).unwrap();
-            if frame["command"] == "unsubscribe" && frame["identifier"] == identifier {
-                unsubscribed = true;
-                break;
-            }
+    let mut unsubscribed = false;
+    for _ in 0..20 {
+        let Some(text) = tokio::time::timeout(Duration::from_secs(10), next_text(&mut s.ws))
+            .await
+            .ok()
+            .flatten()
+        else {
+            break;
+        };
+        let frame: Value = serde_json::from_str(&text).unwrap();
+        if frame["command"] == "unsubscribe" && frame["identifier"] == identifier {
+            unsubscribed = true;
+            break;
         }
-        assert!(unsubscribed, "the daemon leaves the list's channel");
     }
+    assert!(unsubscribed, "the daemon leaves the list's channel");
 
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(10), daemon)
