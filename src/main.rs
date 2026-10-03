@@ -298,6 +298,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Debug {
             command: DebugCommand::Change { tool, arguments },
         } => {
+            // To stderr, so a refusal's reason (such as why the trash is
+            // unavailable) shows next to it.
+            cww::logging::init(None)?;
             let status = daemon::confine_for_check(&paths, None)?;
             println!("sandbox: {}", serde_json::to_string(&status)?);
             let arguments: Value = serde_json::from_str(&arguments)

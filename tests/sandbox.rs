@@ -265,6 +265,12 @@ fn only_folders_that_allow_changes_are_writable_on_macos() {
         "--write",
         &probe(&base),
     ]);
+    if std::env::var_os("NIX_BUILD_TOP").is_some() && out.contains(r#""state":"unavailable""#) {
+        // Nix builds on macOS run in a Seatbelt sandbox of their own, which
+        // can't take another one; everywhere else Seatbelt has to apply.
+        eprintln!("sandbox not available in this Nix build: {out}");
+        return;
+    }
     assert!(
         out.contains(r#""state":"enforced""#),
         "Seatbelt applies: {out}"
