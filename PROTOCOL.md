@@ -519,12 +519,12 @@ Effect `replaced` or `appended`, or `created` when the file didn't exist. The pr
 | Argument | Type | Notes |
 |---|---|---|
 | `path` | string, required | An existing text file. |
-| `old_text` | string, required | Must appear exactly once. Not empty. |
+| `old_text` | string, required | Must appear exactly once. Not empty. At most 8 KiB and at most half the file, unless it is 64 bytes or less. |
 | `new_text` | string, required | Different from `old_text`. |
 | `expected_sha256` | string | As for `write`. |
 | `dry_run` | boolean | |
 
-`invalid_argument` when `old_text` isn't found ("Read the file again and quote the text exactly") or appears more than once ("appears N times; include more of the surrounding text"). When the file uses Windows line endings and `old_text` has none, `\n` in both texts matches `\r\n`. Effect `edited`; the previous version goes to the trash.
+`invalid_argument` when `old_text` isn't found ("Read the file again and quote the text exactly") or appears more than once ("appears N times; include more of the surrounding text"), and when it is larger than the limits above ("Use write to replace the file's content"): an edit is a write, which a server may let through for the rest of a chat, so replacing most of a file takes `write`, which is destructive and always asks. When the file uses Windows line endings and `old_text` has none, `\n` in both texts matches `\r\n`. Effect `edited`; the previous version goes to the trash.
 
 ### 8.11 `mkdir`
 

@@ -499,8 +499,10 @@ pub fn change_tools() -> Vec<Tool> {
             "Edit a local file",
             "Replace one exact span of a text file in a shared folder that allows changes: \
              `old_text` must appear exactly once in the file (quote it exactly, with enough \
-             surrounding text to be unique) and becomes `new_text`. The previous version goes \
-             to the system trash on the person's computer.",
+             surrounding text to be unique) and becomes `new_text`. It changes a part of a \
+             file: at most 8 KiB and at most half the file (any span of up to 64 bytes); use \
+             `write` to replace more. The previous version goes to the system trash on the \
+             person's computer.",
             json!({
                 "type": "object",
                 "properties": {

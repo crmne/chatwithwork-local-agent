@@ -34,7 +34,7 @@ Offered only while at least one shared folder allows changes; until then `tools/
 |---|---|---|---|---|---|
 | `create` | `path`, `content` | New text file; `exists` if anything is there | false | false | |
 | `write` | `path`, `content`, `mode` (`replace` default, `append`), `expected_sha256` | Replace or append; creates the file if missing; old version to the trash | **true** | false | `{"mode": "append"}` |
-| `edit` | `path`, `old_text`, `new_text`, `expected_sha256` | Replace one exact span (must match once); old version to the trash | false | false | |
+| `edit` | `path`, `old_text`, `new_text`, `expected_sha256` | Replace one exact span (must match once; at most 8 KiB and half the file, unless 64 bytes or less, so an edit can't stand in for a replace); old version to the trash | false | false | |
 | `mkdir` | `path`, `parents` | New folder; `unchanged` if it exists | false | true | |
 | `move` | `from`, `to`, `replace` (default false) | Move or rename, within or between folders that allow changes; with `replace`, a file at `to` goes to the trash first | **true** | false | `{"replace": false}` |
 | `delete` | `path` | Move a file or folder to the system trash | **true** | false | |

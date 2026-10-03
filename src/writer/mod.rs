@@ -40,6 +40,13 @@ use crate::reader::safe_fs::{
 use crate::reader::{ChangeView, Reader, format_time};
 use crate::trash::Trash;
 
+/// The largest span `edit` replaces, in bytes, and the largest share of the
+/// file (one half). An edit is a write, which a server may let through
+/// without asking each time; replacing most of a file is a `write`, which
+/// always asks. Spans up to [`EDIT_ALWAYS_BYTES`] are fine in any file.
+const EDIT_MAX_BYTES: usize = 8 * 1024;
+const EDIT_ALWAYS_BYTES: usize = 64;
+
 /// The longest diff a dry run returns, in bytes.
 const MAX_DIFF_BYTES: usize = 32 * 1024;
 
@@ -779,6 +786,20 @@ impl Writer {
             }
             _ => (req.old_text.clone(), req.new_text.clone()),
         };
+        if from.len() > EDIT_ALWAYS_BYTES
+            && (from.len() > EDIT_MAX_BYTES || from.len() * 2 > old.len())
+        {
+            return Err(ToolError::invalid_argument(format!(
+                "old_text is {} bytes, {}: edit changes a smaller part of a file. Use write \
+                 to replace the file's content.",
+                from.len(),
+                if from.len() > EDIT_MAX_BYTES {
+                    format!("more than {EDIT_MAX_BYTES} bytes")
+                } else {
+                    "more than half the file".to_string()
+                }
+            )));
+        }
         match old.matches(from.as_str()).count() {
             0 => {
                 return Err(ToolError::invalid_argument(

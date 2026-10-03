@@ -441,6 +441,52 @@ fn edits_one_exact_span() {
     );
 }
 
+/// An edit is a write: replacing most of a file, or a large span of it,
+/// takes `write`, which a server always asks about.
+#[test]
+fn edits_stay_small_next_to_their_file() {
+    let f = fixture();
+    let body: String = (0..100).map(|n| format!("line {n}\n")).collect();
+    fs::write(f.docs.join("long.md"), &body).unwrap();
+    let edit = |old: &str| {
+        f.writer.edit(&EditRequest {
+            path: "docs:long.md".into(),
+            old_text: old.into(),
+            new_text: "gone\n".into(),
+            ..EditRequest::default()
+        })
+    };
+    let err = edit(&body).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(err.message.contains("Use write"), "{}", err.message);
+    let most: String = body.lines().take(60).map(|l| format!("{l}\n")).collect();
+    assert_eq!(code(edit(&most)), ErrorCode::InvalidArgument);
+    assert_eq!(fs::read_to_string(f.docs.join("long.md")).unwrap(), body);
+    let some: String = body.lines().take(10).map(|l| format!("{l}\n")).collect();
+    edit(&some).unwrap();
+    // A large span of a large file is refused too.
+    let big: String = (0..2000).map(|n| format!("row {n}\n")).collect();
+    fs::write(f.docs.join("big.md"), &big).unwrap();
+    let span = &big[..9000];
+    let refused = f.writer.edit(&EditRequest {
+        path: "docs:big.md".into(),
+        old_text: span.into(),
+        new_text: "x".into(),
+        ..EditRequest::default()
+    });
+    assert!(code(refused) == ErrorCode::InvalidArgument);
+    // One short line is fine in any file, however small.
+    fs::write(f.docs.join("tiny.md"), "v1\n").unwrap();
+    f.writer
+        .edit(&EditRequest {
+            path: "docs:tiny.md".into(),
+            old_text: "v1".into(),
+            new_text: "v2".into(),
+            ..EditRequest::default()
+        })
+        .unwrap();
+}
+
 #[test]
 fn makes_folders() {
     let f = fixture();
