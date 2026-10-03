@@ -2856,6 +2856,56 @@ async fn changes_are_rate_limited() {
         .unwrap();
 }
 
+/// A dry run's diff shows the file as it is, so it counts against the read
+/// budget like a read, and stops when the budget is used up.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dry_run_diffs_count_as_reads() {
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    let limits = Limits {
+        read_chars_per_chat_hour: 200,
+        ..Limits::default()
+    };
+    pair_for_changes(&fx, &server, true, Some(limits));
+    let secret: String = (0..40).map(|n| format!("line {n}\n")).collect();
+    std::fs::write(fx.base.join("work/docs/long.md"), &secret).unwrap();
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let mut s = connect(&mut server).await;
+    let dry = s
+        .call(
+            "write",
+            json!({ "path": "docs:long.md", "content": "", "dry_run": true }),
+        )
+        .await;
+    assert_eq!(dry["isError"], false, "{dry}");
+    let diff = dry["structuredContent"]["diff"].as_str().unwrap();
+    assert!(diff.chars().count() <= 200, "{diff}");
+    assert!(!diff.contains("line 39"), "{diff}");
+    // The budget is spent: the next look is refused, as a read would be.
+    let again = s
+        .call(
+            "edit",
+            json!({
+                "path": "docs:long.md",
+                "old_text": "line 1\n",
+                "new_text": "x\n",
+                "dry_run": true
+            }),
+        )
+        .await;
+    assert_eq!(error_code(&again), "rate_limited");
+    let read = s.call("read", json!({ "path": "docs:long.md" })).await;
+    assert_eq!(error_code(&read), "rate_limited");
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("daemon stops")
+        .unwrap()
+        .unwrap();
+}
+
 /// Only this computer turns changes on, over the control channel; the
 /// tools appear on the next connection and go away with the switch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

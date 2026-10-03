@@ -224,11 +224,24 @@ impl LocalFiles {
                 Ok(Output::Read(resp))
             }
             change if CHANGE_TOOLS.contains(&change) => {
+                // A dry run of `write` or `edit` answers with a diff of the
+                // file as it is: that is a read, and counts against the
+                // read budget like one.
+                let shows_content = matches!(change, "write" | "edit")
+                    && args.get("dry_run") == Some(&Value::Bool(true));
+                let allowance = if shows_content {
+                    Some(self.inner.limiter.read_allowance(chat)?)
+                } else {
+                    None
+                };
                 let writer = Arc::clone(&self.inner.writer);
                 let name = change.to_string();
-                blocking(move || run_change(&writer, &name, args))
-                    .await
-                    .map(Output::Change)
+                let mut result = blocking(move || run_change(&writer, &name, args)).await?;
+                if let (Some(allowance), Some(diff)) = (allowance, result.diff.as_mut()) {
+                    cut_to_chars(diff, allowance);
+                    self.inner.limiter.record_read(chat, diff.chars().count());
+                }
+                Ok(Output::Change(result))
             }
             _ => unreachable!("checked against the tool names"),
         }
@@ -304,6 +317,20 @@ impl Output {
                 (r, b, None)
             }
         }
+    }
+}
+
+/// Cut `text` to at most `max` characters, saying so at the end.
+fn cut_to_chars(text: &mut String, max: usize) {
+    const MORE: &str = "\n… (the read budget ends here)\n";
+    if text.chars().count() <= max {
+        return;
+    }
+    let keep = max.saturating_sub(MORE.chars().count());
+    let end = text.char_indices().nth(keep).map_or(text.len(), |(i, _)| i);
+    text.truncate(end);
+    if max >= MORE.chars().count() {
+        text.push_str(MORE);
     }
 }
 
@@ -768,5 +795,24 @@ impl ServerHandler for LocalFiles {
                 None,
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cuts_text_to_a_number_of_characters() {
+        let mut text = "é".repeat(100);
+        cut_to_chars(&mut text, 60);
+        assert_eq!(text.chars().count(), 60);
+        assert!(text.ends_with("(the read budget ends here)\n"));
+        let mut short = "abc".to_string();
+        cut_to_chars(&mut short, 60);
+        assert_eq!(short, "abc");
+        let mut tiny = "abcdef".to_string();
+        cut_to_chars(&mut tiny, 2);
+        assert!(tiny.chars().count() <= 2);
     }
 }
