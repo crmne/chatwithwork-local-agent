@@ -75,6 +75,9 @@ globset = "0.4.20"
 grep-searcher = "0.1.17"
 grep-regex = "0.1.14"
 grep-matcher = "0.1.9"
+# Deny patterns and paths are compared case-folded and in NFD, as the
+# case-insensitive filesystems compare names (lopdf already brings it).
+unicode-normalization = "0.1.25"
 tantivy = { version = "0.26.2", default-features = false, features = ["mmap", "lz4-compression"] }
 notify = "8.2"
 

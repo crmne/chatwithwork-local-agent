@@ -1,7 +1,12 @@
 //! The default-deny list for secrets.
 //!
-//! Patterns are matched case-insensitively against the path components of the
-//! absolute path, even inside shared roots:
+//! Patterns are matched against the path components of the absolute path,
+//! even inside shared roots, both sides in a folded form ([`fold`]): full
+//! Unicode case folding, NFD, and without the code points filesystems
+//! ignore. A case-insensitive filesystem (NTFS, APFS, HFS+, ext4 and tmpfs
+//! with `casefold`, FAT) treats `.zſhrc`, `.\u{212A}ube` (a Kelvin sign) or a
+//! decomposed `é` as the name it folds to, so the deny list must too:
+//!
 //!
 //! - A pattern without `/` (such as `.ssh` or `*.pem`) matches any single
 //!   component.
@@ -12,6 +17,7 @@
 //!
 //! Matching a directory denies everything below it.
 
+use std::borrow::Cow;
 use std::path::{Component, Path};
 
 use anyhow::{Context, Result};
@@ -235,7 +241,7 @@ impl DenyList {
         let components: Vec<String> = path
             .components()
             .filter_map(|c| match c {
-                Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                Component::Normal(s) => Some(fold(&s.to_string_lossy()).into_owned()),
                 _ => None,
             })
             .collect();
@@ -277,7 +283,7 @@ fn compile(source: &str) -> Result<Pattern> {
         .split('/')
         .filter(|c| !c.is_empty())
         .map(|c| {
-            GlobBuilder::new(c)
+            GlobBuilder::new(&fold(c))
                 .case_insensitive(true)
                 .literal_separator(true)
                 .backslash_escape(true)
@@ -291,6 +297,59 @@ fn compile(source: &str) -> Result<Pattern> {
         anchored,
         components,
     })
+}
+
+/// A name as case-insensitive filesystems compare it, as far as any of
+/// them goes: decomposed (NFD, as APFS and HFS+ store names), without the
+/// code points HFS+ ignores (zero-width and direction marks, variation
+/// selectors and other default-ignorable characters), and case-folded by
+/// mapping each character to upper case and back to lower case, twice.
+/// That catches what Unicode case folding catches (`ſ` and `s`, the Kelvin
+/// sign and `k`, `ß` and `ss`) and what NTFS's upper-case table adds (`ı`
+/// and `i`). Matching folded names on both sides can only deny more.
+pub fn fold(name: &str) -> Cow<'_, str> {
+    use unicode_normalization::UnicodeNormalization;
+    if name.is_ascii() {
+        return if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            Cow::Owned(name.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(name)
+        };
+    }
+    let round = |s: &str| -> String {
+        s.nfd()
+            .filter(|c| !is_ignorable(*c))
+            .flat_map(char::to_uppercase)
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let once = round(name);
+    Cow::Owned(round(&once).nfd().collect())
+}
+
+/// Default-ignorable code points (Unicode's `Default_Ignorable_Code_Point`),
+/// which render as nothing and which HFS+ leaves out when it compares names.
+fn is_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
 }
 
 #[cfg(test)]
@@ -356,6 +415,60 @@ mod tests {
         if let Some(trash) = &paths.home_trash {
             assert!(deny.is_denied(&trash.join("files/old.md")));
         }
+    }
+
+    /// Names a case-insensitive filesystem treats as a denied name, though
+    /// they differ from it in more than ASCII case.
+    #[test]
+    fn denies_names_that_fold_to_a_denied_one() {
+        let deny = default_list();
+        let write = DenyList::write_from_config(&DenyConfig::default()).unwrap();
+        for path in [
+            "/home/u/.\u{212A}ube/config", // Kelvin sign for K
+            "/home/u/.\u{212A}UBE/config",
+            "/home/u/.s\u{017F}h/id_ed25519", // long s
+        ] {
+            assert!(deny.is_denied(Path::new(path)), "{path} should be denied");
+        }
+        // A look-alike that no filesystem folds (Cyrillic dze) stays apart.
+        assert!(!deny.is_denied(Path::new("/home/u/.\u{0455}sh/x")));
+        for path in [
+            "/home/u/.z\u{017F}hrc",
+            "/home/u/proj/.g\u{0131}t/config", // dotless i, which NTFS upper-cases to I
+            "/home/u/proj/.G\u{200D}IT/hooks/pre-commit", // a zero-width joiner HFS+ ignores
+        ] {
+            assert!(
+                write.is_denied(Path::new(path)),
+                "{path} should be never changed"
+            );
+        }
+        // Decomposed and precomposed forms match each other both ways.
+        let accents =
+            DenyList::new(["caf\u{00E9}".to_string(), "re\u{0301}sume\u{0301}".into()]).unwrap();
+        assert!(accents.is_denied(Path::new("/w/cafe\u{0301}")));
+        assert!(accents.is_denied(Path::new("/w/CAF\u{00C9}")));
+        assert!(accents.is_denied(Path::new("/w/r\u{00E9}sum\u{00E9}")));
+        // Ordinary names in other scripts stay allowed.
+        for path in [
+            "/home/u/Dokumente/\u{00DC}bersicht.md",
+            "/home/u/\u{65E5}\u{672C}/a.txt",
+        ] {
+            assert!(!deny.is_denied(Path::new(path)), "{path}");
+            assert!(!write.is_denied(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn folds_like_case_insensitive_filesystems() {
+        assert_eq!(fold("ReadMe.MD"), "readme.md");
+        assert!(matches!(fold("plain.md"), Cow::Borrowed(_)));
+        assert_eq!(fold("\u{212A}"), "k");
+        assert_eq!(fold("\u{017F}"), "s");
+        assert_eq!(fold("Stra\u{00DF}e"), "strasse");
+        assert_eq!(fold("STRA\u{1E9E}E"), "strasse");
+        assert_eq!(fold("\u{0131}"), "i");
+        assert_eq!(fold("a\u{200B}b\u{FEFF}"), "ab");
+        assert_eq!(fold("\u{00C9}"), "e\u{0301}");
     }
 
     #[test]

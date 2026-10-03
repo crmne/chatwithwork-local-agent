@@ -218,6 +218,10 @@ fn refuses_denied_and_protected_paths() {
         "docs:.git/config",
         "docs:.vscode/tasks.json",
         "docs:.bashrc",
+        // Names a case-insensitive filesystem folds to the ones above.
+        "docs:.z\u{017F}hrc",
+        "docs:.\u{212A}ube/config",
+        "docs:.ENV",
     ] {
         assert_eq!(code(create(&f, path, "x")), ErrorCode::Denied, "{path}");
     }
