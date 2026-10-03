@@ -1,10 +1,11 @@
 name: Desktop preview
 
 # Preview builds of the desktop app (cww-app) with the cww daemon, for trying
-# them by hand on macOS and Windows before the app is in the release
-# packaging. Publishes a GitHub prerelease named desktop-preview-<run>,
-# never marked latest. Its tag doesn't match v*, so release.yml and the
-# Homebrew, WinGet and AUR publishers never run for it.
+# a change by hand on macOS and Windows between releases. Releases build the
+# app themselves (release.yml) with the same steps. Publishes a GitHub
+# prerelease named desktop-preview-<run>, never marked latest. Its tag
+# doesn't match v*, so release.yml and the Homebrew, WinGet and AUR
+# publishers never run for it.
 #
 # The push trigger only registers the workflow from this branch so it can
 # be dispatched; a push builds nothing.

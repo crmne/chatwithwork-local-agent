@@ -2,6 +2,9 @@ name: Release
 
 # A v* tag builds every platform, publishes the GitHub release, then hands
 # over to packaging.yml for .deb, .rpm, AUR, Homebrew and WinGet recipes.
+# Each release carries cww and the desktop app (cww-app) with cww inside it:
+# a notarized .dmg and .zip on macOS, zips on Windows, and archives for
+# Linux.
 # Running it by hand builds everything the same way without publishing, to
 # try a change to this workflow before tagging.
 on:
@@ -52,7 +55,9 @@ jobs:
       id-token: write
       attestations: write
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # An uncached release build with LTO of cww and the desktop app takes
+    # more than 30 minutes on the Windows runners.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -91,6 +96,11 @@ jobs:
       # No compiler cache: published binaries never build from outputs
       # restored from an Actions cache.
       - run: cargo build --locked --release --target ${{ matrix.target }} --bins
+      # Built on its own so cww's binaries come out as they always have. The
+      # Linux app needs glibc, so it's built by the linux-app job.
+      - name: Build the desktop app
+        if: runner.os == 'Windows'
+        run: cargo build --locked --release --target ${{ matrix.target }} -p cww-app --bin cww-app
 
       - name: Check the binary is static
         if: runner.os == 'Linux'
@@ -116,6 +126,7 @@ jobs:
           files: |
             ${{ github.workspace }}\target\${{ matrix.target }}\release\cww.exe
             ${{ github.workspace }}\target\${{ matrix.target }}\release\cww-agent.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\cww-app.exe
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -126,7 +137,8 @@ jobs:
         run: |
           ./packaging/windows/sign.ps1 `
             "target\${{ matrix.target }}\release\cww.exe" `
-            "target\${{ matrix.target }}\release\cww-agent.exe"
+            "target\${{ matrix.target }}\release\cww-agent.exe" `
+            "target\${{ matrix.target }}\release\cww-app.exe"
 
       - name: Package
         shell: bash
@@ -137,6 +149,16 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/cww.exe" "target/${{ matrix.target }}/release/cww-agent.exe" "dist/$name/"
             (cd dist && 7z a "$name.zip" "$name")
+            # The desktop app with the daemon beside it, as the preview
+            # builds had it: the app starts the cww.exe next to it.
+            app="cww-app-v${VERSION}-${{ matrix.target }}"
+            release="target/${{ matrix.target }}/release"
+            mkdir -p "dist/$app"
+            cp "$release/cww-app.exe" "$release/cww.exe" "$release/cww-agent.exe" "dist/$app/"
+            cp README.md LICENSE-MIT LICENSE-APACHE "dist/$app/"
+            (cd dist && 7z a "$app.zip" "$app")
+            rm -rf "dist/$app"
+            7z l "dist/$app.zip"
           else
             cp "target/${{ matrix.target }}/release/cww" "dist/$name/"
             cp --parents packaging/systemd/cww.service "dist/$name/"
@@ -200,11 +222,13 @@ jobs:
       id-token: write
       attestations: write
     runs-on: macos-latest
-    timeout-minutes: 60
+    # Four release builds and three notarizations.
+    timeout-minutes: 150
     env:
       VERSION: ${{ needs.release-source.outputs.version }}
       # Complete Apple credentials make native-packages sign the binary with
-      # Developer ID and the hardened runtime, and notarize it.
+      # Developer ID and the hardened runtime, and notarize it, and sign and
+      # notarize the desktop app and its disk image.
       APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
       APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -226,15 +250,22 @@ jobs:
         run: |
           cargo build --locked --release --target aarch64-apple-darwin --bin cww
           cargo build --locked --release --target x86_64-apple-darwin --bin cww
+      # Built on its own so cww comes out as it always has.
+      - name: Build the desktop app for both architectures
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin -p cww-app --bin cww-app
+          cargo build --locked --release --target x86_64-apple-darwin -p cww-app --bin cww-app
 
-      - name: Universal binary
+      - name: Universal binaries
         run: |
           mkdir -p universal
-          lipo -create \
-            target/aarch64-apple-darwin/release/cww \
-            target/x86_64-apple-darwin/release/cww \
-            -output universal/cww
-          lipo universal/cww -verify_arch x86_64 arm64
+          for bin in cww cww-app; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin" \
+              -output "universal/$bin"
+            lipo "universal/$bin" -verify_arch x86_64 arm64
+          done
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -267,6 +298,84 @@ jobs:
           bash packaging/macos/pkg.sh "$RUNNER_TEMP/cww-signed" "$VERSION" \
             "dist/cww-v${VERSION}-macos-universal.pkg"
 
+      # The desktop app: the steps the desktop-preview workflow proved. The
+      # bundle carries cww next to cww-app, both signed with the hardened
+      # runtime; the app and the disk image are each notarized and stapled.
+      # Without the Apple secrets the bundle gets an ad-hoc signature.
+      - name: Import the Developer ID Application identity
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          keychain="$RUNNER_TEMP/cww-app.keychain-db"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/app.p12"
+          security import "$RUNNER_TEMP/app.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/app.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Bundle and sign the desktop app
+        run: |
+          app="$RUNNER_TEMP/app/Chat with Work Local Agent.app"
+          mkdir -p "$RUNNER_TEMP/app"
+          CODESIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" packaging/macos/bundle.sh \
+            universal/cww-app universal/cww "$app" "$VERSION"
+          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            codesign --display --verbose=2 "$app" 2>&1 | grep -q "flags=0x10000(runtime)"
+            codesign --display --verbose=2 "$app/Contents/MacOS/cww" 2>&1 | grep -q "flags=0x10000(runtime)"
+          fi
+
+      - name: Notarize and staple the desktop app
+        if: env.APPLE_SIGNING_IDENTITY != ''
+        run: |
+          app="$RUNNER_TEMP/app/Chat with Work Local Agent.app"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-app.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize-app.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+            --wait --timeout 30m --output-format json | tee "$RUNNER_TEMP/notary-app.json"
+          id=$(plutil -extract id raw "$RUNNER_TEMP/notary-app.json")
+          xcrun notarytool log "$id" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+            "$RUNNER_TEMP/notary-log-app.json"
+          cat "$RUNNER_TEMP/notary-log-app.json"
+          test "$(plutil -extract status raw "$RUNNER_TEMP/notary-app.json")" = Accepted
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+      - name: Desktop app disk image and zip
+        run: |
+          app="$RUNNER_TEMP/app/Chat with Work Local Agent.app"
+          dmg="dist/cww-app-v${VERSION}-macos-universal.dmg"
+          ditto -c -k --keepParent "$app" "dist/cww-app-v${VERSION}-macos-universal.zip"
+          staging="$RUNNER_TEMP/dmg"
+          mkdir -p "$staging"
+          ditto "$app" "$staging/Chat with Work Local Agent.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Chat with Work Local Agent" -srcfolder "$staging" \
+            -fs HFS+ -format UDZO -ov "$dmg"
+          if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
+            xcrun notarytool submit "$dmg" \
+              --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+              --wait --timeout 30m --output-format json | tee "$RUNNER_TEMP/notary-dmg.json"
+            id=$(plutil -extract id raw "$RUNNER_TEMP/notary-dmg.json")
+            xcrun notarytool log "$id" \
+              --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
+              "$RUNNER_TEMP/notary-log-dmg.json"
+            cat "$RUNNER_TEMP/notary-log-dmg.json"
+            test "$(plutil -extract status raw "$RUNNER_TEMP/notary-dmg.json")" = Accepted
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          fi
+          ls -la dist
+
       - name: Attest macOS packages
         if: startsWith(github.ref, 'refs/tags/')
         uses: crmne/native-packages/.github/actions/attest@999768410cf53cdc68c8679c09cb14de1a6bca7b # v0.8.1
@@ -274,18 +383,101 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.pkg
+            dist/*.dmg
+            dist/*.zip
       - uses: actions/upload-artifact@v7
         with:
           name: macos-universal
           path: |
             dist/*.tar.gz
             dist/*.pkg
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: error
+
+  # The desktop app for Linux, with the static cww from the build job beside
+  # it. The app links only the C library and loads Wayland, X11 and OpenGL
+  # at run time, so it's built against Ubuntu 22.04's glibc 2.35 to run on
+  # that and every newer distribution.
+  linux-app:
+    name: desktop app (${{ matrix.target }})
+    needs: [release-source, build]
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            cww-target: x86_64-unknown-linux-musl
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            cww-target: aarch64-unknown-linux-musl
+    env:
+      VERSION: ${{ needs.release-source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # No compiler cache, as above.
+      - run: cargo build --locked --release --target ${{ matrix.target }} -p cww-app --bin cww-app
+
+      - name: Check the app needs only the C library, glibc 2.35 or older
+        run: |
+          bin="target/${{ matrix.target }}/release/cww-app"
+          readelf -d "$bin" | grep NEEDED
+          if readelf -d "$bin" | grep NEEDED | grep -vE '\[(libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|ld-linux-[a-z0-9-]+\.so\.[0-9])\]'; then
+            echo "::error::$bin links more than the C library"
+            exit 1
+          fi
+          newest=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+          echo "Newest glibc symbol: $newest"
+          if [ "$(printf '%s\n' GLIBC_2.35 "$newest" | sort -V | tail -n 1)" != GLIBC_2.35 ]; then
+            echo "::error::$bin needs $newest"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.cww-target }}
+          path: cww-archive
+
+      - name: Package
+        run: |
+          cww_name="cww-v${VERSION}-${{ matrix.cww-target }}"
+          tar -xzf "cww-archive/$cww_name.tar.gz" -C "$RUNNER_TEMP"
+          name="cww-app-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/cww-app" "$RUNNER_TEMP/$cww_name/cww" \
+            packaging/linux/cww-app.desktop README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          # Named as the desktop entry's Icon=cww-app asks.
+          cp app/assets/mark.svg "dist/$name/cww-app.svg"
+          "dist/$name/cww" --version
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
+          tar -tzvf "dist/$name.tar.gz"
+
+      - name: Attest the desktop app archive
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: crmne/native-packages/.github/actions/attest@999768410cf53cdc68c8679c09cb14de1a6bca7b # v0.8.1
+        with:
+          subject-path: dist/*.tar.gz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app-${{ matrix.target }}
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   publish:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [release-source, build, macos]
+    needs: [release-source, build, macos, linux-app]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Publishing waits for the maintainer's approval, and only this job can
@@ -314,8 +506,9 @@ jobs:
         with:
           ruby-version: '4.0'
       # Sign checksums.txt (checksums.txt.sig), then check the signature and
-      # every listed file against the committed key. The desktop app's updater
-      # carries the key and refuses a release without a valid signature.
+      # every listed file, the desktop app's among them, against the committed
+      # key. The desktop app's updater carries the key and refuses a release
+      # without a valid signature.
       - name: Sign checksums
         env:
           CWW_UPDATE_SIGNING_KEY: ${{ secrets.CWW_UPDATE_SIGNING_KEY }}
