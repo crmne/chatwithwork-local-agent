@@ -119,6 +119,16 @@ The page asks egui for another frame only while something on it moves: a transit
 The page follows the web wherever the chat API gives it what the web uses. Where it doesn't, the page shows what the web shows in the commonest case:
 
 - **The organization.** The web's sidebar shows the organization switcher only to someone in more than one organization. The chat API names the organization this computer is paired with, not how many the person is in, so the sidebar never shows it, as the web doesn't for someone in one.
+- **Pins.** The web's chat menu has Pin and Move to project, and each pinned row an unpin button. The chat API can't pin, unpin or move a chat, so the menu has Rename and Delete and pinned rows have no unpin button; pinning happens on the web.
+- **Guests.** The web adds "· Guest" after a guest's name and shows them no meter. The chat API doesn't say whether the person is a guest.
+- **The people on a project.** The web's project line counts them ("shared with 4 people"); the chat API doesn't, so it says "shared with the people on it". Its Change link and "Hide from guests" or "Show to guests" aren't there either: the chat API has no way to move a chat or change who sees it.
+- **What a new chat can reach.** Under the new-chat composer the web draws the services a question can reach (its wires, each service's menu, and "+" to connect another) and questions to start from. The chat API sends neither the services nor the suggestions, so the app's new chat has the greeting and the composer only.
+- **Files sent with a question** download on the web; the chat API doesn't serve them, so they're labels here.
+
+Two differences are the app's own choices, kept for reasons outside the look:
+
+- **Pictures from third parties.** The web's browser loads your Gravatar from gravatar.com and web pages' favicons from Google. The app contacts only the paired server, so it draws your initials (the web's own fallback) and Phosphor's `globe-simple` for a web page.
+- **The caret.** The composer's caret is steady, not blinking, so a settled window asks for no frames (see "Zero CPU when idle").
 
 ## Screens
 
