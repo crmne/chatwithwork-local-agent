@@ -186,7 +186,18 @@ const DIR_FLAGS: OFlags = OFlags::PATH
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
-#[cfg(not(target_os = "linux"))]
+/// On macOS as `O_SEARCH` handles: enough to look names up, rename and
+/// check relative to them, without reading the listing. A LaunchAgent may
+/// not read `~/.Trash` (TCC refuses it unless the program has Full Disk
+/// Access), but may open it for search and move items in, as Finder's own
+/// Move to Trash does. rustix has no `O_SEARCH` for Apple yet: it's
+/// `O_EXEC | O_DIRECTORY`, and `O_EXEC` is `0x40000000` in `<sys/fcntl.h>`.
+#[cfg(target_os = "macos")]
+const DIR_FLAGS: OFlags = OFlags::from_bits_retain(0x4000_0000)
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
