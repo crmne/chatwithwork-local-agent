@@ -3113,3 +3113,35 @@ fn a_sent_question_stays_near_the_top_while_its_answer_grows() {
     mouse(&mut app, crossterm::event::MouseEventKind::ScrollDown, x, y);
     assert!(!app.chat.pinned);
 }
+
+#[test]
+fn a_decided_change_leaves_in_place_and_a_race_is_no_error() {
+    let mut app = app();
+    let mut second = approval();
+    second.id = 32;
+    second.summary = "Post a message to #launch".into();
+    waiting(&mut app, vec![approval(), second], vec![]);
+    assert_eq!(app.chat.decision_for, Some(31));
+    app.update(Msg::Chat(ChatMsg::Decided {
+        chat: 42,
+        result: Ok(summary(42, "Q3 budget", "2026-09-25T08:14:03Z")),
+    }));
+    // Another change still waits: the decided card is gone, the next one shows.
+    let screen = render_to_string(&app, 100, 30);
+    assert!(!screen.contains("Post a message to #general"), "{screen}");
+    assert!(screen.contains("Post a message to #launch"), "{screen}");
+
+    // The read hasn't come back yet when a second press loses the race.
+    app.chat.loading = false;
+    app.chat.decision_for = Some(32);
+    let effects = app.update(Msg::Chat(ChatMsg::Decided {
+        chat: 42,
+        result: Err(Failure::new(
+            "already_decided",
+            "Someone already decided this.",
+        )),
+    }));
+    assert_eq!(effects, vec![Effect::Chat(ChatCommand::Open(42))]);
+    assert!(app.notice.is_none(), "settled, not an error");
+    assert!(app.chat.transcript.as_ref().unwrap().approvals.is_empty());
+}

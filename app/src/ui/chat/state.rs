@@ -707,6 +707,16 @@ impl ChatState {
 
     /// A chat as the server last answered with it, in the list and the
     /// open transcript.
+    /// A decided change or answered question leaves its card at once, in
+    /// place; the read that follows fills in what came of it.
+    fn settle(&mut self, decided: Option<u64>) {
+        let Some(id) = decided else { return };
+        if let Some(transcript) = self.transcript.as_mut() {
+            transcript.approvals.retain(|a| a.id != id);
+            transcript.questions.retain(|q| q.id != id);
+        }
+    }
+
     fn update_summary(&mut self, summary: ChatSummary) {
         if let Some(listed) = self
             .list
@@ -893,16 +903,19 @@ impl ChatState {
                 let decided = self.deciding.take();
                 match result {
                     Ok(summary) => {
-                        let _ = decided;
+                        self.settle(decided);
                         self.update_summary(summary);
                         return self.refresh(chat);
                     }
-                    Err(failure) => {
-                        self.notice = Some(failure.message);
-                        if failure.code == "already_decided" || failure.code == "not_found" {
-                            return self.refresh(chat);
-                        }
+                    // Decided already (a second press, or someone else first):
+                    // settled, not an error. The read shows how.
+                    Err(failure)
+                        if failure.code == "already_decided" || failure.code == "not_found" =>
+                    {
+                        self.settle(decided);
+                        return self.refresh(chat);
                     }
+                    Err(failure) => self.notice = Some(failure.message),
                 }
             }
             Msg::Acted {
@@ -1780,6 +1793,61 @@ mod tests {
         });
         assert_eq!(commands, vec![Command::Open(2)]);
         assert!(state.working() && state.deciding.is_none());
+    }
+
+    #[test]
+    fn a_decided_change_leaves_in_place_and_a_race_is_no_error() {
+        let mut state = ready();
+        state.open_chat(2);
+        let card = |id| cww::tui::chat::Approval {
+            id,
+            decidable: true,
+            ..Default::default()
+        };
+        state.update(Msg::Shown {
+            chat: 2,
+            result: Ok(Transcript {
+                chat: summary(2, "idle"),
+                approvals: vec![card(7), card(8)],
+                ..Transcript::default()
+            }),
+        });
+        let approve = Decision::Approve {
+            tool_call: 7,
+            for_rest_of_chat: false,
+        };
+        state.decide(approve);
+        // Another change still waits: only the decided card goes, at once.
+        state.update(Msg::Decided {
+            chat: 2,
+            result: Ok(summary(2, "idle")),
+        });
+        let left: Vec<u64> = state
+            .transcript
+            .as_ref()
+            .unwrap()
+            .approvals
+            .iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(left, [8]);
+
+        // A second press that lost the race: settled, not an error.
+        state.loading = false;
+        state.decide(Decision::Deny {
+            tool_call: 8,
+            reason: None,
+        });
+        let commands = state.update(Msg::Decided {
+            chat: 2,
+            result: Err(Failure::new(
+                "already_decided",
+                "Someone already decided this.",
+            )),
+        });
+        assert_eq!(commands, vec![Command::Open(2)]);
+        assert!(state.notice.is_none());
+        assert!(state.transcript.as_ref().unwrap().approvals.is_empty());
     }
 
     #[test]

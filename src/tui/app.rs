@@ -3577,19 +3577,24 @@ impl App {
             }
             ChatMsg::Decided { chat, result } => {
                 self.chat.deciding = false;
+                let decided = self.chat.decision_for;
                 match result {
                     Ok(summary) => {
                         self.chat.form = Form::default();
                         self.chat.decision = 0;
+                        self.settle(decided);
                         self.update_summary(summary);
                         return self.refresh_chat(chat);
                     }
-                    Err(failure) => {
-                        self.notice(Signal::Negative, &failure.message);
-                        if failure.code == "already_decided" || failure.code == "not_found" {
-                            return self.refresh_chat(chat);
-                        }
+                    // Decided already (a second press, or someone else first):
+                    // settled, not an error. The read shows how.
+                    Err(failure)
+                        if failure.code == "already_decided" || failure.code == "not_found" =>
+                    {
+                        self.settle(decided);
+                        return self.refresh_chat(chat);
                     }
+                    Err(failure) => self.notice(Signal::Negative, &failure.message),
                 }
             }
             ChatMsg::Uploaded { path, result } => {
@@ -3749,6 +3754,17 @@ impl App {
 
     /// A chat as the server last answered with it, in the list and the
     /// open transcript.
+    /// A decided change or answered question leaves its card at once, in
+    /// place; the read that follows fills in what came of it.
+    fn settle(&mut self, decided: Option<u64>) {
+        let Some(id) = decided else { return };
+        if let Some(transcript) = self.chat.transcript.as_mut() {
+            transcript.approvals.retain(|a| a.id != id);
+            transcript.questions.retain(|q| q.id != id);
+        }
+        self.chat.decision_for = None;
+    }
+
     fn update_summary(&mut self, summary: ChatSummary) {
         if let Some(listed) = self
             .chat
