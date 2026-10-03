@@ -212,7 +212,7 @@ struct ChatRunner {
     chats: Chats,
     tx: Sender<Msg>,
     /// The chat followed now: set its flag to stop it, and close its
-    /// connection to stop it at once where the platform allows.
+    /// connection to stop it at once.
     following: Mutex<Option<Follower>>,
     /// Keeping the chat list current, while it is.
     list: Mutex<Option<Follower>>,

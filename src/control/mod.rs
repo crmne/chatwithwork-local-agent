@@ -622,7 +622,7 @@ impl Client {
             chat: None,
         })?;
         transport::clear_timeout(self.reader.get_ref());
-        Ok(Events { client: self })
+        Ok(Events::new(self))
     }
 
     /// Keep the chat list current: `{"event":"chats",...}` changes and
@@ -636,7 +636,7 @@ impl Client {
             return Ok(Err(response));
         }
         transport::clear_timeout(self.reader.get_ref());
-        Ok(Ok(Events { client: self }))
+        Ok(Ok(Events::new(self)))
     }
 
     /// Follow one chat: `{"event":"chat",...}` updates and heartbeats. A
@@ -650,7 +650,7 @@ impl Client {
             return Ok(Err(response));
         }
         transport::clear_timeout(self.reader.get_ref());
-        Ok(Ok(Events { client: self }))
+        Ok(Ok(Events::new(self)))
     }
 
     fn send(&mut self, request: &ControlRequest) -> Result<()> {
@@ -676,20 +676,35 @@ impl Client {
 /// Events from [`Client::subscribe`]. Ends when the daemon stops.
 pub struct Events {
     client: Client,
+    /// Set by a [`Closer`], so the stream ends even if its cancel came
+    /// before the next read started.
+    #[cfg(windows)]
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Events {
-    /// Something that ends this stream from another thread, where the
-    /// platform allows it. Otherwise the stream ends at the next event,
-    /// at the latest the next heartbeat.
+    fn new(client: Client) -> Self {
+        Self {
+            client,
+            #[cfg(windows)]
+            closed: Arc::default(),
+        }
+    }
+
+    /// Something that ends this stream from another thread, so the daemon
+    /// sees the hang-up at once rather than at the next event.
     pub fn closer(&self) -> Option<Closer> {
+        let pipe = self.client.reader.get_ref().try_clone().ok()?;
         #[cfg(unix)]
         {
-            self.client.reader.get_ref().try_clone().ok().map(Closer)
+            Some(Closer(pipe))
         }
         #[cfg(windows)]
         {
-            None
+            Some(Closer {
+                pipe,
+                closed: Arc::clone(&self.closed),
+            })
         }
     }
 }
@@ -697,13 +712,32 @@ impl Events {
 #[cfg(unix)]
 pub struct Closer(std::os::unix::net::UnixStream);
 
+/// Pipes can't be shut down from the client's end on Windows: the closer
+/// cancels the blocked read instead, which ends the stream, and the reader
+/// then drops the pipe.
 #[cfg(windows)]
-pub struct Closer;
+pub struct Closer {
+    pipe: std::fs::File,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl Closer {
     pub fn close(&self) {
         #[cfg(unix)]
         let _ = self.0.shutdown(std::net::Shutdown::Both);
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            // With no OVERLAPPED, every pending read on the pipe is
+            // cancelled, whichever thread issued it.
+            unsafe {
+                windows_sys::Win32::System::IO::CancelIoEx(
+                    self.pipe.as_raw_handle(),
+                    std::ptr::null(),
+                );
+            }
+        }
     }
 }
 
@@ -711,6 +745,10 @@ impl Iterator for Events {
     type Item = Result<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        #[cfg(windows)]
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         self.client.next_line().transpose()
     }
 }
