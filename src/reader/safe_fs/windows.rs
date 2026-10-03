@@ -622,7 +622,11 @@ impl ChangeDir {
     ) -> Result<Staged, ToolError> {
         for _ in 0..16 {
             let path = self.child(OsStr::new(&temp_name()));
+            // `write(true)` only satisfies std's check that a file it
+            // creates is opened for writing; `access_mode` is what Windows
+            // gets.
             let mut file = match OpenOptions::new()
+                .write(true)
                 .access_mode(FILE_GENERIC_WRITE | DELETE | WRITE_DAC | READ_CONTROL)
                 .share_mode(0)
                 .create_new(true)
