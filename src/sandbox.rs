@@ -42,6 +42,10 @@ pub struct Plan {
     pub writable: Vec<PathBuf>,
     /// The trash directories the writable folders' files go to: write.
     pub trash: Vec<PathBuf>,
+    /// Folders shared read-only inside ones that allow changes. Seatbelt
+    /// takes their write rights away again; Landlock can't (its rules only
+    /// add rights), so there the writer's checks are what hold.
+    pub read_only_inside: Vec<PathBuf>,
     /// cww's own directories: read and write.
     pub own: Vec<PathBuf>,
     /// The control socket, which the daemon binds and accepts on.
@@ -64,6 +68,7 @@ impl Plan {
             roots: roots.into_iter().collect(),
             writable: Vec::new(),
             trash: Vec::new(),
+            read_only_inside: Vec::new(),
             own,
             socket: paths.socket_path(),
             keychain,
@@ -72,6 +77,12 @@ impl Plan {
 
     /// Also allow changes in `writable`, whose files go to `trash`.
     pub fn with_changes(mut self, writable: Vec<PathBuf>, trash: Vec<PathBuf>) -> Self {
+        self.read_only_inside = self
+            .roots
+            .iter()
+            .filter(|r| !writable.contains(r) && writable.iter().any(|w| r.starts_with(w)))
+            .cloned()
+            .collect();
         self.writable = writable;
         self.trash = trash;
         self
@@ -87,7 +98,14 @@ impl Plan {
         let mut have = self.writable.clone();
         have.sort();
         have.dedup();
+        // A folder newly shared read-only inside one that allows changes
+        // needs a sandbox that keeps it read-only.
+        let nested_covered = roots
+            .iter()
+            .filter(|r| !writable.contains(r) && writable.iter().any(|w| r.starts_with(w)))
+            .all(|r| self.read_only_inside.contains(r));
         want == have
+            && nested_covered
             && roots
                 .iter()
                 .all(|root| self.roots.iter().any(|allowed| root.starts_with(allowed)))
@@ -141,7 +159,7 @@ pub fn confine(plan: Plan) -> Status {
 
 /// Read-only system locations a process may need: the dynamic loader's
 /// libraries, DNS and TLS configuration.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn existing(paths: &[&str]) -> Vec<PathBuf> {
     paths
         .iter()
@@ -262,9 +280,9 @@ mod sys {
 
 #[cfg(target_os = "macos")]
 mod sys {
+    use super::seatbelt::profile;
     use super::*;
     use std::ffi::{CStr, CString, c_char, c_int};
-    use std::path::Path;
 
     unsafe extern "C" {
         fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
@@ -309,6 +327,17 @@ mod sys {
             detail: Some(detail),
         }
     }
+}
+
+/// The Seatbelt write operations a change needs.
+#[cfg(any(target_os = "macos", test))]
+const CHANGE_WRITES: &str = "file-write-create file-write-data file-write-unlink \
+                             file-write-mode file-write-xattr file-write-owner";
+
+#[cfg(any(target_os = "macos", test))]
+mod seatbelt {
+    use super::*;
+    use std::path::Path;
 
     /// A Seatbelt string literal.
     fn quote(path: &Path) -> String {
@@ -323,6 +352,8 @@ mod sys {
             .collect()
     }
 
+    /// The Seatbelt profile for `plan`. Built on every platform, so its
+    /// tests run everywhere; applied on macOS.
     pub fn profile(plan: &Plan) -> String {
         let system = existing(&[
             "/System",
@@ -363,9 +394,24 @@ mod sys {
             rules.push_str(&format!("(allow file-read*{})\n", subpaths(&plan.roots)));
         }
         if !plan.writable.is_empty() {
+            // Only the writes a change makes: create (and rename in), write
+            // data, remove (and rename out), set the mode (never the setuid
+            // or setgid bits: that is `file-write-setugid`), set extended
+            // attributes (the quarantine mark, and those a replaced file
+            // had), and give a replaced file its group back
+            // (`file-write-owner`; only a group the user is in). Never
+            // flags, times, ACLs or mounts.
             rules.push_str(&format!(
-                "(allow file-read* file-write*{})\n",
+                "(allow file-read* {CHANGE_WRITES}{})\n",
                 subpaths(&plan.writable)
+            ));
+        }
+        if !plan.read_only_inside.is_empty() {
+            // Later rules win: a folder shared read-only stays read-only to
+            // the kernel too, inside a folder that allows changes.
+            rules.push_str(&format!(
+                "(deny file-write*{})\n",
+                subpaths(&plan.read_only_inside)
             ));
         }
         if !plan.trash.is_empty() {
@@ -486,6 +532,33 @@ mod tests {
         assert!(!plan.covers(&["/home/u/Documents2".into()], &[]));
     }
 
+    /// Seatbelt gives changes only the writes they make, and takes them
+    /// away again from folders shared read-only inside.
+    #[test]
+    fn seatbelt_keeps_read_only_folders_inside_read_only() {
+        let docs = PathBuf::from("/Users/u/Documents");
+        let private = docs.join("Private");
+        let plan = Plan {
+            roots: vec![docs.clone(), private.clone(), "/Users/u/Elsewhere".into()],
+            ..Plan::default()
+        }
+        .with_changes(vec![docs.clone()], vec!["/Users/u/.Trash".into()]);
+        assert_eq!(plan.read_only_inside, [private]);
+        let profile = seatbelt::profile(&plan);
+        let allow = profile.find(r#"(subpath "/Users/u/Documents"))"#).unwrap();
+        let deny = profile
+            .find(r#"(deny file-write* (subpath "/Users/u/Documents/Private"))"#)
+            .unwrap();
+        assert!(deny > allow, "the deny comes after the allow, so it wins");
+        for broad in ["file-write-flags", "file-write-setugid", "file-write-times"] {
+            assert!(!profile.contains(broad), "{broad}");
+        }
+        // Writes are listed one by one where changes are allowed.
+        assert!(
+            !profile.contains(r#"(allow file-read* file-write* (subpath "/Users/u/Documents"))"#)
+        );
+    }
+
     #[test]
     fn plans_cover_exactly_the_folders_that_allow_changes() {
         let docs = PathBuf::from("/home/u/Documents");
@@ -501,22 +574,33 @@ mod tests {
         assert!(plan.covers(std::slice::from_ref(&docs), std::slice::from_ref(&docs)));
         // Stopping changes needs a new sandbox too.
         assert!(!plan.covers(std::slice::from_ref(&docs), &[]));
+        // So does a folder shared read-only inside one that allows changes.
+        let inner = docs.join("Private");
+        assert!(!plan.covers(&[docs.clone(), inner.clone()], std::slice::from_ref(&docs)));
+        let plan = Plan {
+            roots: vec![docs.clone(), inner.clone()],
+            ..Plan::default()
+        }
+        .with_changes(vec![docs.clone()], Vec::new());
+        assert!(plan.covers(&[docs.clone(), inner], std::slice::from_ref(&docs)));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_profile_quotes_paths() {
         let plan = Plan {
             roots: vec![r#"/Users/u/My "odd" folder"#.into()],
             writable: vec!["/Users/u/Drafts".into()],
             trash: vec!["/Users/u/.Trash".into()],
+            read_only_inside: Vec::new(),
             own: vec!["/Users/u/.config/cww".into()],
             socket: "/Users/u/.local/state/cww/cww.sock".into(),
             keychain: true,
         };
-        let profile = sys::profile(&plan);
+        let profile = seatbelt::profile(&plan);
         assert!(profile.contains(r#"(subpath "/Users/u/My \"odd\" folder")"#));
-        assert!(profile.contains(r#"(allow file-read* file-write* (subpath "/Users/u/Drafts"))"#));
+        assert!(profile.contains(&format!(
+            r#"(allow file-read* {CHANGE_WRITES} (subpath "/Users/u/Drafts"))"#
+        )));
         assert!(profile.contains(r#"(subpath "/Users/u/.Trash"))"#));
         assert!(profile.contains(r#"(allow file-read-data (literal "/Users/u/.Trash"))"#));
         assert!(profile.contains("(deny default)"));

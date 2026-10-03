@@ -473,11 +473,15 @@ impl ChangeDir {
                 let _ = rustix::fs::fsync(&self.fd);
                 Ok(true)
             }
+            // Not on this filesystem, or not allowed by the sandbox: put the
+            // new version in place the other way.
             Err(e)
                 if e == Errno::INVAL
                     || e == Errno::NOSYS
                     || e == Errno::NOTSUP
-                    || e == Errno::OPNOTSUPP =>
+                    || e == Errno::OPNOTSUPP
+                    || e == Errno::PERM
+                    || e == Errno::ACCESS =>
             {
                 Ok(false)
             }
