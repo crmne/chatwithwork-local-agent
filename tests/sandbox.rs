@@ -151,6 +151,13 @@ fn only_folders_that_allow_changes_are_writable() {
         );
     }
 
+    if std::env::var_os("NIX_BUILD_TOP").is_some() {
+        // Nix's own build sandbox refuses the move into the trash (EXDEV)
+        // that Landlock allows everywhere else; the CI test job checks it.
+        eprintln!("not moving to the trash inside a Nix build");
+        return;
+    }
+
     // cww's own changes work under the sandbox, the trash included.
     let out = run(&[
         "debug",
