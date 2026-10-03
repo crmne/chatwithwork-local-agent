@@ -5,7 +5,8 @@
 //! and `openWorldHint: false`, with no write, exec, or network code behind
 //! them. `create`, `write`, `edit`, `mkdir`, `move` and `delete` are listed
 //! only while at least one folder allows changes (the user's choice, made on
-//! this computer); they are annotated `readOnlyHint: false`, with
+//! this computer), with `create_document` for Word and Excel files; they are
+//! annotated `readOnlyHint: false`, with
 //! `destructiveHint: true` for the ones that can replace or remove
 //! something, and run in the writer (see `crate::writer`). Every call
 //! passes, in order: pause check, rate limit, argument validation, then the
@@ -36,8 +37,8 @@ use crate::reader::{
     ListRequest, ListResponse, ReadRequest, ReadResponse, Reader, SearchRequest, SearchResponse,
 };
 use crate::writer::{
-    ChangeResult, CreateRequest, DeleteRequest, EditRequest, MkdirRequest, MoveRequest,
-    WriteRequest, Writer,
+    ChangeResult, CreateRequest, DeleteRequest, DocumentRequest, EditRequest, MkdirRequest,
+    MoveRequest, WriteRequest, Writer,
 };
 
 /// Request `_meta` key carrying the Chat with Work chat ID, used for the
@@ -52,7 +53,15 @@ pub const WRITE_WHEN_META: &str = "com.chatwithwork/writeWhen";
 pub const READ_TOOLS: [&str; 4] = ["roots", "search", "list", "read"];
 
 /// Offered only while a shared folder allows changes.
-pub const CHANGE_TOOLS: [&str; 6] = ["create", "write", "edit", "mkdir", "move", "delete"];
+pub const CHANGE_TOOLS: [&str; 7] = [
+    "create",
+    "write",
+    "edit",
+    "mkdir",
+    "move",
+    "delete",
+    "create_document",
+];
 
 /// Headroom kept below the message cap for the JSON-RPC envelope.
 const ENVELOPE_HEADROOM: usize = 2048;
@@ -240,6 +249,7 @@ pub fn run_change(writer: &Writer, name: &str, args: Value) -> Result<ChangeResu
         "mkdir" => writer.mkdir(&parse_args::<MkdirRequest>(args)?),
         "move" => writer.move_entry(&parse_args::<MoveRequest>(args)?),
         "delete" => writer.delete(&parse_args::<DeleteRequest>(args)?),
+        "create_document" => writer.create_document(&parse_args::<DocumentRequest>(args)?),
         other => Err(ToolError::invalid_argument(format!(
             "{other:?} is not a change tool"
         ))),
@@ -542,6 +552,50 @@ pub fn change_tools() -> Vec<Tool> {
             false,
             None,
         ),
+        change_tool(
+            "create_document",
+            "Create a Word or Excel file",
+            "Create a Word document (path ending in `.docx`) from Markdown in `content`: \
+             headings, paragraphs, bold, italic, lists, quotes, code blocks and tables; links \
+             become their text with the address after it. Or an Excel workbook (`.xlsx`) from \
+             `sheets`, each a `name` and `rows` of cells (text, numbers, true or false, null \
+             for empty; never formulas), with `header: true` to bold and freeze the first \
+             row. Fails if the file exists, unless `replace: true`, which moves the current \
+             file to the system trash on the person's computer and writes a new one: \
+             existing documents are never edited in place.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "`<root_id>:relative/path` ending in .docx or .xlsx." },
+                    "content": { "type": "string", "description": "For .docx: the document in Markdown." },
+                    "sheets": {
+                        "type": "array",
+                        "description": "For .xlsx: the sheets, in order.",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "1 to 31 characters, none of [ ] : * ? / \\." },
+                                "rows": {
+                                    "type": "array",
+                                    "items": { "type": "array", "items": { "type": ["string", "number", "boolean", "null"] } }
+                                },
+                                "header": { "type": "boolean", "description": "Bold and freeze the first row." }
+                            },
+                            "required": ["name", "rows"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "replace": { "type": "boolean", "description": "Move an existing file at the path to the trash first. Default false." },
+                    "dry_run": { "type": "boolean", "description": DRY_RUN }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            true,
+            false,
+            Some(json!({ "replace": false })),
+        ),
     ]
 }
 
@@ -625,8 +679,8 @@ impl ServerHandler for LocalFiles {
             "Access to folders the user shared from their computer. Call `roots` first. Paths \
              are always `<root_id>:relative/path`; absolute paths are refused. Folders with \
              `writable: true` also take changes (`create`, `write`, `edit`, `mkdir`, `move`, \
-             `delete`); the others are read-only. Old versions and deleted files go to the \
-             system trash on the computer."
+             `delete`, `create_document`); the others are read-only. Old versions and deleted \
+             files go to the system trash on the computer."
         } else {
             "Read-only access to folders the user shared from their computer. Call `roots` \
              first. Paths are always `<root_id>:relative/path`; absolute paths are refused."

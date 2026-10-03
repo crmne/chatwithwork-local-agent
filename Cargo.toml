@@ -87,6 +87,12 @@ quick-xml = "0.41"
 # Diffs of text changes for the approval preview (dry runs). No dependencies.
 similar = "3.2"
 
+# Documents `create_document` writes: Word from Markdown, Excel from rows.
+# Both write through the zip and quick-xml above; no images, no macros.
+docx-rs = { version = "0.4.22", default-features = false }
+rust_xlsxwriter = { version = "0.99", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false }
+
 # One allocator everywhere that hands freed memory back to the system:
 # glibc, musl and the macOS allocator all kept hundreds of megabytes after
 # indexing a large folder.

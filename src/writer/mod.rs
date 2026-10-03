@@ -13,6 +13,7 @@
 //! into place without replacing anything. Nothing is ever deleted for good.
 
 pub mod kinds;
+pub mod office;
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -221,6 +222,22 @@ pub struct MoveRequest {
 #[serde(deny_unknown_fields)]
 pub struct DeleteRequest {
     pub path: String,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentRequest {
+    pub path: String,
+    /// Markdown, for a `.docx`.
+    #[serde(default)]
+    pub content: Option<String>,
+    /// Sheets of rows, for an `.xlsx`.
+    #[serde(default)]
+    pub sheets: Option<Vec<office::Sheet>>,
+    #[serde(default)]
+    pub replace: bool,
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -644,6 +661,92 @@ impl Writer {
             return Ok(result);
         }
         self.replace_file(t, stat, new.as_bytes(), &mut result)?;
+        Ok(result)
+    }
+
+    /// A Word document from Markdown or an Excel workbook from rows, new or
+    /// replacing one (the old file goes to the trash). Existing documents
+    /// are never edited in place.
+    pub fn create_document(&self, req: &DocumentRequest) -> Result<ChangeResult, ToolError> {
+        let _one = self.one_at_a_time();
+        let view = self.reader.change_view();
+        let t = self.target(&view, &req.path)?;
+        let bytes = match office::kind(&t.name) {
+            Some(office::DocumentKind::Docx) => {
+                if req.sheets.is_some() {
+                    return Err(ToolError::invalid_argument(
+                        "A .docx takes content (Markdown), not sheets.",
+                    ));
+                }
+                let content = req.content.as_deref().ok_or_else(|| {
+                    ToolError::invalid_argument("A .docx needs content: the document in Markdown.")
+                })?;
+                kinds::check_text(content, view.limits.max_change_file_bytes)?;
+                office::docx(content)?
+            }
+            Some(office::DocumentKind::Xlsx) => {
+                if req.content.is_some() {
+                    return Err(ToolError::invalid_argument(
+                        "An .xlsx takes sheets, not content.",
+                    ));
+                }
+                let sheets = req.sheets.as_deref().ok_or_else(|| {
+                    ToolError::invalid_argument(
+                        "An .xlsx needs sheets: each a name and rows of cells.",
+                    )
+                })?;
+                office::xlsx(sheets)?
+            }
+            None => {
+                return Err(ToolError::invalid_argument(
+                    "create_document makes Word (.docx) and Excel (.xlsx) files; end the path \
+                     with one of those.",
+                ));
+            }
+        };
+        kinds::check_new_name(&t.name)?;
+        if bytes.len() as u64 > view.limits.max_change_file_bytes {
+            return Err(ToolError::new(
+                ErrorCode::TooLarge,
+                format!(
+                    "The document would be {} bytes; files up to {} bytes can be changed.",
+                    bytes.len(),
+                    view.limits.max_change_file_bytes
+                ),
+            ));
+        }
+        let Some(stat) = t.dir.entry(t.name())? else {
+            return self.create_file(&t, &bytes, req.dry_run);
+        };
+        if !req.replace {
+            return Err(ToolError::new(
+                ErrorCode::Exists,
+                format!(
+                    "{} already exists. Pass replace: true to move it to the trash and write \
+                     a new document in its place.",
+                    t.tool_path
+                ),
+            ));
+        }
+        Self::check_existing_file(&t, &stat)?;
+        let mut result = ChangeResult::new(
+            t.tool_path.clone(),
+            Effect::Replaced,
+            EntryKind::File,
+            req.dry_run,
+        );
+        result.size = Some(bytes.len() as u64);
+        result.sha256 = Some(sha256(&bytes));
+        result.previous = Some(Previous {
+            size: stat.size,
+            modified: format_time(stat.modified),
+            sha256: None,
+            in_trash: false,
+        });
+        if req.dry_run {
+            return Ok(result);
+        }
+        self.replace_file(&t, &stat, &bytes, &mut result)?;
         Ok(result)
     }
 

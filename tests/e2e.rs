@@ -2401,7 +2401,17 @@ async fn changes_files_over_the_wire() {
     assert_eq!(
         tool_names(&tools),
         [
-            "roots", "search", "list", "read", "create", "write", "edit", "mkdir", "move", "delete"
+            "roots",
+            "search",
+            "list",
+            "read",
+            "create",
+            "write",
+            "edit",
+            "mkdir",
+            "move",
+            "delete",
+            "create_document"
         ]
     );
     for tool in tools["result"]["tools"].as_array().unwrap() {
@@ -2410,7 +2420,7 @@ async fn changes_files_over_the_wire() {
         assert_eq!(a["openWorldHint"], false, "{name}");
         let read_only = ["roots", "search", "list", "read"].contains(&name);
         assert_eq!(a["readOnlyHint"], read_only, "{name}");
-        let destructive = ["write", "move", "delete"].contains(&name);
+        let destructive = ["write", "move", "delete", "create_document"].contains(&name);
         assert_eq!(a["destructiveHint"], destructive, "{name}");
         assert_eq!(a["idempotentHint"], read_only || name == "mkdir", "{name}");
         assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{name}");
@@ -2427,6 +2437,7 @@ async fn changes_files_over_the_wire() {
     assert_eq!(meta("write"), json!({ "mode": "append" }));
     assert_eq!(meta("move"), json!({ "replace": false }));
     assert_eq!(meta("delete"), Value::Null);
+    assert_eq!(meta("create_document"), json!({ "replace": false }));
     let roots = s.call("roots", json!({})).await;
     assert_eq!(roots["structuredContent"]["roots"][0]["writable"], true);
     assert_eq!(roots["structuredContent"]["roots"][1]["writable"], false);
@@ -2556,6 +2567,81 @@ async fn changes_files_over_the_wire() {
     {
         let record = std::fs::read_to_string(trash.join("info/archive.trashinfo")).unwrap();
         assert!(record.starts_with("[Trash Info]\nPath=/"), "{record}");
+    }
+
+    // Word and Excel documents, read back through `read`.
+    let doc = s
+        .call(
+            "create_document",
+            json!({ "path": "docs:report.docx", "content": "# Report\n\n- **Falcon** ships\n" }),
+        )
+        .await;
+    assert_eq!(doc["structuredContent"]["effect"], "created", "{doc}");
+    let text = s.call("read", json!({ "path": "docs:report.docx" })).await;
+    assert!(
+        text["structuredContent"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Falcon ships"),
+        "{text}"
+    );
+    let sheet = json!({ "path": "docs:budget.xlsx", "sheets": [
+        { "name": "Budget", "header": true, "rows": [["Item", "Cost"], ["Falcon", 10.5], ["=2+2", null]] }
+    ] });
+    let book = s.call("create_document", sheet.clone()).await;
+    assert_eq!(book["structuredContent"]["effect"], "created", "{book}");
+    let text = s.call("read", json!({ "path": "docs:budget.xlsx" })).await;
+    let text = text["structuredContent"]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains("Falcon\t10.5") && text.contains("=2+2"),
+        "{text}"
+    );
+    assert_eq!(
+        error_code(&s.call("create_document", sheet.clone()).await),
+        "exists"
+    );
+    let mut again = sheet.clone();
+    again["replace"] = json!(true);
+    let replaced_book = s.call("create_document", again).await;
+    assert_eq!(
+        replaced_book["structuredContent"]["effect"], "replaced",
+        "{replaced_book}"
+    );
+    assert_eq!(
+        replaced_book["structuredContent"]["previous"]["in_trash"],
+        true
+    );
+    for (args, expected) in [
+        (
+            json!({ "path": "docs:deck.pptx", "content": "x" }),
+            "invalid_argument",
+        ),
+        (
+            json!({ "path": "docs:macro.docm", "content": "x" }),
+            "invalid_argument",
+        ),
+        (
+            json!({ "path": "docs:a.docx", "sheets": [] }),
+            "invalid_argument",
+        ),
+        (
+            json!({ "path": "docs:a.xlsx", "content": "x" }),
+            "invalid_argument",
+        ),
+        (
+            json!({ "path": "docs:a.xlsx", "sheets": [{ "name": "a/b", "rows": [] }] }),
+            "invalid_argument",
+        ),
+        (
+            json!({ "path": "ro:a.docx", "content": "x" }),
+            "not_writable",
+        ),
+    ] {
+        let result = s.call("create_document", args.clone()).await;
+        assert_eq!(error_code(&result), expected, "{args}: {result}");
     }
 
     // Every way out of the folder, or around its rules, is refused.

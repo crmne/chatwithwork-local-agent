@@ -1292,6 +1292,7 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs",
+ "docx-rs",
  "futures-util",
  "globset",
  "grep-matcher",
@@ -1305,11 +1306,13 @@ dependencies = [
  "mimalloc",
  "notify",
  "percent-encoding",
+ "pulldown-cmark",
  "quick-xml",
  "ratatui",
  "rcgen",
  "ring",
  "rmcp",
+ "rust_xlsxwriter",
  "rustix 1.1.5",
  "rustls",
  "rustls-native-certs",
@@ -1608,6 +1611,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "docx-rs"
+version = "0.4.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fdf00e8af6d0b3e92d4bbf9b76f773d8b84ea80f310324ad16cbdc2e653e02c"
+dependencies = [
+ "base64 0.22.1",
+ "crc32fast",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "thiserror 2.0.21",
+ "zip",
 ]
 
 [[package]]
@@ -4798,6 +4817,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "rust_xlsxwriter"
+version = "0.99.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34f2d2cda7223168a14fb86bc7411dbc3379bd7d49749ecc53b91ed98585b6b0"
+dependencies = [
+ "zip",
 ]
 
 [[package]]
