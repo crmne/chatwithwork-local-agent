@@ -109,6 +109,8 @@ fn entry_row(ui: &mut Ui, theme: &Theme, entry: &AuditEntry) {
         if entry.event == "tool" {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (label, color) = match entry.decision.as_deref() {
+                    Some("allowed") if entry.dry_run == Some(true) => ("Checked", p.success),
+                    Some("allowed") if entry.effect.is_some() => ("Changed", p.accent),
                     Some("allowed") => ("Answered", p.success),
                     Some("denied") => ("Refused", p.danger),
                     _ => ("Failed", p.warning),
@@ -135,6 +137,15 @@ fn describe(entry: &AuditEntry) -> (String, Option<String>) {
             } else {
                 format!("{n} results")
             });
+        }
+        if entry.dry_run == Some(true) {
+            details.push("nothing changed".into());
+        }
+        if let Some(written) = entry.written {
+            details.push(format!("{} written", size(written)));
+        }
+        if entry.trash.is_some() {
+            details.push("the old version is in the trash".into());
         }
         if let Some(bytes) = entry.bytes {
             details.push(format!("{} sent", size(bytes)));
@@ -224,6 +235,50 @@ mod tests {
         };
         assert_eq!(describe(&paused).0, "Sharing paused");
         assert!(!refused(&paused));
+
+        let moved = AuditEntry {
+            event: "tool".into(),
+            tool: Some("move".into()),
+            path: Some("docs:a.md".into()),
+            to: Some("docs:archive/a.md".into()),
+            effect: Some("moved".into()),
+            decision: Some("allowed".into()),
+            ..AuditEntry::default()
+        };
+        assert_eq!(describe(&moved).0, "Moved docs:a.md to docs:archive/a.md");
+        let replaced = AuditEntry {
+            event: "tool".into(),
+            tool: Some("write".into()),
+            path: Some("docs:a.md".into()),
+            effect: Some("replaced".into()),
+            decision: Some("allowed".into()),
+            written: Some(2048),
+            trash: Some("/home/u/.local/share/Trash/files/a.md".into()),
+            ..AuditEntry::default()
+        };
+        assert_eq!(
+            describe(&replaced),
+            (
+                "Replaced docs:a.md".into(),
+                Some("2.0 KB written · the old version is in the trash".into())
+            )
+        );
+        let checked = AuditEntry {
+            event: "tool".into(),
+            tool: Some("delete".into()),
+            path: Some("docs:old".into()),
+            effect: Some("trashed".into()),
+            dry_run: Some(true),
+            decision: Some("allowed".into()),
+            ..AuditEntry::default()
+        };
+        assert_eq!(
+            describe(&checked),
+            (
+                "Checked a change to docs:old".into(),
+                Some("nothing changed".into())
+            )
+        );
 
         let failed = AuditEntry {
             event: "tool".into(),

@@ -114,6 +114,15 @@ impl Client {
             .map(drop)
     }
 
+    /// Allow changes in a shared folder, or make it read-only again.
+    pub fn set_writable(&self, id: &str, writable: bool) -> Result<()> {
+        self.request(&ControlRequest::RootsWritable {
+            root: id.into(),
+            writable,
+        })
+        .map(drop)
+    }
+
     pub fn label_root(&self, id: &str, label: &str) -> Result<()> {
         self.request(&ControlRequest::RootsLabel {
             root: id.into(),

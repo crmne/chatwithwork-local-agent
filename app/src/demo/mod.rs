@@ -309,6 +309,10 @@ fn sample() -> State {
             None,
             "allowed",
         ),
+        json!({ "ts": ago(90), "event": "tool", "tool": "edit", "chat_id": "1234",
+                "path": "work-projects:Falcon/README.md", "decision": "allowed",
+                "effect": "edited", "written": 4_210,
+                "trash": home_trash(&home).join("README.md"), "bytes": 412 }),
     ];
     let status = json!({
         "ok": true,
@@ -322,7 +326,7 @@ fn sample() -> State {
             { "id": "documents", "label": "Documents", "available": true, "index": "ready",
               "indexed_files": 1532, "local_path": home.join("Documents") },
             { "id": "work-projects", "label": "Work projects", "available": true, "index": "indexing",
-              "indexed_files": 214, "local_path": home.join("Work/Projects") },
+              "indexed_files": 214, "local_path": home.join("Work/Projects"), "writable": true },
         ],
         "pairing": null,
         "config_file": home.join(".config/cww/config.toml"),
@@ -345,6 +349,17 @@ fn sample() -> State {
         cancelled: HashSet::new(),
         next_id: 1000,
         uploads: Vec::new(),
+    }
+}
+
+/// Where the sample's trash would be, for the activity log.
+fn home_trash(home: &std::path::Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join(".Trash")
+    } else if cfg!(windows) {
+        PathBuf::from(r"C:\$Recycle.Bin")
+    } else {
+        home.join(".local/share/Trash/files")
     }
 }
 
@@ -430,6 +445,26 @@ impl Demo {
                     });
                 });
                 json!({ "ok": true, "root": root })
+            }
+            "roots_writable" => {
+                let which = request["root"].as_str().unwrap_or_default().to_string();
+                let writable = request["writable"].as_bool().unwrap_or(false);
+                self.change(|s| {
+                    for r in s.status["roots"].as_array_mut().expect("roots") {
+                        if r["id"] == json!(which) {
+                            r["writable"] = json!(writable);
+                        }
+                    }
+                    Self::event(
+                        s,
+                        if writable {
+                            "root_changes_allowed"
+                        } else {
+                            "root_changes_stopped"
+                        },
+                    );
+                });
+                json!({ "ok": true })
             }
             "roots_remove" | "roots_label" => {
                 let which = request["root"].as_str().unwrap_or_default().to_string();

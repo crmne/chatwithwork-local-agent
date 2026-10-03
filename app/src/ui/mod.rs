@@ -183,6 +183,7 @@ enum Done {
     Added(Result<String, String>),
     Removed(Result<(), String>),
     Labeled(Result<(), String>),
+    Writable(Result<(), String>),
     Paused(Result<(), String>),
     Deny(Result<DenyList, String>),
     Log(Result<Vec<AuditEntry>, String>),
@@ -233,6 +234,8 @@ struct FoldersState {
     renaming: Option<(String, String)>,
     focus_rename: bool,
     confirm_remove: Option<String>,
+    /// The folder whose "Allow changes" is waiting for a yes.
+    confirm_changes: Option<String>,
     busy: Option<String>,
     error: Option<String>,
     note: Option<String>,
@@ -636,7 +639,7 @@ impl SettingsApp {
                         Err(e) => self.folders.error = Some(e),
                     }
                 }
-                Done::Removed(result) | Done::Labeled(result) => {
+                Done::Removed(result) | Done::Labeled(result) | Done::Writable(result) => {
                     self.folders.busy = None;
                     if let Err(e) = result {
                         self.folders.error = Some(e);
@@ -736,6 +739,25 @@ impl SettingsApp {
         let client = self.shared.client.clone();
         self.jobs.spawn(ctx, move || {
             Done::Removed(client.remove_root(&id).map_err(|e| e.to_string()))
+        });
+    }
+
+    /// A folder request is out.
+    #[cfg(test)]
+    pub(crate) fn folders_busy(&self) -> bool {
+        self.folders.busy.is_some()
+    }
+
+    fn set_writable(&mut self, ctx: &egui::Context, id: String, writable: bool) {
+        self.folders.busy = Some(id.clone());
+        self.folders.error = None;
+        let client = self.shared.client.clone();
+        self.jobs.spawn(ctx, move || {
+            Done::Writable(
+                client
+                    .set_writable(&id, writable)
+                    .map_err(|e| e.to_string()),
+            )
         });
     }
 

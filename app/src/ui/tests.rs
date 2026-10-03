@@ -221,6 +221,68 @@ fn folders_are_renamed_and_removed_with_confirmation() {
 }
 
 #[test]
+fn allowing_changes_asks_first_and_stopping_does_not() {
+    let mut fx = fixture(Scenario::Sample, Some(Page::Folders));
+    fx.wait_for_label("Indexed · 1,532 files");
+    let switches = || {
+        fx.harness
+            .get_all_by_role_and_label(egui::accesskit::Role::CheckBox, "Allow changes")
+            .map(|n| n.accesskit_node().toggled())
+            .collect::<Vec<_>>()
+    };
+    // Documents is read-only, Work projects allows changes.
+    assert_eq!(
+        switches(),
+        [
+            Some(egui::accesskit::Toggled::False),
+            Some(egui::accesskit::Toggled::True)
+        ]
+    );
+    fx.harness
+        .get_all_by_role_and_label(egui::accesskit::Role::CheckBox, "Allow changes")
+        .next()
+        .unwrap()
+        .click();
+    fx.harness.run_steps(3);
+    assert!(!fx.changes().iter().any(|r| r["cmd"] == "roots_writable"));
+    fx.harness
+        .get_by_label_contains("Let Chat with Work change files in “Documents”?");
+    fx.harness.get_by_label("Allow Changes").click();
+    let allowed = fx.wait_for_request("roots_writable");
+    assert_eq!(allowed["root"], "documents");
+    assert_eq!(allowed["writable"], true);
+
+    // Making a folder read-only again needs no question.
+    fx.wait("the folder to allow changes", |h| {
+        h.get_all_by_role_and_label(egui::accesskit::Role::CheckBox, "Allow changes")
+            .all(|n| n.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
+            && !h.state().folders_busy()
+    });
+    fx.harness
+        .get_all_by_role_and_label(egui::accesskit::Role::CheckBox, "Allow changes")
+        .nth(1)
+        .unwrap()
+        .click();
+    fx.wait("the second request", |h| h.state().shared.is_known());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let requests: Vec<Value> = fx
+            .changes()
+            .into_iter()
+            .filter(|r| r["cmd"] == "roots_writable")
+            .collect();
+        if requests.len() == 2 {
+            assert_eq!(requests[1]["root"], "work-projects");
+            assert_eq!(requests[1]["writable"], false);
+            break;
+        }
+        assert!(Instant::now() < deadline, "{requests:?}");
+        fx.harness.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn the_deny_list_and_the_activity_log_are_shown() {
     let mut fx = fixture(Scenario::Sample, Some(Page::Privacy));
     fx.wait_for_label(".ssh");

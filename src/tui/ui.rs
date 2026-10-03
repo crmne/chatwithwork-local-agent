@@ -2115,11 +2115,37 @@ fn duration(ms: f64) -> String {
 }
 
 fn target(entry: &AuditEntry) -> String {
-    match (&entry.query, &entry.path) {
-        (Some(query), _) => format!("\"{query}\""),
-        (None, Some(path)) => path.clone(),
-        (None, None) => String::new(),
+    match (&entry.query, &entry.path, &entry.to) {
+        (Some(query), _, _) => format!("\"{query}\""),
+        (None, Some(path), Some(to)) => format!("{path} to {to}"),
+        (None, Some(path), None) => path.clone(),
+        (None, None, _) => String::new(),
     }
+}
+
+/// What a change did, in words, for the activity log.
+fn change_outcome(entry: &AuditEntry) -> Option<String> {
+    if entry.dry_run == Some(true) {
+        return Some("checked, nothing changed".into());
+    }
+    let words = match entry.effect.as_deref()? {
+        "created" => "created",
+        "replaced" => "replaced, old one in the trash",
+        "appended" => "added to, old one in the trash",
+        "edited" => "edited, old one in the trash",
+        "created_folder" => "folder made",
+        "moved" if entry.trash.is_some() => "moved, old one in the trash",
+        "moved" => "moved",
+        "trashed" => "in the trash",
+        "unchanged" => "already there",
+        other => other,
+    };
+    Some({
+        match entry.written {
+            Some(b) if b > 0 => format!("{words} · {}", bytes(b as usize)),
+            _ => words.to_string(),
+        }
+    })
 }
 
 fn outcome(entry: &AuditEntry) -> (String, Signal) {
@@ -2133,6 +2159,7 @@ fn outcome(entry: &AuditEntry) -> (String, Signal) {
     match entry.decision {
         Some(Decision::Denied) => (format!("denied: {}", why()), Signal::Negative),
         Some(Decision::Error) => (format!("failed: {}", why()), Signal::Negative),
+        _ if entry.effect.is_some() => (change_outcome(entry).unwrap_or_default(), Signal::Idle),
         _ => {
             let n = entry.results;
             let text = match (entry.tool.as_deref(), n, entry.bytes) {
@@ -2156,6 +2183,7 @@ fn modal_hints(modal: &Modal) -> Vec<(&'static str, &'static str)> {
         Modal::AddRoot { .. } => vec![("enter", "share"), ("esc", "cancel")],
         Modal::RenameRoot { .. } => vec![("enter", "rename"), ("esc", "cancel")],
         Modal::ConfirmRemove { .. } => vec![("y", "stop sharing"), ("n", "keep it")],
+        Modal::ConfirmChanges { .. } => vec![("y", "allow changes"), ("n", "keep it read-only")],
         Modal::ConfirmBroad { .. } => vec![("y", "share anyway"), ("n", "cancel")],
         Modal::ConfirmDelete { .. } => vec![("y", "delete it"), ("n", "keep it")],
         Modal::ConfirmLogout => vec![("y", "disconnect"), ("n", "keep it")],
@@ -2247,6 +2275,24 @@ fn modal_box(frame: &mut Frame, area: Rect, modal: &Modal, app: &App, theme: &Th
                 .map(|l| Line::styled(l, theme.muted())),
             );
             ("STOP SHARING", lines)
+        }
+        Modal::ConfirmChanges { label, .. } => {
+            let mut lines = vec![Line::styled(
+                format!("Allow changes in {label}?"),
+                theme.strong(),
+            )];
+            lines.push(Line::raw(""));
+            lines.extend(
+                wrap(
+                    "Chat with Work could then create, edit, move and delete files in this \
+                     folder. It asks you before each change, and old versions and deleted \
+                     files go to the trash on this computer.",
+                    text_width,
+                )
+                .into_iter()
+                .map(|l| Line::styled(l, theme.muted())),
+            );
+            ("ALLOW CHANGES", lines)
         }
         Modal::ConfirmBroad { path, reason } => {
             let mut lines = vec![Line::styled(
@@ -2386,6 +2432,7 @@ fn help_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
             "SHARED FOLDERS",
             vec![
                 ("r", "rename the selected folder"),
+                ("w", "allow or stop changes in the selected folder"),
                 ("d", "stop sharing the selected folder"),
             ],
         ),

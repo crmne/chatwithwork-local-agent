@@ -83,6 +83,8 @@ pub struct RootState {
     pub index: String,
     pub indexed_files: u64,
     pub local_path: String,
+    /// The user allowed changes in it.
+    pub writable: bool,
 }
 
 impl Default for RootState {
@@ -94,6 +96,7 @@ impl Default for RootState {
             index: String::new(),
             indexed_files: 0,
             local_path: String::new(),
+            writable: false,
         }
     }
 }
@@ -230,7 +233,7 @@ impl Page {
         match self {
             Page::Folders => {
                 "Chat with Work can search and read the files in these folders, and nothing \
-                 else on this computer."
+                 else on this computer. It changes files only in folders where you allow it."
             }
             Page::Privacy => {
                 "These files are never shared, even inside a shared folder. Chat with Work \
@@ -272,6 +275,11 @@ pub enum Modal {
         id: String,
         label: String,
         path: String,
+    },
+    /// Allow changes in a shared folder: say what that means first.
+    ConfirmChanges {
+        id: String,
+        label: String,
     },
     /// A new label for a shared folder.
     RenameRoot {
@@ -318,6 +326,11 @@ pub enum DaemonCommand {
     LabelRoot {
         id: String,
         label: String,
+    },
+    /// Allow changes in a shared folder, or make it read-only again.
+    SetWritable {
+        id: String,
+        writable: bool,
     },
     /// Look for the daemon again now.
     Retry,
@@ -1519,6 +1532,7 @@ impl App {
             (Page::Folders, KeyCode::Up | KeyCode::Char('k')) => self.move_root(-1),
             (Page::Folders, KeyCode::Down | KeyCode::Char('j')) => self.move_root(1),
             (Page::Folders, KeyCode::Char('r')) => self.rename_root(),
+            (Page::Folders, KeyCode::Char('w')) => return Some(self.toggle_changes()),
             (Page::Folders, KeyCode::Char('d') | KeyCode::Char('x') | KeyCode::Delete) => {
                 self.confirm_remove()
             }
@@ -1557,6 +1571,30 @@ impl App {
         if len > 0 {
             self.selected_root = self.selected_root.saturating_add_signed(delta).min(len - 1);
         }
+    }
+
+    /// `w` on a shared folder: allow changes in it (after saying what that
+    /// means), or make it read-only again at once.
+    fn toggle_changes(&mut self) -> Vec<Effect> {
+        let Some(root) = self.daemon.roots().get(self.selected_root).cloned() else {
+            self.notice(super::theme::Signal::Idle, "Nothing is shared.");
+            return Vec::new();
+        };
+        if root.writable {
+            self.notice(
+                super::theme::Signal::Idle,
+                &format!("Making {} read-only…", root.label),
+            );
+            return vec![Effect::Daemon(DaemonCommand::SetWritable {
+                id: root.id,
+                writable: false,
+            })];
+        }
+        self.modal = Some(Modal::ConfirmChanges {
+            id: root.id,
+            label: root.label,
+        });
+        Vec::new()
     }
 
     /// `r` on a shared folder: type its new label.
@@ -1673,6 +1711,20 @@ impl App {
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {}
                 _ => self.modal = Some(Modal::ConfirmRemove { id, label, path }),
+            },
+            Modal::ConfirmChanges { id, label } => match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.notice(
+                        super::theme::Signal::Idle,
+                        &format!("Allowing changes in {label}…"),
+                    );
+                    return vec![Effect::Daemon(DaemonCommand::SetWritable {
+                        id,
+                        writable: true,
+                    })];
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {}
+                _ => self.modal = Some(Modal::ConfirmChanges { id, label }),
             },
             Modal::ConfirmBroad { path, reason } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => return self.add_root(path, None, true),

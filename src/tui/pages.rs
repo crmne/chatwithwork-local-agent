@@ -228,12 +228,22 @@ fn folders(
             width,
         );
         let id = format!(" · {}:", root.id);
-        let path_room = (width as usize).saturating_sub(id.chars().count() + 3);
-        let second = Line::from(vec![
-            Span::raw("   "),
-            Span::styled(ellipsize_start(&root.local_path, path_room), theme.faint()),
-            Span::styled(id, theme.faint()),
-        ]);
+        let (access, access_style) = if root.writable {
+            ("Changes allowed", theme.signal_ink(Signal::Attention))
+        } else {
+            ("Read-only", theme.faint())
+        };
+        let path_room =
+            (width as usize).saturating_sub(id.chars().count() + access.chars().count() + 5);
+        let second = spread(
+            vec![
+                Span::raw("   "),
+                Span::styled(ellipsize_start(&root.local_path, path_room), theme.faint()),
+                Span::styled(id, theme.faint()),
+            ],
+            vec![Span::styled(access, access_style)],
+            width,
+        );
         let mut lines = Paragraph::new(vec![first, second]);
         if here {
             lines = lines.style(theme.selected());
@@ -249,11 +259,16 @@ fn folders(
             theme.faint(),
         ));
     }
+    let changes = if roots[selected].writable {
+        "make read-only"
+    } else {
+        "allow changes"
+    };
     after.push(key_hints(
         &[
-            ("↑↓", "select"),
             ("a", "share a folder"),
             ("r", "rename"),
+            ("w", changes),
             ("d", "stop sharing"),
         ],
         theme,

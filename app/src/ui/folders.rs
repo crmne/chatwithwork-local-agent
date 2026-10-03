@@ -15,7 +15,7 @@ impl SettingsApp {
             ui,
             &theme,
             "Shared Folders",
-            "Chat with Work can search and read the files in these folders, and nothing else on this computer.",
+            "Chat with Work can search and read the files in these folders, and nothing else on this computer. It changes files only in folders where you allow it.",
         );
         let Some(status) = status else {
             self.agent_missing(ui);
@@ -97,6 +97,7 @@ impl SettingsApp {
             .as_ref()
             .is_some_and(|(id, _)| *id == root.id);
         let confirming = self.folders.confirm_remove.as_deref() == Some(root.id.as_str());
+        let allowing = self.folders.confirm_changes.as_deref() == Some(root.id.as_str());
 
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -131,6 +132,58 @@ impl SettingsApp {
                 });
             }
         });
+
+        // Allow changes: on asks first, off is at once.
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(!busy && !allowing, |ui| {
+                let mut on = root.writable || allowing;
+                let toggled = widgets::switch(ui, &theme, &mut on, "Allow changes");
+                if toggled.changed() {
+                    if on {
+                        self.folders.confirm_changes = Some(root.id.clone());
+                        self.folders.confirm_remove = None;
+                    } else {
+                        self.set_writable(ui.ctx(), root.id.clone(), false);
+                    }
+                }
+            });
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Allow changes").color(theme.palette.text));
+                ui.add_space(-4.0);
+                ui.add(
+                    egui::Label::new(theme.small(if root.writable {
+                        "Chat with Work can create, edit, move and delete files here, each after \
+                         you approve it. Old versions and deleted files go to the trash."
+                    } else {
+                        "Read-only. Turn on to let Chat with Work create, edit, move and delete \
+                         files here, each after you approve it."
+                    }))
+                    .wrap(),
+                );
+            });
+        });
+        if allowing {
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(RichText::new(format!(
+                    "Let Chat with Work change files in “{}”? It asks you in Chat with Work \
+                     before each change, and old versions and deleted files go to the trash on \
+                     this computer.",
+                    root.label
+                )))
+                .wrap(),
+            );
+            let (cancel, confirm) = ui
+                .horizontal(|ui| widgets::dialog_buttons(ui, &theme, "Allow Changes", false))
+                .inner;
+            if cancel {
+                self.folders.confirm_changes = None;
+            } else if confirm {
+                self.folders.confirm_changes = None;
+                self.set_writable(ui.ctx(), root.id.clone(), true);
+            }
+        }
 
         if renaming {
             let mut save = false;

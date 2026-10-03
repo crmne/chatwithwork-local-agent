@@ -80,6 +80,7 @@ fn root(id: &str, label: &str, index: &str, files: u64) -> RootState {
         index: index.into(),
         indexed_files: files,
         local_path: format!("/home/carmine/{label}"),
+        writable: false,
     }
 }
 
@@ -496,6 +497,98 @@ fn snapshot_add_folder_dialog() {
     app.update(Msg::Daemon(DaemonMsg::Suggestions(vec![documents()])));
     app.update(char('a'));
     assert_snapshot("add_folder_dialog", &app);
+}
+
+/// Changes in the activity log: what each did, and where a move went.
+#[test]
+fn snapshot_audit_log_changes() {
+    let mut app = app();
+    let mut writable = root("work-docs", "Work docs", "ready", 1532);
+    writable.writable = true;
+    running(&mut app, status("connected", vec![writable]));
+    let change = |ts: &str, tool_name: &str, path: &str, effect: &str| {
+        let mut e = tool(ts, tool_name, Decision::Allowed);
+        e.path = Some(path.into());
+        e.effect = Some(effect.into());
+        e
+    };
+    let mut created = change(
+        "2026-09-25T08:15:00Z",
+        "create",
+        "work-docs:plans/q4.md",
+        "created",
+    );
+    created.written = Some(2048);
+    let mut checked = change(
+        "2026-09-25T08:16:00Z",
+        "write",
+        "work-docs:plans/q4.md",
+        "replaced",
+    );
+    checked.dry_run = Some(true);
+    let mut replaced = change(
+        "2026-09-25T08:16:30Z",
+        "write",
+        "work-docs:plans/q4.md",
+        "replaced",
+    );
+    replaced.written = Some(2100);
+    replaced.trash = Some("/home/carmine/.local/share/Trash/files/q4.md".into());
+    let mut moved = change(
+        "2026-09-25T08:17:00Z",
+        "move",
+        "work-docs:plans/q4.md",
+        "moved",
+    );
+    moved.to = Some("work-docs:archive/q4.md".into());
+    let trashed = change("2026-09-25T08:18:00Z", "delete", "work-docs:old", "trashed");
+    let mut refused = tool("2026-09-25T08:19:00Z", "create", Decision::Denied);
+    refused.path = Some("projects:x.md".into());
+    refused.code = Some("not_writable".into());
+    refused.reason = Some("Changes aren't allowed in the shared folder “Projects”.".into());
+    app.update(Msg::Daemon(DaemonMsg::AuditHistory(vec![
+        created, checked, replaced, moved, trashed, refused,
+    ])));
+    app.update(char('l'));
+    assert_snapshot("audit_log_changes", &app);
+}
+
+/// `w` asks before allowing changes, and makes a folder read-only at once.
+#[test]
+fn allowing_changes_asks_first() {
+    let mut app = app();
+    running(
+        &mut app,
+        status(
+            "connected",
+            vec![root("work-docs", "Work docs", "ready", 1532)],
+        ),
+    );
+    app.update(char(','));
+    assert!(app.update(char('w')).is_empty());
+    assert_snapshot("allow_changes_dialog", &app);
+    assert!(app.update(char('z')).is_empty(), "other keys keep asking");
+    assert!(app.update(char('n')).is_empty());
+    assert_eq!(app.modal, None);
+    app.update(char('w'));
+    assert_eq!(
+        app.update(char('y')),
+        vec![Effect::Daemon(DaemonCommand::SetWritable {
+            id: "work-docs".into(),
+            writable: true,
+        })]
+    );
+    let mut writable = root("work-docs", "Work docs", "ready", 1532);
+    writable.writable = true;
+    running(&mut app, status("connected", vec![writable]));
+    assert_eq!(
+        app.update(char('w')),
+        vec![Effect::Daemon(DaemonCommand::SetWritable {
+            id: "work-docs".into(),
+            writable: false,
+        })]
+    );
+    assert_eq!(app.modal, None, "read-only needs no question");
 }
 
 #[test]

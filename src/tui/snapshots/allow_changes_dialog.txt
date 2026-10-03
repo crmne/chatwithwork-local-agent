@@ -8,14 +8,14 @@
    Activity                    │     /home/carmine/Work docs · work-docs:                Read-only
    Account                     │
    General                     │  a share a folder   r rename   w allow changes   d stop sharing
-                ╭ STOP SHARING ────────────────────────────────────────────────────╮
-                │ Stop sharing Work docs?                                          │
+                ╭ ALLOW CHANGES ───────────────────────────────────────────────────╮
+                │ Allow changes in Work docs?                                      │
                 │                                                                  │
-                │ Chat with Work can no longer search or read /home/carmine/Work   │
-                │ docs, and its entries leave the index. The folder itself isn't   │
-                │ touched.                                                         │
+                │ Chat with Work could then create, edit, move and delete files in │
+                │ this folder. It asks you before each change, and old versions    │
+                │ and deleted files go to the trash on this computer.              │
                 │                                                                  │
-                │ y stop sharing   n keep it                                       │
+                │ y allow changes   n keep it read-only                            │
                 ╰──────────────────────────────────────────────────────────────────╯
                                │
                                │

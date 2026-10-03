@@ -199,6 +199,7 @@ fn offline(paths: &Paths, error: Option<String>) -> DaemonMsg {
             index: String::new(),
             indexed_files: 0,
             local_path: r.path.display().to_string(),
+            writable: r.writable,
         })
         .collect();
     let suggestion = crate::paths::documents_dir().map(|path| Suggestion {
@@ -368,6 +369,36 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
             label_root(&mut config, id, label)?;
             config.save(paths)?;
             Ok((format!("{renamed} Saved for when the daemon starts."), true))
+        }
+        DaemonCommand::SetWritable { id, writable } => {
+            let request = ControlRequest::RootsWritable {
+                root: id.clone(),
+                writable: *writable,
+            };
+            let done = |label: &str| {
+                if *writable {
+                    format!(
+                        "Chat with Work can change files in {label} now, each change after you \
+                         approve it there."
+                    )
+                } else {
+                    format!("{label} is read-only again.")
+                }
+            };
+            if let Some(v) = control::request(&socket, request)? {
+                let label = v["root"]["label"]
+                    .as_str()
+                    .unwrap_or(id.as_str())
+                    .to_string();
+                return Ok((done(&label), false));
+            }
+            let mut config = Config::load(paths)?;
+            let root = crate::roots::set_writable(&mut config, id, *writable)?;
+            config.save(paths)?;
+            Ok((
+                format!("{} Saved for when the daemon starts.", done(&root.label)),
+                true,
+            ))
         }
         DaemonCommand::InstallService => {
             let exe = std::env::current_exe().context("finding the cww binary")?;

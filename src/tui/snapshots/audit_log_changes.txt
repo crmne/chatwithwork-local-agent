@@ -1,0 +1,30 @@
+ ◆ Chat with Work              │  Activity
+                               │
+  ← Chats                  esc │  Every request from Chat with Work, as logged on this computer.
+                               │  The log never leaves it.
+  SETTINGS                     │
+   Shared folders              │  TIME      RESULT   TOOL        DETAIL                  6 entries
+   Always private              │  08:15:00  allowed  create      work-docs:plans/q4.md → created ·
+ ▌ Activity                    │  08:16:00  allowed  write       work-docs:plans/q4.md → checked,
+   Account                     │  08:16:30  allowed  write       work-docs:plans/q4.md → replaced,
+   General                     │  08:17:00  allowed  move        work-docs:plans/q4.md to work-doc
+                               │  08:18:00  allowed  delete      work-docs:old → in the trash · ch
+                               │  08:19:00  denied   create      projects:x.md · chat 1234
+                               │                                 Changes aren't allowed in the
+                               │                                 shared folder “Projects”.
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+                               │
+  Settings                     │

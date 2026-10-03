@@ -1,15 +1,15 @@
  ◆ Chat with Work              │  Shared folders
                                │
   ← Chats                  esc │  Chat with Work can search and read the files in these folders,
-                               │  and nothing else on this computer.
-  SETTINGS                     │
- ▌ Shared folders              │  ▌● Work docs                               Indexed · 1,532 files
-   Always private              │     /home/carmine/Work docs · work-docs:
-   Activity                    │   ⠋ Projects                                       Indexing · 214
-   Account                     │     /home/carmine/Projects · projects:
-   General                     │
-                               │  ↑↓ select   a share a folder   r rename   d stop sharing
+                               │  and nothing else on this computer. It changes files only in
+  SETTINGS                     │  folders where you allow it.
+ ▌ Shared folders              │
+   Always private              │  ▌● Work docs                               Indexed · 1,532 files
+   Activity                    │     /home/carmine/Work docs · work-docs:                Read-only
+   Account                     │   ⠋ Projects                                       Indexing · 214
+   General                     │     /home/carmine/Projects · projects:                  Read-only
                                │
+                               │  a share a folder   r rename   w allow changes   d stop sharing
                                │
                                │
                                │

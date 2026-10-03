@@ -47,6 +47,8 @@ pub struct RootStatus {
     pub index: String,
     pub indexed_files: Option<u64>,
     pub local_path: Option<PathBuf>,
+    /// The user allowed changes in it.
+    pub writable: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -65,6 +67,16 @@ pub struct AuditEntry {
     pub bytes: Option<u64>,
     pub results: Option<u64>,
     pub detail: Option<String>,
+    /// Where a move went.
+    pub to: Option<String>,
+    /// What a change did (`created`, `replaced`, `moved`, `trashed`, ...).
+    pub effect: Option<String>,
+    /// The call only checked a change.
+    pub dry_run: Option<bool>,
+    /// Bytes a change wrote.
+    pub written: Option<u64>,
+    /// Where the old version went in the trash, on this computer.
+    pub trash: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -276,17 +288,38 @@ pub fn describe_tool(entry: &AuditEntry) -> String {
         "roots" => None,
         _ => entry.path.as_deref().map(|p| ellipsize(p, 48)),
     };
-    let verb = match tool {
-        "search" => "searched",
-        "read" => "read",
-        "list" => "listed",
-        "roots" => "listed the shared folders",
-        other => other,
+    if entry.dry_run == Some(true) {
+        return match target {
+            Some(target) => format!("checked a change to {target}"),
+            None => "checked a change".into(),
+        };
+    }
+    let verb = match (tool, entry.effect.as_deref()) {
+        ("search", _) => "searched",
+        ("read", _) => "read",
+        ("list", _) => "listed",
+        ("roots", _) => "listed the shared folders",
+        (_, Some("created")) => "created",
+        (_, Some("replaced")) => "replaced",
+        (_, Some("appended")) => "added to",
+        (_, Some("edited")) => "edited",
+        (_, Some("created_folder")) => "made the folder",
+        (_, Some("unchanged")) => "found the folder",
+        (_, Some("moved")) => "moved",
+        (_, Some("trashed")) => "moved to the trash",
+        ("create" | "create_document", None) => "create",
+        ("mkdir", None) => "make the folder",
+        ("delete", None) => "delete",
+        (other, _) => other,
     };
-    match target {
+    let mut text = match target {
         Some(target) => format!("{verb} {target}"),
         None => verb.to_string(),
+    };
+    if let Some(to) = &entry.to {
+        text.push_str(&format!(" to {}", ellipsize(to, 48)));
     }
+    text
 }
 
 /// Shorten `text` to `max` characters, keeping the end of paths visible.
