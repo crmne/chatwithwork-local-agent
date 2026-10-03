@@ -503,18 +503,27 @@ fn the_sidebar_shows_whats_pinned_as_the_web_does() {
 }
 
 #[test]
-fn a_project_shows_its_chats_and_starts_a_chat_in_it() {
+fn projects_open_on_the_web_as_the_web_sidebar_links_them() {
+    OPENED.with(|o| o.borrow_mut().clear());
     let mut fx = fixture(Options::default());
     fx.ready();
     fx.wait_for_label("Falcon");
+    // A pinned project opens its page, and All projects the web's list.
     fx.harness.get_by_label("Falcon").click();
-    fx.wait_for_label("Falcon · shared with the people on it");
-    assert!(
-        fx.harness
-            .query_by_label("Vendor contract renewal")
-            .is_none()
+    fx.harness.run_steps(2);
+    fx.harness.get_by_label("All projects").click();
+    fx.harness.run_steps(2);
+    assert_eq!(
+        OPENED.with(|o| o.borrow().clone()),
+        [
+            "https://chatwithwork.com/northwind/projects/7",
+            "https://chatwithwork.com/northwind/projects",
+        ]
     );
-    fx.harness.get_by_label("Falcon launch checklist");
+    // Nothing opens in the app: no picker, the same chat list, and the
+    // next question starts a chat of its own.
+    assert!(fx.harness.query_by_label("People").is_none());
+    assert!(fx.harness.query_by_label_contains("Show all").is_none());
     let field = fx
         .harness
         .get_by_role(egui::accesskit::Role::MultilineTextInput);
@@ -523,26 +532,28 @@ fn a_project_shows_its_chats_and_starts_a_chat_in_it() {
     fx.harness.run_steps(2);
     fx.harness.get_by_label("Send message").click();
     let sent = fx.wait_for_request("chat_send", |_| true);
-    assert_eq!(sent["project"], 7);
-    // The new chat is the project's, and every chat shows again on asking.
-    fx.wait("the new chat in the list", |h| {
-        h.state()
-            .chat_state()
-            .is_some_and(|s| s.list.chats[0].project.as_ref().is_some_and(|p| p.id == 7))
-    });
-    fx.harness.get_by_label("Falcon · Show all").click();
-    fx.wait_for_label("Vendor contract renewal");
-    // Any project, from All projects.
-    fx.harness.get_by_label("All projects").click();
-    fx.wait_for_label("People");
-    fx.harness.get_by_label("People").click();
-    fx.wait_for_label("People · shared with the people on it");
-    fx.harness.get_by_label("Hiring pipeline status");
-    assert!(
-        fx.harness
-            .query_by_label("Falcon launch checklist")
-            .is_none()
-    );
+    assert!(sent["project"].is_null(), "{sent}");
+}
+
+#[test]
+fn a_pinned_project_is_current_while_one_of_its_chats_is_open() {
+    let mut fx = fixture(Options::default());
+    fx.ready();
+    fx.wait_for_label("Falcon");
+    // The pin, not the project's line over the open chat, which links too.
+    let current = |fx: &Fixture| {
+        let pin = fx
+            .harness
+            .get_all_by_label("Falcon")
+            .find(|n| n.accesskit_node().role() != egui::accesskit::Role::Link)
+            .expect("the pin");
+        let node = pin.accesskit_node();
+        node.is_selected() == Some(true) || node.toggled() == Some(egui::accesskit::Toggled::True)
+    };
+    assert!(!current(&fx));
+    fx.chat().open(10);
+    fx.harness.run_steps(2);
+    assert!(current(&fx), "a chat in Falcon is open");
 }
 
 #[test]
@@ -575,7 +586,7 @@ fn credits_and_projects_change_in_place() {
     // Running low: the meter shows under the name, as on the web.
     fx.server.spend(410);
     fx.wait_for_label("410 of 5,000 credits left");
-    // A project joined elsewhere is in the picker.
+    // A project joined elsewhere is in the list.
     let mut projects = crate::demo::projects();
     projects.push(crate::demo::project(9, "Board", "folder-simple"));
     fx.server.set_projects(projects);
@@ -584,8 +595,6 @@ fn credits_and_projects_change_in_place() {
             .chat_state()
             .is_some_and(|s| s.list.projects.iter().any(|p| p.id == 9))
     });
-    fx.harness.get_by_label("All projects").click();
-    fx.wait_for_label("Board");
 }
 
 #[test]
@@ -1180,14 +1189,6 @@ fn review_screens() -> Vec<Screen> {
             name: "user-menu",
             chat: Some(11),
             setup: |fx| fx.chat().state_mut().user_menu = true,
-        },
-        Screen {
-            name: "project",
-            chat: None,
-            setup: |fx| {
-                let commands = fx.chat().state_mut().pick_project(7);
-                assert!(commands.is_empty());
-            },
         },
         Screen {
             name: "project-chat",

@@ -1,8 +1,6 @@
 //! The sidebar (`sidebar.css`, `account_switcher.css`, `sidebar_pins.css`):
-//! the logotype and its toggle, New chat and Chats, the
-//! search field, the Recent chats, what's pinned (and a picker of every
-//! project behind "All projects"), and your
-//! name at the foot, with the credits when they run low, opening the menu
+//! the logotype and its toggle, New chat and Chats, the search field, the
+//! Recent chats, what's pinned, and your name at the foot, with the credits when they run low, opening the menu
 //! of Settings: the web's tabs, and this computer's own pages.
 
 use egui::{Color32, Id, Key, Rect, Sense, Ui, pos2, vec2};
@@ -27,10 +25,9 @@ pub enum Event {
     Toggle,
     /// One of this computer's settings pages, from the menu under your name.
     Page(crate::ui::Page),
-    /// A page of the web, in the browser: Chats, All projects, a Settings tab.
+    /// A page of the web, in the browser: Chats, All projects, a pinned
+    /// project, a Settings tab.
     OpenUrl(String),
-    /// A project, under Pinned or Projects: its chats, and a new chat in it.
-    Project(u64),
     /// Rename a chat, from its row's menu.
     Rename(u64, String),
     /// Delete a chat, once confirmed.
@@ -162,21 +159,8 @@ impl Sidebar<'_> {
         self.search(ui, search_rect, state);
         y += 36.0 + 8.0;
 
-        // `.sidebar__label`: Recent, and while a project's chats show, the
-        // way back to every chat.
+        // `.sidebar__label`.
         self.section_label(ui, pos2(rect.left() + 16.0, y + 12.0), "Recent");
-        if let Some(project) = state.filter.and_then(|id| state.project(id)) {
-            let name = project.name.clone();
-            let text = format!("{name} · Show all");
-            if self.micro_link(
-                ui,
-                pos2(inner_right - 8.0 - 10.0, y + 12.0),
-                &text,
-                Id::new("chat-show-all"),
-            ) {
-                state.filter = None;
-            }
-        }
         y += 32.8;
 
         // Your name, at the foot, with the credits when they run low.
@@ -217,9 +201,6 @@ impl Sidebar<'_> {
         if let Some(e) = self.user_menu(ui, rect, account_rect, state) {
             event = Some(e);
         }
-        if let Some(e) = self.projects_menu(ui, rect, pins_rect, state) {
-            event = Some(e);
-        }
         event
     }
 
@@ -242,127 +223,6 @@ impl Sidebar<'_> {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         response.clicked()
-    }
-
-    /// Behind "All projects": every project the person is on, as the web's
-    /// projects page lists them, in the web's menu. Picking one shows its
-    /// chats and starts a new chat in it; the last row opens the web's page.
-    fn projects_menu(
-        &self,
-        ui: &mut Ui,
-        sidebar: Rect,
-        pins: Rect,
-        state: &mut ChatState,
-    ) -> Option<Event> {
-        if !state.projects_menu {
-            return None;
-        }
-        let p = self.palette;
-        let projects = state.list.projects.clone();
-        let web = state.list.links.projects.clone();
-        let rows = projects.len() + usize::from(web.is_some());
-        let content = 32.5 + rows as f32 * 34.8 + if web.is_some() { 9.0 } else { 0.0 };
-        let width = sidebar.width() - 16.0;
-        let height = (5.0 + content + 5.0).min(pins.top() - sidebar.top() - 16.0);
-        let anchor_y = pins.top() + 1.0 + 4.0 + 32.8;
-        let rect = Rect::from_min_size(
-            pos2(
-                sidebar.left() + 8.0,
-                (anchor_y - height).max(sidebar.top() + 8.0),
-            ),
-            vec2(width, height),
-        );
-        let mut event = None;
-        let mut close = false;
-        egui::Area::new(Id::new("chat-projects-menu"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.min)
-            .show(ui.ctx(), |ui| {
-                controls::menu_panel(ui.painter(), rect, p);
-                let inner = rect.shrink(5.0);
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-                child.set_clip_rect(inner);
-                egui::ScrollArea::vertical()
-                    .id_salt("chat-projects-menu-scroll")
-                    .max_height(inner.height())
-                    .show(&mut child, |ui| {
-                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                        let (title, _) =
-                            ui.allocate_exact_size(vec2(inner.width(), 32.5), Sense::hover());
-                        let galley = paint::layout(
-                            ui.painter(),
-                            paint::job(
-                                "Projects",
-                                Type::mono(11.0, 16.5),
-                                p.ink_faint,
-                                f32::INFINITY,
-                            ),
-                        );
-                        let at = pos2(
-                            title.left() + 12.0,
-                            title.center().y - galley.size().y / 2.0,
-                        );
-                        ui.painter().galley(at, galley, p.ink_faint);
-                        for project in &projects {
-                            let (row, _) =
-                                ui.allocate_exact_size(vec2(inner.width(), 34.8), Sense::hover());
-                            let row = Rect::from_min_size(row.min, vec2(row.width(), 33.8));
-                            let current = state.filter == Some(project.id);
-                            let id = Id::new(("chat-projects-menu-item", project.id));
-                            if controls::menu_item(
-                                ui,
-                                id,
-                                row,
-                                Some(project_icon(project)),
-                                &project.name,
-                                false,
-                                current,
-                                p,
-                                self.images,
-                            )
-                            .clicked()
-                            {
-                                close = true;
-                                event = Some(Event::Project(project.id));
-                            }
-                        }
-                        if let Some(url) = &web {
-                            let (divider, _) =
-                                ui.allocate_exact_size(vec2(inner.width(), 9.0), Sense::hover());
-                            ui.painter().hline(
-                                divider.x_range(),
-                                divider.center().y,
-                                egui::Stroke::new(1.0, p.line),
-                            );
-                            let (row, _) =
-                                ui.allocate_exact_size(vec2(inner.width(), 34.8), Sense::hover());
-                            let row = Rect::from_min_size(row.min, vec2(row.width(), 33.8));
-                            if controls::menu_item(
-                                ui,
-                                Id::new("chat-projects-menu-web"),
-                                row,
-                                Some(Icon::ArrowUpRight),
-                                "Open projects on the web",
-                                false,
-                                false,
-                                p,
-                                self.images,
-                            )
-                            .clicked()
-                            {
-                                close = true;
-                                event = Some(Event::OpenUrl(url.clone()));
-                            }
-                        }
-                    });
-            });
-        if close
-            || controls::pressed_outside(ui, &[rect])
-            || ui.input(|i| i.key_pressed(Key::Escape))
-        {
-            state.projects_menu = false;
-        }
-        event
     }
 
     /// `.sidebar__link--new`. True when clicked.
@@ -474,15 +334,10 @@ impl Sidebar<'_> {
     }
 
     /// `.sidebar__pins`: what the person pinned on the web, projects then
-    /// chats, then the other projects, in a section of its own above the
-    /// person's name, scrolling once it's 40% of the sidebar.
-    fn pinned(
-        &self,
-        ui: &mut Ui,
-        rect: Rect,
-        pins: &[Pin],
-        state: &mut ChatState,
-    ) -> Option<Event> {
+    /// chats, in a section of its own above the person's name, scrolling
+    /// once it's 40% of the sidebar. A project, and "All projects", open
+    /// their pages on the web, as the web's links do.
+    fn pinned(&self, ui: &mut Ui, rect: Rect, pins: &[Pin], state: &ChatState) -> Option<Event> {
         let p = self.palette;
         ui.painter().hline(
             rect.x_range(),
@@ -490,7 +345,12 @@ impl Sidebar<'_> {
             egui::Stroke::new(1.0, p.line),
         );
         let mut event = None;
-        let mut opened = state.projects_menu;
+        // The web marks a pinned project current while a chat in it is open,
+        // unless that chat is pinned too.
+        let open_in = state
+            .open_summary()
+            .filter(|chat| !state.list.pins.chats.contains(&chat.number))
+            .and_then(|chat| chat.project.as_ref().map(|project| project.id));
         let inner = Rect::from_min_max(rect.min + vec2(0.0, 1.0), rect.max);
         let mut child = ui.new_child(
             egui::UiBuilder::new()
@@ -512,11 +372,7 @@ impl Sidebar<'_> {
                     pos2(header.left() + 16.0, header.top() + 12.0),
                     "Pinned",
                 );
-                // "All projects": the app's picker of them, or without any
-                // listed, the web's page.
-                let has_projects = !state.list.projects.is_empty();
-                let web = state.list.links.projects.clone();
-                if (has_projects || web.is_some())
+                if let Some(url) = &state.list.links.projects
                     && self.micro_link(
                         ui,
                         pos2(header.right() - 8.0 - 10.0, header.top() + 12.0),
@@ -524,12 +380,7 @@ impl Sidebar<'_> {
                         Id::new("chat-all-projects"),
                     )
                 {
-                    if has_projects {
-                        // Opened on this click; the press doesn't close it.
-                        opened = !state.projects_menu;
-                    } else if let Some(url) = web {
-                        event = Some(Event::OpenUrl(url));
-                    }
+                    event = Some(Event::OpenUrl(url.clone()));
                 }
                 if pins.is_empty() {
                     let text = "Pin a chat or project to keep it here.";
@@ -553,11 +404,15 @@ impl Sidebar<'_> {
                     );
                     match pin {
                         Pin::Project(project) => {
-                            let current = state.filter == Some(project.id);
+                            let current = open_in == Some(project.id);
                             let id = Id::new(("chat-pin-project", project.id));
                             if self.link(ui, row, project_icon(project), &project.name, current, id)
+                                && let Some(url) = project
+                                    .url
+                                    .clone()
+                                    .or_else(|| state.list.links.projects.clone())
                             {
-                                event = Some(Event::Project(project.id));
+                                event = Some(Event::OpenUrl(url));
                             }
                         }
                         Pin::Chat(number, title) => {
@@ -571,9 +426,6 @@ impl Sidebar<'_> {
                 }
                 ui.add_space(4.0);
             });
-        if opened != state.projects_menu {
-            state.projects_menu = opened;
-        }
         event
     }
 

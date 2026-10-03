@@ -442,7 +442,6 @@ impl ChatPage {
                             sidebar::Event::Open(_)
                                 | sidebar::Event::NewChat
                                 | sidebar::Event::Page(_)
-                                | sidebar::Event::Project(_)
                                 | sidebar::Event::Toggle
                         )
                     ) {
@@ -477,13 +476,7 @@ impl ChatPage {
     ) {
         match event {
             Some(sidebar::Event::NewChat) => {
-                self.state.filter = None;
                 let commands = self.state.new_chat();
-                self.run(commands);
-                self.focus_composer = true;
-            }
-            Some(sidebar::Event::Project(id)) => {
-                let commands = self.state.pick_project(id);
                 self.run(commands);
                 self.focus_composer = true;
             }
@@ -1070,13 +1063,7 @@ impl ChatPage {
             GREETINGS[self.greeting].replace("{}", &name)
         };
         let galley = paint::layout(ui.painter(), paint::job(&greeting, ty, p.ink, column));
-        // The project it starts in, under the greeting.
-        let project = self
-            .state
-            .project
-            .and_then(|id| self.state.project(id).cloned());
-        let project_h = if project.is_some() { 19.5 + 12.0 } else { 0.0 };
-        let content = galley.size().y + 28.0 + project_h + composer_h;
+        let content = galley.size().y + 28.0 + composer_h;
         // The column's padding, and the page's 8 at the bottom.
         let available = main.height() - 64.0 - 96.0 - 8.0;
         let top = main.top() + 64.0 + ((available - content) / 2.0).max(0.0);
@@ -1099,17 +1086,8 @@ impl ChatPage {
             galley,
             p.ink.gamma_multiply(eased),
         );
-        if let Some(project) = &project {
-            let line =
-                Rect::from_min_size(pos2(left, top + greeting_height + 28.0), vec2(column, 19.5));
-            if let Some(url) =
-                project_line(ui, line, project, &self.state.list.account.name, images, p)
-            {
-                self.open_on_server(env, &url);
-            }
-        }
         let rect = Rect::from_min_size(
-            pos2(left, top + greeting_height + 28.0 + project_h),
+            pos2(left, top + greeting_height + 28.0),
             vec2(column, composer_h),
         );
         let focus = std::mem::take(&mut self.focus_composer);
@@ -1122,8 +1100,7 @@ impl ChatPage {
     }
 }
 
-/// `.chat-project`: above a chat in a project, or a new chat started in
-/// one, centered: its icon, its name, which opens its page on the web, and
+/// `.chat-project`: above a chat in a project, centered: its icon, its name, which opens its page on the web, and
 /// who reads it. The web counts the people on a project; the chat API
 /// doesn't say, so the app names them without a count. Returns the page to
 /// open when the name was clicked.
