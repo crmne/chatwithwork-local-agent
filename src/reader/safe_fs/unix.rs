@@ -372,7 +372,8 @@ impl ChangeDir {
     }
 
     /// Write `bytes` to a new hidden file in this directory, with `mode`,
-    /// and flush it to disk. [`ChangeDir::commit`] puts it in place.
+    /// marked as coming from the internet (quarantine, on macOS), and flush
+    /// it to disk. [`ChangeDir::commit`] puts it in place.
     pub fn stage(&self, bytes: &[u8], mode: u32) -> Result<Staged, ToolError> {
         for _ in 0..16 {
             let name = OsString::from(temp_name());
@@ -391,6 +392,7 @@ impl ChangeDir {
             let written = file
                 .write_all(bytes)
                 .map_err(|e| e.raw_os_error().map_or(Errno::IO, Errno::from_raw_os_error))
+                .and_then(|()| mark_from_internet(&file))
                 .and_then(|()| {
                     rustix::fs::fchmod(
                         &file,
@@ -562,6 +564,32 @@ impl ChangeDir {
     pub fn real_path(&self) -> Option<PathBuf> {
         handle_path(&self.fd)
     }
+}
+
+/// Mark a file cww made as downloaded (`com.apple.quarantine`), so
+/// Gatekeeper checks it before anything runs it and apps treat it with
+/// care. A volume without extended attributes can't hold the mark.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn mark_from_internet(file: &File) -> Result<(), Errno> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let value = format!("0081;{now:08x};cww;");
+    match rustix::fs::fsetxattr(
+        file,
+        "com.apple.quarantine",
+        value.as_bytes(),
+        rustix::fs::XattrFlags::empty(),
+    ) {
+        Ok(()) | Err(Errno::NOTSUP | Errno::OPNOTSUPP) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Linux has no mark for files from the internet.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn mark_from_internet(_file: &File) -> Result<(), Errno> {
+    Ok(())
 }
 
 fn entry_stat(stat: &Stat) -> EntryStat {

@@ -565,7 +565,10 @@ impl ChangeDir {
                 Err(e) if is_exists(&e) => continue,
                 Err(e) => return Err(change_error(&e)),
             };
-            let written = file.write_all(bytes).and_then(|()| file.sync_all());
+            let written = file
+                .write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .and_then(|()| mark_from_internet(&file, &path));
             let staged = Staged { file, path };
             if let Err(e) = written {
                 self.discard(staged);
@@ -742,6 +745,50 @@ fn same_name(real: &Path, name: &OsStr) -> bool {
 
 fn short_name() -> ToolError {
     ToolError::denied("This is a short name for another file; use the file's full name.")
+}
+
+/// Volumes with alternate data streams have this flag.
+const FILE_NAMED_STREAMS: u32 = 0x0004_0000;
+
+/// Give a file cww made the Mark-of-the-Web (a `Zone.Identifier` stream
+/// with `ZoneId=3`, the Internet zone), as browsers do for downloads: Office
+/// opens it in Protected View and SmartScreen checks it before it runs. A
+/// volume without alternate data streams (FAT) can't hold the mark.
+fn mark_from_internet(file: &File, path: &Path) -> io::Result<()> {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    let marked = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&stream)
+        .and_then(|mut zone| {
+            zone.write_all(b"[ZoneTransfer]\r\nZoneId=3\r\n")
+                .and_then(|()| zone.sync_all())
+        });
+    match marked {
+        Err(_) if !has_named_streams(file) => Ok(()),
+        other => other,
+    }
+}
+
+fn has_named_streams(file: &File) -> bool {
+    let mut flags = 0u32;
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW(
+            raw(file),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    // If the volume can't be asked, assume it has them: refuse rather than
+    // write a file without the mark.
+    ok == 0 || flags & FILE_NAMED_STREAMS != 0
 }
 
 /// Rename the open `file` to `target` (a full path), never replacing

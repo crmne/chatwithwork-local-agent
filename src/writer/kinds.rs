@@ -1,9 +1,14 @@
 //! Which names and kinds of file a change may produce.
 //!
 //! cww never makes anything that runs: no executables, scripts the system
-//! runs on a double-click, installers, shortcuts or launchers, and never an
-//! execute bit. It writes text files as text, and Word and Excel documents
-//! only through `create_document`, never as raw text.
+//! runs on a double-click, installers, shortcuts or launchers, documents
+//! that make the system or Office run or fetch something when opened, and
+//! never an execute bit. It writes text files as text, and Word and Excel
+//! documents only through `create_document`, never as raw text. Every file
+//! it makes is also marked as coming from the internet where the system
+//! has such a mark (Mark-of-the-Web on Windows, quarantine on macOS; see
+//! `safe_fs::ChangeDir::stage`), so Office opens it in Protected View and
+//! Gatekeeper checks it.
 
 use crate::error::{ErrorCode, ToolError};
 
@@ -63,6 +68,44 @@ const EXECUTABLE: &[&str] = &[
     "appinstaller",
     "vsix",
     "xll",
+    "msu",
+    "ppkg",
+    "wcx",
+    "job",
+    "mcf",
+    "ins",
+    "isp",
+    "vb",
+    "ws",
+    "xnk",
+    "shb",
+    "shs",
+    "ade",
+    "adp",
+    "sct",
+    "msh",
+    "msh1",
+    "msh2",
+    "mshxml",
+    "msh1xml",
+    "msh2xml",
+    "pyz",
+    "pyzw",
+    // Documents that make Windows or Office run, load or fetch something
+    // when opened: rich text (embedded objects), web archives, Excel's
+    // SYLK and web queries, remote desktop files, and themes.
+    "rtf",
+    "mht",
+    "mhtml",
+    "slk",
+    "iqy",
+    "oqy",
+    "rqy",
+    "dqy",
+    "rdp",
+    "theme",
+    "themepack",
+    "deskthemepack",
     // Office files with macros, and add-ins
     "docm",
     "dotm",
@@ -100,6 +143,7 @@ const EXECUTABLE: &[&str] = &[
     "dylib",
     // Linux and Java
     "desktop",
+    "kdelnk",
     "so",
     "appimage",
     "run",
@@ -202,8 +246,8 @@ pub fn check_new_name(name: &str) -> Result<(), ToolError> {
     }
     if is_executable_name(name) {
         return Err(not_changeable(format!(
-            "cww never creates programs, scripts that run when opened, installers or \
-             shortcuts, so it can't make {name}."
+            "cww never creates programs, scripts that run when opened, installers, shortcuts \
+             or documents that run or fetch things when opened, so it can't make {name}."
         )));
     }
     Ok(())
@@ -213,8 +257,8 @@ pub fn check_new_name(name: &str) -> Result<(), ToolError> {
 pub fn check_text_name(name: &str) -> Result<(), ToolError> {
     if is_executable_name(name) {
         return Err(not_changeable(format!(
-            "cww never changes programs, scripts that run when opened, installers or \
-             shortcuts, so it can't change {name}."
+            "cww never changes programs, scripts that run when opened, installers, shortcuts \
+             or documents that run or fetch things when opened, so it can't change {name}."
         )));
     }
     match extension(name).as_deref() {
@@ -229,11 +273,26 @@ pub fn check_text_name(name: &str) -> Result<(), ToolError> {
     }
 }
 
-/// Check text a tool is about to write.
+/// Check text a tool is about to write. Besides NUL characters, an Office
+/// processing instruction (`<?mso-application ...?>`) is refused in any
+/// file: it makes Windows open an `.xml` file in Word or Excel, as a
+/// document that can run what those run, and a move can give any file that
+/// name.
 pub fn check_text(text: &str, max: u64) -> Result<(), ToolError> {
     if text.contains('\0') {
         return Err(not_changeable(
             "The text contains NUL characters; only text files can be written.",
+        ));
+    }
+    if text
+        .as_bytes()
+        .windows(6)
+        .any(|w| w.eq_ignore_ascii_case(b"<?mso-"))
+    {
+        return Err(not_changeable(
+            "The text has an Office processing instruction (<?mso-...?>), which makes Windows \
+             open it in Word or Excel as a document. cww doesn't write those; use \
+             create_document for Word and Excel files.",
         ));
     }
     if text.len() as u64 > max {
@@ -284,6 +343,15 @@ mod tests {
             "tool.jar",
             "x.hta",
             "x.url",
+            "letter.RTF",
+            "page.mht",
+            "data.slk",
+            "query.iqy",
+            "office.rdp",
+            "dark.theme",
+            "x.themepack",
+            "x.sct",
+            "x.mshxml",
         ] {
             let err = check_new_name(name).unwrap_err();
             assert_eq!(err.code, ErrorCode::NotChangeable, "{name}");
@@ -365,6 +433,18 @@ mod tests {
             check_text("hello", 3).unwrap_err().code,
             ErrorCode::TooLarge
         );
+        for office in [
+            "<?xml version=\"1.0\"?>\n<?mso-application progid=\"Word.Document\"?>",
+            "<?MSO-Application progid=\"Excel.Sheet\"?>",
+            "<?mso-infoPathSolution?>",
+        ] {
+            assert_eq!(
+                check_text(office, 1000).unwrap_err().code,
+                ErrorCode::NotChangeable,
+                "{office}"
+            );
+        }
+        assert!(check_text("<?xml version=\"1.0\"?><a/>", 1000).is_ok());
         assert!(as_text(b"ok".to_vec(), "a").is_ok());
         assert!(as_text(vec![0xff, 0xfe], "a").is_err());
         assert!(as_text(b"MZ\0\0".to_vec(), "a").is_err());
