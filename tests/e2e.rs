@@ -1510,6 +1510,13 @@ async fn the_settings_app_manages_folders_over_the_control_channel() {
         "{deny}"
     );
     assert!(
+        deny["never_changed"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(".git")),
+        "{deny}"
+    );
+    assert!(
         deny["own_dirs"]
             .as_array()
             .unwrap()

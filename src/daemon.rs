@@ -765,8 +765,18 @@ impl Daemon {
             .iter()
             .map(|p| p.to_path_buf())
             .collect();
+        let never_changed: Vec<&str> = crate::policy::DEFAULT_WRITE_DENY
+            .iter()
+            .copied()
+            .filter(|p| {
+                !removed
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(p.trim_end_matches('/')))
+            })
+            .collect();
         json!({
             "builtin": builtin,
+            "never_changed": never_changed,
             "extra": config.deny.extra,
             "removed": removed,
             "own_dirs": own,

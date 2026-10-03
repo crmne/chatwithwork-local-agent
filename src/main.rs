@@ -489,11 +489,16 @@ fn status(paths: &Paths, json: bool) -> Result<()> {
     }
     for r in roots {
         println!(
-            "  {:<20} {:<20} index {} ({} files){}  {}",
+            "  {:<20} {:<20} index {} ({} files){}{}  {}",
             str(&r["id"]),
             str(&r["label"]),
             str(&r["index"]),
             r["indexed_files"].as_u64().unwrap_or(0),
+            if r["writable"] == Value::Bool(true) {
+                ", changes allowed"
+            } else {
+                ""
+            },
             if r["available"] == Value::Bool(false) {
                 " UNAVAILABLE"
             } else {
