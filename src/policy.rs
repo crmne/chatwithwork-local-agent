@@ -121,6 +121,19 @@ pub const DEFAULT_WRITE_DENY: &[&str] = &[
     ".config/nushell",
     ".config/powershell",
     "Microsoft.PowerShell_profile.ps1",
+    // Git and terminal settings that run commands (core.fsmonitor, hooks)
+    ".gitconfig",
+    ".config/git",
+    ".tmux.conf",
+    ".config/tmux",
+    // Desktop sessions and window managers that run commands at login
+    ".xinitrc",
+    ".xprofile",
+    ".xsession",
+    ".xsessionrc",
+    ".config/hypr",
+    ".config/i3",
+    ".config/sway",
     // Autostart and services
     ".config/autostart",
     ".config/systemd",
@@ -369,6 +382,8 @@ mod tests {
             "/home/u/.bashrc",
             "/home/u/proj/.vscode/tasks.json",
             "/home/u/.config/autostart/x.desktop",
+            "/home/u/.gitconfig",
+            "/home/u/.config/hypr/hyprland.conf",
             "/Users/u/Library/LaunchAgents/x.plist",
             "/C:/Users/u/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.txt",
             "/home/u/proj/.envrc",

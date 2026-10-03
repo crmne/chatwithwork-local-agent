@@ -646,6 +646,60 @@ fn refuses_folders_that_hold_a_shared_folder() {
 }
 
 #[test]
+fn folders_shared_read_only_stay_read_only_inside_writable_ones() {
+    let f = fixture();
+    let inner = f.docs.join("private");
+    fs::create_dir_all(&inner).unwrap();
+    fs::write(inner.join("keep.md"), "keep").unwrap();
+    let paths = Paths::under(&f.base.join("cww4"));
+    let root = |id: &str, path: &Path, writable| Root {
+        id: id.into(),
+        label: id.into(),
+        path: path.to_path_buf(),
+        follow_symlinks: false,
+        writable,
+    };
+    let mut config = Config {
+        roots: vec![root("docs", &f.docs, true), root("private", &inner, false)],
+        ..Config::default()
+    };
+    config.index.enabled = false;
+    let reader = Arc::new(Reader::new(&config, &paths, Changes::default()).unwrap());
+    let writer = Writer::new(
+        reader,
+        Arc::new(Limiter::new(Limits::default())),
+        Trash::new(paths.home_trash.clone()),
+    );
+    let refused = writer.create(&CreateRequest {
+        path: "docs:private/new.md".into(),
+        content: "x".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::NotWritable);
+    let refused = writer.mkdir(&MkdirRequest {
+        path: "docs:private/a/b".into(),
+        parents: true,
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::NotWritable);
+    let refused = writer.move_entry(&MoveRequest {
+        from: "docs:notes.md".into(),
+        to: "docs:private/notes.md".into(),
+        replace: false,
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::NotWritable);
+    assert!(!inner.join("new.md").exists() && !inner.join("a").exists());
+    writer
+        .create(&CreateRequest {
+            path: "docs:public.md".into(),
+            content: "x".into(),
+            dry_run: false,
+        })
+        .unwrap();
+}
+
+#[test]
 fn counts_changes_against_their_own_budget() {
     let f = fixture_with(Limits {
         changes_per_minute: 2,

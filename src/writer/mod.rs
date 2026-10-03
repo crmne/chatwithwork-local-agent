@@ -356,6 +356,27 @@ impl Writer {
         Ok(())
     }
 
+    /// A folder shared on its own as read-only stays read-only, even inside
+    /// a shared folder that allows changes.
+    fn check_nested(view: &ChangeView, root: &RootHandle, abs: &Path) -> Result<(), ToolError> {
+        let inner = view
+            .configured
+            .iter()
+            .filter(|other| other.id != root.id && !other.writable)
+            .find(|other| other.path.starts_with(&root.path) && abs.starts_with(&other.path));
+        match inner {
+            Some(other) => Err(ToolError::new(
+                ErrorCode::NotWritable,
+                format!(
+                    "This path is inside “{}”, which is shared read-only. The person can allow \
+                     changes for it in the Local Agent on their computer.",
+                    other.label
+                ),
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Parse `path`, check its folder allows changes and both deny lists,
     /// and open the folder it is in.
     fn target(&self, view: &ChangeView, path: &str) -> Result<Target, ToolError> {
@@ -371,6 +392,7 @@ impl Writer {
         };
         let abs = root.abs_path(&parsed.rel);
         Self::check_denied(view, &abs)?;
+        Self::check_nested(view, &root, &abs)?;
         let parent = RelPath::parse(
             &parsed.rel.components()[..parsed.rel.components().len() - 1].join("/"),
         )?;
@@ -798,6 +820,7 @@ impl Writer {
         for (i, part) in parsed.rel.components().iter().enumerate() {
             rel = rel.join(part);
             Self::check_denied(&view, &root.abs_path(&rel))?;
+            Self::check_nested(&view, &root, &root.abs_path(&rel))?;
             match dir.entry(OsStr::new(part))? {
                 Some(stat) if stat.kind == EntryKind::Dir => {
                     dir = dir.subdir(OsStr::new(part))?;
