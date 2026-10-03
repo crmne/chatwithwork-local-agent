@@ -1,8 +1,9 @@
 //! Chat with Work Local Agent.
 //!
-//! `cww` shares chosen folders with Chat with Work through four read-only
-//! MCP tools, over a WebSocket it opens itself. See README.md for the threat
-//! model and PROTOCOL.md for the wire protocol.
+//! `cww` shares chosen folders with Chat with Work through MCP tools, over a
+//! WebSocket it opens itself: four read-only tools, and tools that change
+//! files in the folders where the user allows changes. See README.md for the
+//! threat model and PROTOCOL.md for the wire protocol.
 
 pub mod audit;
 pub mod auth;

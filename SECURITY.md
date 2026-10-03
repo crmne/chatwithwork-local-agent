@@ -1,6 +1,6 @@
 # Security policy
 
-The Chat with Work Local Agent (`cww`) reads files on people's computers on behalf of a remote server. We treat any way to read something the user didn't share, or to make the daemon do something other than answer its four read-only tools, as a serious vulnerability.
+The Chat with Work Local Agent (`cww`) reads files on people's computers on behalf of a remote server, and changes them in the folders where the user allows changes. We treat any way to read something the user didn't share, to change anything outside a folder that allows changes, to delete anything for good, or to make the daemon do something other than answer its tools, as a serious vulnerability.
 
 ## Reporting a vulnerability
 
@@ -16,7 +16,8 @@ We will acknowledge your report within 3 working days, keep you updated, and cre
 ## In scope
 
 - Reading anything outside the shared folders, or anything on the deny list, through the tunnel: path traversal, symlinks, hard links, races, encoding tricks, or parser bugs.
-- Getting the daemon to write, delete, execute, or open network connections other than its own tunnel.
+- Getting the daemon to write, move or delete anything outside a folder where the user allowed changes, or on the deny list or the never-changed list there; to delete anything without it going to the system trash; to write anything that runs (a program, a launcher, an execute bit); to execute anything; or to open network connections other than its own tunnel.
+- Turning on changes for a folder from the server, or keeping them after the user turned them off.
 - Bypassing the daemon's rate and volume limits, pause, or audit log.
 - Stealing or replaying device credentials or access tokens, or pairing a device without the user's approval.
 - Driving the daemon through its control socket as another local user.

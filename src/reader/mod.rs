@@ -5,7 +5,9 @@
 //! [`Reader::search`], [`Reader::list`], [`Reader::read`]). In phase 3 it
 //! moves into its own sandboxed process (Landlock/seccomp, Seatbelt) with no
 //! network access, and the network side talks to it over a socketpair using
-//! these same types. Nothing else in the daemon opens user files.
+//! these same types. Nothing else in the daemon opens user files, except
+//! the writer (`crate::writer`), which makes changes through the same safe
+//! resolution (`safe_fs::ChangeDir`) in folders that allow them.
 
 pub mod extract;
 pub mod grep;

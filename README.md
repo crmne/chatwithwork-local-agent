@@ -1,8 +1,8 @@
 # Chat with Work Local Agent
 
-The Chat with Work Local Agent (`cww` on the command line) is the open-source companion for [Chat with Work](https://chatwithwork.com). It lets the assistant search and read the folders you choose on your Mac, Windows PC or Linux machine, and nothing else.
+The Chat with Work Local Agent (`cww` on the command line) is the open-source companion for [Chat with Work](https://chatwithwork.com). It lets the assistant search and read the folders you choose on your Mac, Windows PC or Linux machine, and nothing else, and change files only in the folders where you allow it.
 
-- **Four read-only tools:** `roots`, `search`, `list` and `read`. There is no code that writes, deletes, or runs anything.
+- **Read-only unless you say otherwise:** four read-only tools, `roots`, `search`, `list` and `read`. Turn on "Allow changes" for a shared folder, on your computer, and the assistant can also create, edit, move and delete files there, each change approved by you in Chat with Work. Old versions and deleted files go to your system trash; nothing is deleted for good, and nothing that runs is ever written.
 - **Only the folders you share,** and never the secrets inside them. SSH keys, `.env` files, keychains and browser profiles stay private even inside a shared folder.
 - **Outbound only.** The daemon opens one WebSocket to Chat with Work. No port is opened on your machine, and no third-party relay sees your data.
 - **Local index.** Full-text search (BM25) runs on your machine. Only the results of a specific tool call leave it: a few snippets, a directory listing, or a chunk of one file.
@@ -93,10 +93,14 @@ The device key never leaves your computer. It is kept in the macOS Keychain, the
 ```sh
 cww roots add ~/Documents/Work --label "Work docs"
 cww roots list
+cww roots allow-changes work-docs   # let Chat with Work change files there too
+cww roots deny-changes work-docs    # read-only again
 cww roots remove work-docs
 ```
 
 Share narrow folders: anything inside a shared folder can be read by the assistant, except files on the deny list. `cww` refuses to share `/`, your whole home folder, or system directories unless you pass `--i-know`.
+
+A shared folder is read-only until you allow changes in it, with `cww roots allow-changes` (or `--allow-changes` on `add`), the `w` key on the terminal UI's Shared folders page, or the "Allow changes" switch in the desktop app. Then the assistant can create, edit, move and delete files there. Chat with Work asks you before each change, the previous version of anything replaced and everything deleted goes to the system trash (the Trash on macOS, the Recycle Bin on Windows, your desktop's trash on Linux), and the activity log records every change. Nothing on the server can turn changes on. See [docs/file-changes.md](docs/file-changes.md).
 
 Symlinks are not followed. `--follow-symlinks` allows links that stay inside the folder; links that point outside are refused either way.
 
@@ -214,6 +218,20 @@ It is a client of the control channel, like the terminal UI. See [docs/settings-
 | `list` | Lists one folder, 200 entries per page. |
 | `read` | Returns the text of one file, 32 000 characters at a time. PDF, Word, PowerPoint and Excel files are converted to text. |
 
+In folders where you allow changes, and only while at least one folder does:
+
+| Tool | What it does |
+|---|---|
+| `create` | Creates a text file. Never overwrites anything. |
+| `write` | Replaces a text file's content, or adds to its end. The previous version goes to the trash. |
+| `edit` | Replaces one exact passage of a text file. The previous version goes to the trash. |
+| `mkdir` | Creates a folder. |
+| `move` | Moves or renames a file or folder, within or between folders that allow changes. A file it replaces goes to the trash. |
+| `delete` | Moves a file or folder to the system trash. |
+| `create_document` | Creates a Word document from Markdown, or an Excel workbook from rows of values (never formulas). Replacing one puts the old file in the trash; existing documents are never edited in place. |
+
+Chat with Work asks before each change; "Allow for the rest of this chat" can cover writes, never a replace, a move over a file, or a delete. Programs, scripts that run when opened, shortcuts and Office files with macros are never made, no file gets an execute bit, and version control internals, shell startup files, autostart folders and editor task settings are never changed.
+
 Paths always look like `work-docs:plans/q3.pdf`.
 
 ## Performance
@@ -247,17 +265,24 @@ id = "work-docs"
 label = "Work docs"
 path = "/Users/carmine/Documents/Work"
 follow_symlinks = false
+writable = false      # true lets Chat with Work change files here (cww roots allow-changes)
 
 [deny]
 extra = ["*.secret", "Clients/Confidential"]  # more patterns to block
-remove = ["*.key"]                             # built-in patterns to drop (Keynote files use .key)
-allow_hardlinks = false
+remove = ["*.key"]                             # built-in patterns to drop (Keynote files use .key);
+                                               # also drops paths from the never-changed list
+allow_hardlinks = false                        # reads only: changes never touch hard links
 
 [limits]
 calls_per_minute = 120
 read_chars_per_call = 32000
 read_chars_per_chat_hour = 256000
 read_chars_per_hour = 2000000
+changes_per_minute = 30          # changes: create, write, edit, mkdir, move, delete
+changes_per_day = 500
+change_bytes_per_hour = 52428800 # 50 MiB written by changes
+max_change_file_bytes = 10485760 # largest file a change writes or copies
+max_change_entries = 1000        # most files a folder move or delete may carry
 
 [index]
 enabled = true
@@ -281,6 +306,7 @@ Run `cww reload` after editing the file. The `cww roots` commands reload the dae
 | `~/.local/state/cww/audit.jsonl` | The audit log (`0600`, rotated at 10 MB, never uploaded) |
 | `~/.local/state/cww/history` | The questions and commands typed in `cww tui`, for `↑` (`0600`, never uploaded) |
 | `$XDG_RUNTIME_DIR/cww/cww.sock` | The control socket for the CLI (`0600`) |
+| `~/.local/share/Trash` (`$XDG_DATA_HOME/Trash`) | Where changes put old versions and deleted files on Linux: the desktop's own trash, or `.Trash-$uid` at the top of another filesystem. `~/.Trash` (or a volume's `.Trashes`) on macOS, the Recycle Bin on Windows. |
 
 The same layout is used on macOS. On Windows everything lives under `%LOCALAPPDATA%\cww` (`config`, `data`, `state`), and the control channel is a named pipe. `CWW_HOME=/some/dir` puts all of it under one directory.
 
@@ -317,8 +343,10 @@ The rule behind the design: **every control that must hold against a compromised
 
 | Threat | How cww handles it |
 |---|---|
-| A bug in cww, or a malicious document that exploits a parser | The daemon runs in a kernel sandbox: Landlock on Linux, Seatbelt on macOS. It can read the shared folders, its own directories and system libraries, and write only its own directories, so the rest of your home folder (`~/.ssh`, other projects, the keychain files) is out of reach even for code the daemon didn't mean to run. `cww status --json` shows the sandbox's state. |
-| A compromised server, admin or database sends arbitrary tool calls | Only four read-only tools exist. Reads are confined to your shared folders and the deny list. Rate and volume limits, the audit log, and `cww pause` all run locally. |
+| A bug in cww, or a malicious document that exploits a parser | The daemon runs in a kernel sandbox: Landlock on Linux, Seatbelt on macOS. It can read the shared folders, its own directories and system libraries, and write only its own directories plus, when you allow changes, exactly those folders and the trash their files go to (create, write, rename and remove, never execute), so the rest of your home folder (`~/.ssh`, other projects, the keychain files) is out of reach even for code the daemon didn't mean to run. `cww status --json` shows the sandbox's state. |
+| A compromised server, admin or database sends arbitrary tool calls | Unless you allow changes in a folder, only four read-only tools exist. Reads are confined to your shared folders and the deny list. Rate and volume limits, the audit log, and `cww pause` all run locally. For folders where you allow changes, see below. |
+| A change escaping its folder, or hitting what it shouldn't | Changes resolve their folder as reads do but never through a symlink or junction, then create, rename and remove relative to that open folder (`O_CREAT \| O_EXCL \| O_NOFOLLOW`, `renameat2(RENAME_NOREPLACE)`, `renamex_np(RENAME_EXCL)`, handle renames without `ReplaceIfExists` on Windows). Links, hard links, FIFOs, sockets, devices, executables, read-only files and other users' files are never changed. The deny list covers every source and destination, and everything inside a folder that is moved or deleted; a second built-in list keeps `.git`, shell startup files, autostart and launch agents, and editor task settings unchanged. Nothing that runs is written: no programs, launchers, shortcuts or macro documents, and never an execute bit. |
+| Losing files to a change | Nothing is deleted for good: every replaced version and every deleted file goes to the system trash, and a change the trash can't take is refused. Writes go to a temporary file that is flushed and then renamed into place, so a crash never leaves half a file. |
 | Prompt injection ("read ~/.ssh/id_ed25519") | Paths outside shared folders don't resolve at all. The deny list applies inside shared folders, and it can only be changed in the local config file. |
 | Path tricks (`..`, absolute paths, symlinks, `/a/root2` vs `/a/root`, hard links) | Paths are parsed and rejected before any filesystem access. Resolution uses `openat2(RESOLVE_BENEATH \| RESOLVE_NO_MAGICLINKS \| RESOLVE_NO_SYMLINKS)` on Linux, a component-by-component `O_NOFOLLOW` walk on macOS followed by a check of the opened handle's real path (`F_GETPATH`), and on Windows a walk that opens each component as a reparse point, refuses symlinks and junctions, and checks the final handle's real path (`GetFinalPathNameByHandleW`), which also defeats 8.3 short names and alternate data streams. Checks run on the opened handle, not on strings, which rules out the CVE-2025-53109/53110 class of bugs. Files with more than one hard link, FIFOs, sockets and devices are refused. |
 | Other users on the same machine | The control socket is `0600` inside a `0700` directory, and connections from another UID are refused. On Windows the named pipe admits only the user's SID. Keys live in the OS keychain. |
@@ -326,13 +354,18 @@ The rule behind the design: **every control that must hold against a compromised
 | A stolen access token | It is useless without the device key: every connection needs a fresh proof signed by that key. |
 | Revocation | Revoking a device in Settings closes its socket and makes every later token refresh fail. The daemon then stops reconnecting. |
 
+**Allowing changes trusts the server's approvals.** Chat with Work asks you before each change, but that approval happens on the server, and the daemon can't tell a real approval from a forged one. So a compromised server could change files in folders where you allow changes, without asking you. What limits the damage, whatever the server does: changes are off unless you turn them on for a folder, on your computer; everything replaced or deleted is in the system trash, where you can restore it; changes have their own budgets (30 a minute, 500 a day, 50 MB written an hour, 10 MB per file); every change is in the local audit log with what it did and where the old version went; and the deny list and the never-changed list hold. Allow changes only in folders whose contents you could restore, and `cww pause` (or the switch) stops everything at once.
+
 **Default deny list:** matched on path components, case-insensitively, even inside shared folders.
 
-`.ssh`, `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.config/gh/hosts.yml`, `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `*.kdbx`, `*.1pux`, `.password-store`, `.local/share/keyrings`, `Library/Keychains`, `*.keychain`, `*.keychain-db`, Windows credential stores (`AppData/Roaming/Microsoft/Credentials`, `Protect`, `Crypto`, `Vault`, `NTUSER.DAT`), `Library/Mail`, `Library/Messages`, browser profiles (Chrome, Chromium, Brave, Edge, Firefox, Safari, cookies), `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers`, `/etc/ssl/private`, and cww's own config, index, and log directories.
+`.ssh`, `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.config/gh/hosts.yml`, `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_*`, `*.kdbx`, `*.1pux`, `.password-store`, `.local/share/keyrings`, `Library/Keychains`, `*.keychain`, `*.keychain-db`, Windows credential stores (`AppData/Roaming/Microsoft/Credentials`, `Protect`, `Crypto`, `Vault`, `NTUSER.DAT`), `Library/Mail`, `Library/Messages`, browser profiles (Chrome, Chromium, Brave, Edge, Firefox, Safari, cookies), `/etc/shadow`, `/etc/gshadow`, `/etc/sudoers`, `/etc/ssl/private`, trashes (`.local/share/Trash`, `.Trash`, `.Trash-*`, `.Trashes`, `$Recycle.Bin`), and cww's own config, index, and log directories.
+
+**Never changed,** even in a folder that allows changes (readable unless the deny list says otherwise): `.git`, `.hg`, `.svn`, `.bzr`, `.jj`, shell startup files (`.bashrc`, `.bash_profile`, `.bash_login`, `.bash_logout`, `.profile`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin`, `.zlogout`, `.config/fish`, `.config/nushell`, `.config/powershell`, `Microsoft.PowerShell_profile.ps1`), autostart and services (`.config/autostart`, `.config/systemd`, `.config/environment.d`, `.local/share/applications`, `.local/share/systemd`, `Library/LaunchAgents`, `Library/LaunchDaemons`, `Library/StartupItems`, the Windows Start Menu), `.vscode`, `.idea`, `.envrc`, `.direnv`, `.cargo`, `desktop.ini` and `autorun.inf`.
 
 ### What it does not protect against
 
 - **Anything inside a shared folder that isn't on the deny list can be read.** Share narrow folders. A secret stored in `notes.txt` is readable.
+- **In a folder that allows changes, a compromised server can change files without your approval** (see above): recoverable from the trash, within the budgets, and logged, but changed. A change to source code or a script can also make something run later, when you build or run it yourself.
 - **Results do reach Chat with Work and the model provider.** "Private" means your files and the index stay on your computer, and only the snippets and chunks needed for an answer leave it. Once they leave, the server's retention and sharing rules apply.
 - **A malicious file could exploit a parser** (PDF, Office). Extraction runs with size caps and panic isolation, inside the kernel sandbox, which keeps it to the shared folders. The sandboxed daemon can still use the network, so an exploit could send what it can read to someone else; a separate reader process without network access is planned, and the `reader` module is structured for that split.
 - **Windows has no kernel sandbox yet.** The path checks hold there as everywhere, but nothing stops a bug at the kernel level.
@@ -341,7 +374,7 @@ The rule behind the design: **every control that must hold against a compromised
 
 ### The sandbox
 
-`cww daemon run` starts a small supervisor, which runs the daemon itself as a confined child. Landlock and Seatbelt can't be widened once they are applied, so when you share a folder the current sandbox doesn't cover, the daemon exits and the supervisor starts it again with rules that do; it reconnects within a second. Turn it off with `[sandbox] enabled = false` or `cww daemon run --no-sandbox` if it gets in the way, and please report why.
+`cww daemon run` starts a small supervisor, which runs the daemon itself as a confined child. Landlock and Seatbelt can't be widened once they are applied, so when you share a folder the current sandbox doesn't cover, or allow or stop changes in one, the daemon exits and the supervisor starts it again with rules that fit; it reconnects within a second. Folders that allow changes get exactly the Landlock rights a change needs (write, make files and folders, remove, rename across folders, truncate; never execute), their trash gets only the rights to take items in, and every other shared folder stays read-only to the kernel. Turn it off with `[sandbox] enabled = false` or `cww daemon run --no-sandbox` if it gets in the way, and please report why.
 
 On Linux, Landlock needs kernel 5.13 or newer with Landlock enabled (the default on current Ubuntu, Debian, Fedora and Arch kernels); an older kernel runs the daemon unconfined and says so in `cww status --json`.
 
@@ -361,12 +394,13 @@ cargo fmt --check
 cargo deny check                            # licenses, advisories, bans, sources
 ```
 
-`tests/e2e.rs` runs a real daemon against a fake Chat with Work server: DPoP-checked token endpoint, device flow, and an Action Cable WebSocket. It covers reads outside the roots, denied secrets, symlink, junction and hard-link escapes, pause, and revocation. CI runs everything on Linux, macOS and Windows, and builds the Nix package.
+`tests/e2e.rs` runs a real daemon against a fake Chat with Work server: DPoP-checked token endpoint, device flow, and an Action Cable WebSocket. It covers reads outside the roots, denied secrets, symlink, junction and hard-link escapes, pause, revocation, and every change tool with its escapes, the deny lists, read-only folders, limits and the trash. `tests/sandbox.rs` checks under the real kernel sandbox that only folders that allow changes, and their trash, can be written. CI runs everything on Linux, macOS and Windows, and builds the Nix package.
 
 | Module | Role |
 |---|---|
 | `reader` | Everything that touches your files: safe path resolution, extraction, the index, grep, watching. This is the future sandboxed process. |
-| `tools` | The MCP server (via [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk)): four tools, limits, audit. |
+| `tools` | The MCP server (via [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk)): the tools, limits, audit. |
+| `writer`, `trash` | Changes in folders that allow them (path rules, kinds of file, Word and Excel documents), and the system trash on each platform. |
 | `tunnel` | The outbound WebSocket, framing, reconnects. |
 | `auth` | Device key, DPoP proofs, device flow, secret storage. |
 | `daemon`, `control`, `service` | The daemon, its control channel ([CONTROL.md](CONTROL.md)), and systemd, launchd and Scheduled Task registration. |

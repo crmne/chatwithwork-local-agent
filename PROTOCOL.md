@@ -21,7 +21,7 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119.
 
 ## 1. Roles and overview
 
-- The **daemon** runs on the user's computer. It is an MCP *server* that exposes four read-only tools.
+- The **daemon** runs on the user's computer. It is an MCP *server* that exposes four read-only tools, and seven change tools while at least one shared folder allows changes (section 8.7).
 - The **server** is Chat with Work. It is the MCP *client*: the model loop runs there and calls the tools.
 - The daemon opens the only connection, outbound, to `wss://<server>/local_agent`. The server never connects to the daemon.
 - Over that socket the server sends JSON-RPC requests and the daemon answers them. The daemon never sends requests: no sampling, no elicitation, no roots.
@@ -301,7 +301,7 @@ A string or a number is accepted. The daemon uses it for the per-chat read budge
 |---|---|
 | `server/discover` | `supportedVersions`, `capabilities: {"tools":{}}`, and `_meta["io.modelcontextprotocol/serverInfo"] = {"name":"cww","version":…}`. |
 | `initialize` | Legacy handshake (7.1). `serverInfo.name` is `cww`, and the result carries instructions. |
-| `tools/list` | The four tools (section 8), in one page. |
+| `tools/list` | The four read-only tools (section 8), then the change tools while a shared folder allows changes (section 8.7), in one page. The list only changes when the user turns changes on or off for a folder, and the daemon then reconnects, so a server that lists tools on each new connection is always current. |
 | `tools/call` | See section 8. |
 | `notifications/initialized`, `notifications/cancelled` | Accepted. Cancelling abandons a call in progress. |
 | `resources/*`, `prompts/*`, `completion/complete`, `logging/setLevel`, anything else | `-32601` method not found. |
@@ -310,11 +310,11 @@ The daemon ignores JSON-RPC responses from the server, since it never sends requ
 
 ### 7.4 Tool naming on the server
 
-The daemon's tool names are `roots`, `search`, `list` and `read`, with no prefix. The server namespaces them per device, for example `local_<device_id>_read`, following its existing `mcp_<id>_` convention.
+The daemon's tool names are `roots`, `search`, `list` and `read`, and the change tools `create`, `write`, `edit`, `mkdir`, `move`, `delete` and `create_document`, with no prefix. The server namespaces them per device, for example `local_<device_id>_read`, following its existing `mcp_<id>_` convention.
 
 ## 8. Tools
 
-Every tool is annotated `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. Unknown argument keys are rejected with `invalid_argument`.
+The read-only tools (8.3 to 8.6) are annotated `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`. The change tools carry their own annotations (8.7). Unknown argument keys are rejected with `invalid_argument`.
 
 ### 8.1 Paths
 
@@ -356,12 +356,12 @@ Arguments: none (`{}`).
 ```json
 {
   "roots": [
-    { "id": "work-docs", "label": "Work docs", "available": true, "index": "ready", "indexed_files": 1532 }
+    { "id": "work-docs", "label": "Work docs", "available": true, "writable": false, "index": "ready", "indexed_files": 1532 }
   ]
 }
 ```
 
-`index` is `pending`, `indexing`, `ready`, `error` or `disabled`. `available` is false when the folder is missing, for example on an unmounted drive. Labels are chosen by the user and are the only description of a root the server gets.
+`writable` is true when the user allowed changes in the folder; the change tools only work there. `index` is `pending`, `indexing`, `ready`, `error` or `disabled`. `available` is false when the folder is missing, for example on an unmounted drive. Labels are chosen by the user and are the only description of a root the server gets.
 
 ### 8.4 `search`
 
@@ -432,6 +432,142 @@ Arguments: none (`{}`).
 
 `next_offset` is `null` at the end of the file. PDF, DOCX, PPTX (slides marked `--- Slide N ---`), and XLSX/XLS/ODS (one `## Sheet` section per sheet, tab-separated rows) are converted to text. Other files are read as UTF-8 (invalid bytes are replaced) unless they look binary, which gives `unsupported`. Files over 64 MiB give `too_large`.
 
+### 8.7 Changes
+
+The user allows changes per shared folder, on their computer (`writable = true` in `config.toml`, `cww roots allow-changes`, or a switch in the terminal UI and the desktop app). Nothing the server sends can turn it on. While no folder allows changes, `tools/list` has only the four read-only tools and a call to a change tool is an unknown tool (`-32602`). While one does, these seven are listed after them:
+
+| Tool | Does | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `_meta["com.chatwithwork/writeWhen"]` |
+|---|---|---|---|---|---|
+| `create` | New text file; fails if the path exists | false | false | false | |
+| `write` | Replace a text file's content, or append to it; creates it if missing | false | **true** | false | `{"mode": "append"}` |
+| `edit` | Replace one exact span of a text file | false | false | false | |
+| `mkdir` | New folder, `parents` optional | false | false | true | |
+| `move` | Move or rename a file or folder; `replace` optional | false | **true** | false | `{"replace": false}` |
+| `delete` | Move a file or folder to the system trash | false | **true** | false | |
+| `create_document` | New Word (`.docx`) or Excel (`.xlsx`) file; `replace` optional | false | **true** | false | `{"replace": false}` |
+
+All of them are `openWorldHint: false`.
+
+**`writeWhen`.** MCP annotations can't vary with arguments, so a tool that is destructive only with some arguments is annotated `destructiveHint: true` (the worst case) and names, in `_meta["com.chatwithwork/writeWhen"]`, the argument values that make a call a plain write: the call is not destructive when every argument listed has the value given, where a missing argument counts as its default (`mode` defaults to `"replace"`, `replace` to `false`). So `write` with `mode: "append"`, `move` without `replace` (or with `replace: false`), and `create_document` without `replace` are writes; `write` without `mode` (a replace), `move` or `create_document` with `replace: true`, and every `delete` are destructive. A server that ignores the hint treats them all as destructive, which is safe.
+
+**Rules every change follows**, in the daemon, whatever the server decided:
+
+- The folder must allow changes (`not_writable`), and the path follows 8.1. The shared folder itself can't be changed, moved or deleted (`invalid_path`).
+- Folders are resolved on handles as reads are, but **never through a symlink or junction**, even in a folder that follows links for reads, and the change happens relative to the open folder handle. Symlinks, files with more than one hard link, FIFOs, sockets and devices are never changed, moved or deleted (`denied`); a symlink is never followed.
+- The deny list applies to every path a change touches, sources and destinations, and to everything inside a folder that is moved or deleted (`denied`). So does a second list of paths that can be read but are **never changed**: version control internals (`.git`, `.hg`, `.svn`, `.bzr`, `.jj`), shell startup files (`.bashrc`, `.zshrc`, `.profile`, ...), autostart and launch agents, editor and tool settings that run commands (`.vscode`, `.idea`, `.envrc`, `.direnv`, `.cargo`), and `desktop.ini` and `autorun.inf` (`denied`).
+- **Nothing that runs is made:** no name with an extension that runs or launches something on any of the three systems (`.exe`, `.bat`, `.ps1`, `.lnk`, `.url`, `.desktop`, `.app`, `.command`, `.jar`, `.so`, Office files with macros, and more; also `.js` on Windows), and no file ever gets an execute bit. Existing executable files, files marked read-only, and files owned by another user are never changed (`not_changeable` or `denied`); executables and read-only files can still go to the trash. New names can't contain control characters, direction marks, `\ / : * ? " < > |`, start with a space or end with a dot or a space, or be a Windows device name (`invalid_path`).
+- **Text tools write text.** `create`, `write` and `edit` take UTF-8 without NUL characters, refuse names of documents and media that text would corrupt (`.pdf`, `.docx`, `.xlsx`, `.zip`, images, ...; `not_changeable`, pointing `.docx` and `.xlsx` to `create_document`), and only change existing files that are UTF-8 text (`not_changeable`). `edit` and `append` keep the file's line endings and byte order mark.
+- **Nothing is deleted for good.** A replaced, appended or edited file's previous version, a deleted file or folder, and a file a `move` or `create_document` replaces all go to the **system trash** on the user's computer: the freedesktop.org trash on Linux (`$XDG_DATA_HOME/Trash`, or `$topdir/.Trash/$uid` or `$topdir/.Trash-$uid` for other filesystems, with a `.trashinfo` record so file managers can restore it), the Trash on macOS (`~/.Trash`, or `.Trashes/$uid` on other volumes), and the Recycle Bin on Windows (with the `$I` record Restore uses). When the trash can't take an item (a network drive, a removable drive on Windows, a mount inside the folder), the change is refused with `trash_unavailable` and nothing changes.
+- **Atomic.** New content is written to a hidden file beside the target and flushed to disk, the previous version moves to the trash, and the new file is renamed into place without replacing anything (`renameat2(RENAME_NOREPLACE)`, `renamex_np(RENAME_EXCL)`, or a handle rename without `ReplaceIfExists`). A crash leaves the old file, the new file, or the old one in the trash; never half a file. A move to another filesystem copies, then moves the original to the trash.
+- **Budgets** (section 10): changes per minute and per day and bytes written per hour, separate from the read budgets, and a size cap per file. Dry runs and refused calls don't count.
+- Changes run one at a time, and every one is in the local audit log with its effect, the paths before and after, the bytes written, and where the old version went in the trash.
+
+**Dry runs.** Every change tool takes `dry_run: true`: the daemon runs every check above against the files as they are now and answers what the call would do (`"dry_run": true`), without changing anything or counting against the budgets. For `write` and `edit` the answer includes a unified diff (`diff`, at most 32 KiB) and the file's current SHA-256 (`previous.sha256`). A server can make a dry run itself, with the model's arguments plus `dry_run: true`, to fill the approval card, and then pass the SHA-256 back as `expected_sha256` when the user approves, so `write` and `edit` fail with `conflict` if the file changed in between. Dry runs are logged locally like other calls.
+
+**Results.** A change answers:
+
+```json
+{
+  "path": "work-docs:plans/q4.md",
+  "effect": "replaced",
+  "dry_run": false,
+  "kind": "file",
+  "size": 2100,
+  "sha256": "9f2c…",
+  "previous": { "size": 2048, "modified": "2026-09-20T08:14:03Z", "sha256": "4b1a…", "in_trash": true }
+}
+```
+
+| Field | Present | Meaning |
+|---|---|---|
+| `path` | always | The path the change produced: the destination of a move. |
+| `effect` | always | `created`, `replaced`, `appended`, `edited`, `created_folder`, `moved`, `trashed`, or `unchanged` (`mkdir` of a folder that exists). |
+| `dry_run` | always | True when nothing changed. |
+| `kind` | always | `file` or `dir`. |
+| `from` | `move` | Where it came from. |
+| `size`, `sha256` | files written | The new file's size and SHA-256. |
+| `previous` | replaced, edited, appended, deleted, or replaced by a move | What was there: `size` (for a folder, the bytes it holds), `modified`, `sha256` (text changes only), and `in_trash`, true once it is in the trash. |
+| `diff` | dry runs of `write` and `edit` | A unified diff, cut at 32 KiB. |
+| `entries` | folders moved or deleted, `mkdir` with `parents` | How many files and folders a folder holds, or how many folders were made. |
+
+Where the trash is on the computer is never sent; only the local audit log has it.
+
+### 8.8 `create`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `path` | string, required | The new file. Its folder must exist (`not_found` says to use `mkdir`). |
+| `content` | string, required | UTF-8 text. |
+| `dry_run` | boolean | |
+
+Fails with `exists` if anything is at the path. Effect `created`.
+
+### 8.9 `write`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `path` | string, required | |
+| `content` | string, required | The new text, or the text to add. |
+| `mode` | `"replace"` (default) or `"append"` | |
+| `expected_sha256` | string | Hex SHA-256 the file's current content must have (`conflict` otherwise, or when the file is gone). |
+| `dry_run` | boolean | |
+
+Effect `replaced` or `appended`, or `created` when the file didn't exist. The previous version goes to the trash.
+
+### 8.10 `edit`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `path` | string, required | An existing text file. |
+| `old_text` | string, required | Must appear exactly once. Not empty. |
+| `new_text` | string, required | Different from `old_text`. |
+| `expected_sha256` | string | As for `write`. |
+| `dry_run` | boolean | |
+
+`invalid_argument` when `old_text` isn't found ("Read the file again and quote the text exactly") or appears more than once ("appears N times; include more of the surrounding text"). When the file uses Windows line endings and `old_text` has none, `\n` in both texts matches `\r\n`. Effect `edited`; the previous version goes to the trash.
+
+### 8.11 `mkdir`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `path` | string, required | |
+| `parents` | boolean | Also make missing folders on the way (`entries` says how many were made). |
+| `dry_run` | boolean | |
+
+Effect `created_folder`, or `unchanged` when the folder exists. `exists` when a file is in the way.
+
+### 8.12 `move`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `from` | string, required | A file or folder. |
+| `to` | string, required | The new path, name included; in the same shared folder or another that allows changes. |
+| `replace` | boolean | Default false. With true, a **file** already at `to` goes to the trash first; a file can only replace a file. |
+| `dry_run` | boolean | |
+
+`exists` when something is at `to` and `replace` isn't true. A folder can't move into itself, and a folder holding a shared folder or anything on the deny list can't move (`denied`), nor one holding more than the entry limit (`too_large`). Executables, read-only files and other users' files don't move. Between filesystems the item is copied (regular files and folders only, up to the size cap; `not_changeable` for folders with links, special files or programs), then the original goes to the trash. Effect `moved`, with `from`; `previous` describes a replaced file.
+
+### 8.13 `delete`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `path` | string, required | A file or folder. |
+| `dry_run` | boolean | |
+
+Moves it to the system trash, where the user can restore it. Effect `trashed`; `entries` counts what a folder held. The same refusals as a move's source apply, except that executables and read-only files may go.
+
+### 8.14 `create_document`
+
+| Argument | Type | Notes |
+|---|---|---|
+| `path` | string, required | Ends in `.docx` or `.xlsx`; anything else is `invalid_argument` (PowerPoint and macro formats aren't made). |
+| `content` | string | For `.docx`, required: the document in Markdown. Headings, paragraphs, bold, italic, strikethrough, inline code, bulleted and numbered lists (nested), quotes, code blocks and tables. Links become their text with the address after it in parentheses, never a live link; images become nothing. |
+| `sheets` | array | For `.xlsx`, required: `[{"name": "Budget", "rows": [["Item", "Cost"], ["Falcon", 10.5]], "header": true}]`. Names have 1 to 31 characters, none of `[ ] : * ? / \`, unique ignoring case. Cells are strings, numbers, booleans, or `null` for empty; never formulas (a string starting with `=` stays text). `header` bolds and freezes the first row. |
+| `replace` | boolean | Default false. With true, an existing file at the path goes to the trash and a new one is written: existing documents are never edited in place. |
+| `dry_run` | boolean | |
+
+Effect `created`, or `replaced`. `exists` without `replace`.
+
 ## 9. Errors
 
 **OAuth endpoints** return `{"error": "<code>", "error_description": "<optional>"}` with a 4xx status, using the codes above plus RFC 6749 codes. `use_dpop_nonce` triggers one retry. `invalid_grant`, `unauthorized_client` and `access_denied` on refresh mean the device is revoked.
@@ -463,12 +599,19 @@ Arguments: none (`{}`).
 | `outside_root` | Resolution would leave the root. |
 | `denied` | Deny list, a symlink (not followed), a file with more than one hard link, or a FIFO, socket or device. |
 | `not_found` | No such file or directory, or the root folder is missing right now. |
-| `not_a_file` / `not_a_directory` | Wrong kind of entry for `read` / `list`. |
-| `too_large` | The file is over the size limit. |
+| `not_a_file` / `not_a_directory` | Wrong kind of entry for `read` / `list`, or for a change. |
+| `too_large` | The file is over the size limit, or a folder holds more than a change may move. |
 | `unsupported` | The file can't be turned into text (binary, encrypted or damaged). |
-| `rate_limited` | A daemon-side rate or volume limit was hit. Try again later. |
+| `rate_limited` | A daemon-side rate or volume limit was hit, for reads or for changes. Try again later. |
 | `paused` | The user ran `cww pause`. |
+| `not_writable` | A change in a shared folder that doesn't allow changes. The message names the folder's label and says the person can allow changes on their computer. |
+| `exists` | Something is already at the path (or at `to`), and the call doesn't replace it. |
+| `not_changeable` | A kind of file the daemon never makes or changes: a program or launcher, an executable file, a binary file as text, an Office file as text. |
+| `trash_unavailable` | The system trash can't take the old version or the item, so nothing changed. |
+| `conflict` | The file changed since the caller looked (`expected_sha256`, or during the change). |
 | `internal` | Unexpected failure. |
+
+Change errors are sentences, for example `not_writable: Changes aren't allowed in the shared folder “Work docs”. The person can turn on Allow changes for it in the Local Agent on their computer.` or `trash_unavailable: The system trash can't take this item, so nothing was changed. cww never deletes a file for good.` `not_writable`, `not_changeable`, `denied`, `invalid_path`, `unknown_root`, `outside_root`, `rate_limited` and `paused` are logged as refusals, the others as errors.
 
 Messages are written for the model and the user. They never include absolute paths.
 
@@ -488,6 +631,10 @@ These are enforced by the daemon whatever the server does. The defaults can be c
 | Largest file indexed | 32 MiB |
 | JSON-RPC message size | 256 KiB |
 | Live grep time budget | 5 seconds |
+| Changes per rolling minute / day (all chats) | 30 / 500 |
+| Bytes changes may write per rolling hour | 50 MiB |
+| Largest file a change creates, edits or copies | 10 MiB |
+| Files and folders one move or delete of a folder may carry | 1000 |
 
 ## 11. Decisions this spec makes
 
@@ -509,6 +656,7 @@ These are enforced by the daemon whatever the server does. The defaults can be c
 14. **Revocation handling.** `invalid_grant`, `unauthorized_client` and `access_denied` on refresh stop the daemon's reconnect loop until `cww login`. Everything else is retried.
 15. **One server per daemon.** Open question 1 in the design is answered as one pairing at a time. `cww login` again replaces it.
 16. **Chats for the terminal** use the device's own token with a second scope, not a separate grant, and the daemon makes every call, so the terminal UI never holds a token. Answers stream over the tunnel's socket (section 12) rather than Server-Sent Events.
+17. **Changes are opt-in per folder, on the computer.** Approval of each change happens on the server, and the daemon can't tell a real approval from a forged one, so the daemon also makes every change recoverable (the system trash), bounded (budgets and caps), contained (handle-based resolution, the deny lists, the sandbox's write rights for exactly those folders) and visible (the audit log). See README.md, "Threat model".
 
 ## 12. Chats for the terminal UI
 

@@ -1,76 +1,114 @@
-# Changing files (proposal)
+# Changing files
 
-Status: proposal, 2026-10-03. Nothing here is built. Today the daemon has four read-only tools and no code that writes, deletes or runs anything, and the README and the threat model promise that. Building this changes both, so the open questions at the end need answers first.
+Status: built, 2026-10-03. The daemon can create, edit, move and delete files in the shared folders where the person allows it. Everything else stays read-only. This document is the design as built and the contract for the Chat with Work server. The wire details are in [PROTOCOL.md](../PROTOCOL.md) (sections 8.7 to 8.14, 9, 10), the control requests in [CONTROL.md](../CONTROL.md) (`roots_writable`), and the user-facing summary and threat model in the [README](../README.md).
 
-Goal: let the assistant create, edit, move, rename and delete files in the folders you shared, the way the Google Drive connector changes Drive files, with every change approved by you.
+## Decisions
 
-## The trust problem
+The proposal left five questions open. Carmine's answers, as built:
 
-The rule behind the daemon is that **every control that must hold against a compromised Chat with Work server lives in the daemon**. An approval on the web is a decision the server reports; the daemon can't tell a real approval from a forged one. So the server's approval card protects you from the model, not from a compromised server. The daemon has to make writes safe on its own:
+1. **Opt in per shared folder.** A folder is read-only until the person turns on "Allow changes" for it, on their computer: `writable = true` in `config.toml`, `cww roots allow-changes <root>` (or `cww roots add --allow-changes`), the `w` key on the terminal UI's Shared folders page, the "Allow changes" switch on the desktop app's Shared Folders page, or the `roots_writable` control request. Turning it on asks first and says what it means; turning it off doesn't. Nothing from the server can turn it on.
+2. **Confirmation happens on the web only,** in the server's approval card. There is no local confirmation mode. The README's threat model says plainly what that means (below).
+3. **Not text only.** The text tools write any text file (Markdown, text, CSV, JSON, source files), and `create_document` makes Word documents from Markdown and Excel workbooks from rows. Existing Office files are never edited in place: replacing one writes a new file and moves the old one to the trash. PowerPoint isn't made: no well-licensed Rust crate writes `.pptx` properly. Nothing that runs is ever written, and no file gets an execute bit.
+4. **The system trash,** not one of cww's own: the freedesktop.org trash on Linux, the Trash on macOS, the Recycle Bin on Windows. When the trash can't take a file, the change is refused rather than deleting anything for good.
+5. **"Allow for the rest of this chat" is fine for writes;** destructive calls (delete, replace, a move over a file) always ask. That is the server's to enforce; the annotations below make it possible.
 
-1. **Off unless you turn it on, per folder.** A shared folder stays read-only until you allow changes in it (`writable = true` in `config.toml`, a switch in the app and the TUI's Shared folders page). Nothing the server says can turn it on.
-2. **Nothing is lost.** Deleting moves to a trash the daemon keeps; overwriting or editing keeps the previous version there first. Every change can be undone from the app or `cww undo` for 30 days (configurable).
-3. **Bounded.** Separate limits for changes (for example 30 changes a minute, 500 a day, 50 MB written an hour), size caps per file, and no change to a file bigger than the read cap without a local confirmation.
-4. **Seen.** Every change is in the audit log with its before and after paths, and the app can notify you as it happens.
-5. **Optionally confirmed here.** `[changes] confirm = "local"` makes the daemon ask in the app or the TUI before every change, in addition to the web's approval. That is the only mode that holds against a compromised server; the default (`"web"`) relies on 1 to 4 to keep the damage recoverable.
+## The trust problem, and what limits the damage
+
+The rule behind the daemon is that every control that must hold against a compromised Chat with Work server lives in the daemon. An approval on the web is a decision the server reports, and the daemon can't tell a real approval from a forged one. **So a compromised server could change files in folders where changes are allowed, without asking the person.** What limits the damage, whatever the server does:
+
+- **Opt in per folder,** on the computer. Folders that don't allow changes can't be changed, and the kernel sandbox gives write rights to exactly the folders that do.
+- **Everything is recoverable** from the system trash: every replaced version, every deleted file or folder, and every file a move or a new document replaces. Writes are atomic, so a crash never leaves half a file.
+- **Rate and size limits** of their own, separate from reads: 30 changes a minute, 500 a day, 50 MB written an hour, 10 MB per file, 1000 entries per folder moved or deleted (all configurable in `config.toml`, never by the server).
+- **The audit log** records every change with its tool, folder, paths before and after, effect, bytes written, and where the old version went in the trash. The TUI's and the app's Activity pages show it.
+- **The deny lists** hold: secrets can be neither read nor changed nor moved, and version control internals, shell startup files, autostart and launch agents, and editor settings that run tasks are never changed.
+- **Nothing that runs** is written: no programs, launchers, shortcuts or macro documents, never an execute bit, and existing executables are never changed.
 
 ## Tools
 
-Each is an MCP tool with annotations, so the server can tell writes from reads without a list of names:
+Offered only while at least one shared folder allows changes; until then `tools/list` has the four read-only tools and calling a change tool is an unknown tool (`-32602`). All use `root_id:relative/path`, take `dry_run`, and are `readOnlyHint: false`, `openWorldHint: false`.
 
-| Tool | Does | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
-|---|---|---|---|---|
-| `create` | New file with text content (UTF-8, at most 1 MB); fails if the path exists | false | false | false |
-| `write` | Replace a file's text, or `append`; the old version goes to the trash first | false | **true** (overwrites) | false |
-| `edit` | Replace one exact span (`old_text` → `new_text`, must match once); the old version is kept | false | false | false |
-| `mkdir` | New folder (parents optional) | false | false | true |
-| `move` | Move or rename a file or folder, within or between writable folders; fails if the target exists unless `replace` (then destructive, old target to the trash) | false | false (true with `replace`) | false |
-| `delete` | Move a file or folder to the daemon's trash | false | **true** | false |
+| Tool | Arguments | Does | `destructiveHint` | `idempotentHint` | `_meta["com.chatwithwork/writeWhen"]` |
+|---|---|---|---|---|---|
+| `create` | `path`, `content` | New text file; `exists` if anything is there | false | false | |
+| `write` | `path`, `content`, `mode` (`replace` default, `append`), `expected_sha256` | Replace or append; creates the file if missing; old version to the trash | **true** | false | `{"mode": "append"}` |
+| `edit` | `path`, `old_text`, `new_text`, `expected_sha256` | Replace one exact span (must match once); old version to the trash | false | false | |
+| `mkdir` | `path`, `parents` | New folder; `unchanged` if it exists | false | true | |
+| `move` | `from`, `to`, `replace` (default false) | Move or rename, within or between folders that allow changes; with `replace`, a file at `to` goes to the trash first | **true** | false | `{"replace": false}` |
+| `delete` | `path` | Move a file or folder to the system trash | **true** | false | |
+| `create_document` | `path` (`.docx` or `.xlsx`), `content` (Markdown, for `.docx`), `sheets` (for `.xlsx`), `replace` (default false) | New Word or Excel file; with `replace`, the old file goes to the trash | **true** | false | `{"replace": false}` |
 
-All paths use the existing `root-id:relative/path` form. Binary files (PDF, Office) are never written; only text formats the reader already extracts as plain text (`.txt`, `.md`, `.csv`, `.json`, source files and the like), so the model can't corrupt a document it can't see whole.
+`writeWhen` names the argument values that make a call a plain write; a missing argument counts as its default. A tool without it has one effect for every call.
+
+Results carry `path`, `effect` (`created`, `replaced`, `appended`, `edited`, `created_folder`, `moved`, `trashed`, `unchanged`), `dry_run`, `kind`, and where they apply `from`, `size`, `sha256`, `previous` (`size`, `modified`, `sha256`, `in_trash`), `diff` and `entries`. PROTOCOL.md 8.7 has the full shape.
 
 ## Path rules (daemon)
 
-The write path reuses `reader::safe_fs`, which already resolves on handles, never strings:
-
-- Only inside a **writable** shared folder. The deny list applies to writes too, so `.env`, keys, `.ssh` and the rest can be neither created, changed nor moved into or out of.
-- Resolve the parent directory with the same `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)` on Linux, the `O_NOFOLLOW` walk plus `F_GETPATH` check on macOS, and the reparse-point walk plus `GetFinalPathNameByHandleW` on Windows. Then act relative to that directory handle: `openat(O_CREAT | O_EXCL | O_NOFOLLOW)`, `renameat2(RENAME_NOREPLACE)` (`renamex_np(RENAME_EXCL)` on macOS, `MoveFileEx` without `REPLACE_EXISTING` on Windows), `unlinkat` only inside the trash.
-- Never follow a symlink, never write through a hard link (more than one link is refused, as reads are), never touch FIFOs, sockets or devices.
-- Writes are atomic: write a temporary file in the same directory, `fsync`, then rename over, so a crash leaves the old or the new file, never half of one.
-- Moving between folders on different filesystems copies then trashes the source, never deletes it.
+- Only inside a folder that allows changes (`not_writable`); never the folder itself.
+- The folder a change happens in is resolved like reads: `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)` on Linux, the `O_NOFOLLOW` walk plus `F_GETPATH` check on macOS (and on Linux without `openat2`), the reparse-point walk plus `GetFinalPathNameByHandleW` on Windows. Changes never follow a link, even in a folder that follows links for reads.
+- Then the change acts relative to that open folder: new content goes to a hidden temporary file (`O_CREAT | O_EXCL | O_NOFOLLOW`), is flushed with `fsync`, the old version moves to the trash, and the new file is renamed into place with `renameat2(RENAME_NOREPLACE)` (`renamex_np(RENAME_EXCL)` on macOS; on Windows a rename of the open handle without `ReplaceIfExists`). Moves use the same no-replace rename between two open folders.
+- On Windows each entry is opened without following reparse points and its handle's real path checked: it must be directly in the folder, and named as asked, so an 8.3 short name can't reach a file the deny list covers.
+- Symlinks, files with more than one hard link, FIFOs, sockets and devices are never changed, moved or deleted. Executables, read-only files and other users' files are never changed or moved (executables and read-only files may go to the trash).
+- The deny list applies to every source and destination, and to everything inside a folder that is moved or deleted; a folder that holds a shared folder can't be moved or deleted. The never-changed list (`.git`, `.hg`, `.svn`, `.bzr`, `.jj`, shell startup files, autostart and launch agents, `.vscode`, `.idea`, `.envrc`, `.direnv`, `.cargo`, `desktop.ini`, `autorun.inf`) applies to every path a change touches. `[deny] remove` can drop entries from either list, locally.
+- Names: no control characters or direction marks, none of `\ / : * ? " < > |`, no leading space, no trailing dot or space (Windows would drop them, turning `x.exe.` into `x.exe`), no Windows device names, and no extension that runs or launches anything on any of the three systems (plus `.js` on Windows, which Windows Script Host runs). New files get the mode any program would give them (`0666` less the umask the daemon started with); replaced files keep theirs.
+- Text tools write UTF-8 without NUL characters and only change existing UTF-8 text files; they refuse names of documents and media that text would corrupt, and send `.docx` and `.xlsx` to `create_document`.
+- A move to another filesystem copies regular files and folders (no links, special files or executables, up to the size cap), then moves the original to the trash. A copy that fails half way is removed; the original stays.
 
 ## The trash
 
-`~/.local/share/cww/trash/<timestamp>-<id>/` (the daemon's own data directory, already writable in the sandbox) with a small JSON record of the original root and path. Undo puts it back unless something is there now. Cross-filesystem trashing copies. The OS trash (Finder, Recycle Bin, freedesktop) was considered and left out: the sandboxed daemon can't reach it portably, and a trash of its own can say which chat made each change.
+- **Linux:** the freedesktop.org trash. Items on the filesystem of the home trash (`$XDG_DATA_HOME/Trash`, by default `~/.local/share/Trash`) go there; items on another filesystem go to `$topdir/.Trash/$uid` when an administrator made a sticky `.Trash` (and it isn't a link), otherwise to `$topdir/.Trash-$uid`. Each item gets a `.trashinfo` record (percent-encoded path, local deletion time) written with `O_EXCL` before the item is renamed in, so file managers list it and can restore it. Trash directories must be real directories owned by the user; a link is never used.
+- **macOS:** `~/.Trash` for the home volume, `<volume>/.Trashes/$uid` for others (when the volume has `.Trashes`). Items are renamed in place, in the daemon, with no AppleScript or Finder, which works under Seatbelt; Finder lists them but can't "Put Back". I couldn't run this on a Mac (see below).
+- **Windows:** the Recycle Bin of the item's drive, `<drive>\$Recycle.Bin\<user SID>`, written the way Explorer writes it: a `$I` record (format 2: size, deletion time, original path) and the item renamed to `$R<id><ext>` by its open handle, so Restore works. Only fixed drives; network and removable drives are refused. Compiled but not run (see below).
+- The `trash` crate was considered and left out: its macOS default asks Finder through AppleScript, which a Seatbelt-confined daemon can't do, it works on path strings rather than open handles, and on Windows its `IFileOperation` path can delete for good when the Recycle Bin won't take an item.
+- Trashes are on the deny list, so a shared folder that contains one never serves what was deleted.
 
 ## Sandbox
 
-Landlock and Seatbelt give writable folders write rights (`WriteFile`, `MakeReg`, `MakeDir`, `RemoveFile`, `RemoveDir`, `Refer`, `Truncate` on Landlock), read-only folders keep read only. Turning writes on for a folder restarts the daemon under the new rules, as sharing a folder already does. The planned split into a network process and a reader process becomes a writer process too: parsers never run with write rights.
+- **Landlock (Linux):** folders that allow changes get read plus `WriteFile`, `MakeReg`, `MakeDir`, `RemoveFile`, `RemoveDir`, `Refer` and `Truncate` (as the kernel's ABI allows; never `Execute`, `MakeSym`, `MakeChar`, `MakeBlock`, `MakeFifo`, `MakeSock` or `IoctlDev`). Their trash directories get `WriteFile`, `MakeReg`, `MakeDir`, `RemoveFile` and `Refer`, a subset of a changeable folder's rights, as Landlock requires of a rename's destination. Read-only folders keep `ReadFile` and `ReadDir` only. The trash directories are created before the sandbox is applied.
+- **Seatbelt (macOS):** folders that allow changes get `file-read*` and `file-write*`; their trash gets `file-write-create`.
+- The plan covers exactly the folders that allow changes: allowing or stopping changes restarts the confined daemon under new rules (and reconnects, so the server lists the tools again). Windows has no sandbox yet.
 
-## What the server changes (contract for the Rails side)
+## Office documents
 
-1. **Tools from annotations, not a name list.** `LocalAgent::Device::Files#tools` keeps only tools with `read_only?`; it should instead load every tool the daemon offers whose name is in an extended `LocalAgent::ACTIONS` (`roots search list read create write edit mkdir move delete`), and record each call's effect from its annotations as MCP tools already do (`WorkTools::Tool.effect_of`): `readOnlyHint` → `read`; otherwise `destructiveHint` → `destructive`, else `write`. A daemon that doesn't offer the new tools (every released one) works as today.
-2. **Every change asks, every time.** Local changes go through `requires_approval` like any change. "Allow for the rest of this chat" is never offered for `local_*` tools, read-only or not (today it stops once the chat read local files; for local writes it should not exist at all), and destructive calls always ask, as now.
-3. **Approval preview.** Approval partials for `local_*` tools, on the web and in the Local Agent API's `approvals` (`summary`, `details`):
-   - `create`: "Create `notes/plan.md` in Work docs", with the content (first 40 lines, monospace, with a line count).
-   - `write`: "Replace `notes/plan.md` in Work docs", with a unified diff against the current text when the chat has read it (the server's cache of the read), otherwise the new content; "The current version goes to the trash on this computer."
-   - `edit`: "Edit `notes/plan.md`", with the span as a diff.
-   - `mkdir`: "Create the folder `reports/2026` in Work docs".
-   - `move`: "Move `a.md` to `archive/a.md`" (and "replacing the file there" when `replace`).
-   - `delete`: "Move `old.md` to the trash on this computer".
-   Folder labels, never absolute paths (the server never sees them). The computer's name in the card's header.
-4. **Errors stay sentences.** The daemon refuses with MCP tool errors (`not writable`, `exists`, `denied path`, `limit reached`, `waiting for confirmation on this computer`, `the person declined on this computer`); the server shows them as it shows other tool errors.
-5. **Caching.** A write invalidates the server's cached text of that file (`remote_resources`, provider `local`) so a later read doesn't answer from a stale copy.
-6. **Audit and activity.** Record changes as their own events (`local_agent.file_changed` with tool, root id and effect, never contents), and show them in the activity line ("Edited plan.md on Carmine's MacBook").
+- `docx-rs` (MIT): the Word writer, with default features off (no image support). `rust_xlsxwriter` (MIT or Apache-2.0): the Excel writer, no optional features. `pulldown-cmark` (MIT): the Markdown parser the desktop app already uses. `similar` (Apache-2.0, no dependencies) makes the diffs for dry runs. They write through the `zip` and `quick-xml` cww already had, add no duplicate crate, and pass `cargo deny check`. On the stripped Linux release binary (x86_64), the writer, the trash and `similar` add 0.5 MB (19.0 MB to 19.5 MB), and the three document crates 2.7 MB more (22.2 MB).
+- Word: headings, paragraphs, bold, italic, strikethrough, inline code, nested bulleted and numbered lists, quotes, code blocks, tables (with a column grid, and always followed by a paragraph, without which LibreOffice hangs). Links become their text with the address in parentheses; never a live link. Checked by opening the files in LibreOffice and reading them back with cww's own extractor.
+- Excel: sheets of text, numbers, booleans and empty cells, with an optional bold, frozen header row and fitted columns. Never formulas: a string starting with `=` stays text.
+
+## What the server does (contract for the Rails side)
+
+1. **Load the tools from the list and their annotations.** Load every tool the daemon offers whose name is in an extended `LocalAgent::ACTIONS` (`roots search list read create write edit mkdir move delete create_document`), and record each call's effect from its annotations: `readOnlyHint: true` → `read`; otherwise `destructiveHint: false` → `write`; otherwise `destructive`, **unless** every argument named in `_meta["com.chatwithwork/writeWhen"]` has the value given (a missing argument counts as its default: `mode` is `"replace"`, `replace` is `false`), which makes it `write`. Per call that gives:
+
+   | Call | Effect |
+   |---|---|
+   | `create`, `edit`, `mkdir` | write |
+   | `write` with `mode: "append"` | write |
+   | `write` without `mode`, or `mode: "replace"` | destructive |
+   | `move` without `replace`, or `replace: false` | write |
+   | `move` with `replace: true` | destructive |
+   | `create_document` without `replace`, or `replace: false` | write |
+   | `create_document` with `replace: true` | destructive |
+   | `delete` | destructive |
+
+   A daemon that doesn't offer the change tools (every released one, and any whose folders are all read-only) works as today. List the tools again on every new connection: the daemon reconnects whenever the person allows or stops changes.
+2. **Every change asks.** Changes go through `requires_approval` like any change. "Allow for the rest of this chat" may cover `write` effects; destructive calls always ask, every time.
+3. **Approval preview.** Show folder labels (from `roots`), never absolute paths (the server never has them), and the computer's name in the card's header. The daemon can describe a change before it happens: call the same tool with the model's arguments plus `dry_run: true`. It runs every check against the files as they are and changes nothing, so a call that would fail (`not_writable`, `exists`, `denied`, ...) can go back to the model as an error without asking the person at all. For `write` and `edit` the dry run returns a unified `diff` (at most 32 KiB) and the current `previous.sha256`; pass that back as `expected_sha256` in the approved call, so the change is refused with `conflict` if the file changed while the card was open. Cached text from earlier reads can stand in for the diff, but it may be stale; the dry run is current. Per tool:
+   - `create`: "Create `notes/plan.md` in Work docs", the content (first 40 lines, monospace, with a line count).
+   - `write` (replace): "Replace `notes/plan.md` in Work docs", the dry run's diff; "The current version goes to the trash on this computer."
+   - `write` (append): "Add to the end of `notes/plan.md`", the text added.
+   - `edit`: "Edit `notes/plan.md`", the dry run's diff (or `old_text` and `new_text`).
+   - `mkdir`: "Create the folder `reports/2026` in Work docs" (and "with the folders on the way" for `parents`).
+   - `move`: "Move `a.md` to `archive/a.md`", naming both folders when they differ; with `replace: true`, "replacing the file there, which goes to the trash" (the dry run's `previous` says whether one is there).
+   - `delete`: "Move `old.md` to the trash on this computer"; for a folder, "with N files and folders" from the dry run's `entries`.
+   - `create_document`: "Create the Word document `report.docx`" with the Markdown rendered, or "Create the Excel workbook `budget.xlsx`" with each sheet's first rows as a table; with `replace: true`, "replacing the current file, which goes to the trash".
+4. **Errors stay sentences.** Change tools refuse with tool errors whose messages are written for the model and the person: `not_writable` (names the folder and says the person can allow changes on their computer), `exists`, `denied` (deny list, never-changed list, links, hard links, special files, read-only or other users' files), `not_changeable` (programs, executables, binary files as text, Office files as text), `too_large`, `rate_limited`, `trash_unavailable`, `conflict`, `not_found`, `invalid_argument`, `invalid_path`. Show them as other tool errors.
+5. **Caching.** After a change that isn't a dry run, drop the cached text (`remote_resources`, provider `local`) of every path it touched: `path` for `create`, `write`, `edit`, `create_document` and `delete`; both `from` and `to` (the result's `path`) for `move`; and for a folder moved or deleted (`kind: "dir"`), every cached path under it. `mkdir` touches no file. The result's `sha256` identifies the new content.
+6. **Audit and activity.** Record each change as its own event, for example `local_agent.file_changed` with the device, chat, tool, root ID, relative path(s), `effect` and `dry_run`, never contents, and show it in the activity line: "Edited plan.md on Carmine's MacBook", "Moved a.md to archive/a.md on ...", "Moved old.md to the trash on ...". Dry runs the server makes for previews needn't be shown; the daemon logs them locally as checks.
 
 ## The clients
 
-The TUI and the app get: the Shared folders switch "Allow changes" per folder (with a sentence on what that means), a Trash page under Settings with Undo, the local confirmation prompt when `confirm = "local"`, and notifications for changes in `"web"` mode.
+- The terminal UI's Shared folders page marks each folder "Read-only" or "Changes allowed"; `w` allows changes after a dialog that says what that means, or makes a folder read-only again at once. The desktop app's Shared Folders page has an "Allow changes" switch per folder with the same sentence and question.
+- Both Activity pages say what each change did, where a move went, how much it wrote, and that the old version is in the trash; dry runs show as checks that changed nothing. `cww log` prints the same fields, and `cww roots list` and `cww status` show which folders allow changes.
 
-## Open questions for Carmine
+## Tested
 
-1. Is per-folder opt-in (off by default) right, or should changes be on for every shared folder?
-2. Default confirmation: `"web"` (one approval, damage recoverable) or `"local"` (approve on the web and again on this computer; safe against a compromised server, but two clicks)?
-3. Text files only at first, or also writing Office documents (needs a writer for each format, and much more risk)?
-4. Trash retention: 30 days and a size cap (say 2 GB), oldest first?
-5. Does "allow for the rest of this chat" stay off for local changes for good, or come back for `create` and `mkdir` in a chat that read no local files?
+- Linux (this machine, kernel 7.2 with Landlock): unit tests for every path rule and refusal (`src/writer/tests.rs`, `src/writer/kinds.rs`, `src/reader/safe_fs/unix.rs`, `src/trash/unix.rs`), including symlink, hard-link, FIFO and `..` escapes, both resolution strategies, the deny lists, read-only folders, limits, sizes, `expected_sha256`, a trash that is a link, a move across filesystems (`/dev/shm`), and folders holding shared folders; end-to-end tests over the fake server for every tool (`tests/e2e.rs`), with the trash under the test's own directory; and under the real Landlock sandbox (`tests/sandbox.rs`): writes land only in folders that allow changes, and cww's own changes and the trash work there. Word and Excel files were opened in LibreOffice.
+- macOS and Windows: compiled and linted (`cargo clippy --target aarch64-apple-darwin` and `--target x86_64-pc-windows-msvc`, all targets, including their unit tests), but **not run**: the Seatbelt rules for changes and the trash, the macOS trash, the Recycle Bin, and the Windows handle renames need a run on those systems before release.

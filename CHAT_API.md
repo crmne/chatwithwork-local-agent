@@ -8,7 +8,7 @@ The TUI asks the daemon over the control socket, which only your user can open, 
 
 ## Chats are a separate permission
 
-Pairing lets Chat with Work call four read-only tools. Reading your chats is worth far more, since they quote Drive, Slack and everything else you connected, so it's asked for on its own:
+Pairing lets Chat with Work call the Local Agent's tools: four read-only ones, and the change tools in folders where you allow changes. Reading your chats is worth far more, since they quote Drive, Slack and everything else you connected, so it's asked for on its own:
 
 - `cww login` asks for `local_agent:chat` as well as `local_agent:serve`. The approval page shows "Also let it use your chats", checked, and you can clear it to share folders only. `cww login --no-chats` doesn't ask.
 - A computer paired without it asks the first time you open the TUI (`o`), and you allow or decline it in Chat with Work under Settings, Computers. The TUI notices by itself once you do.

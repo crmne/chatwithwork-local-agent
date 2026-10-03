@@ -1,6 +1,6 @@
 # Chat with Work Local Agent: control API, version 1
 
-The daemon (`cww daemon run`) listens on a local control channel. The `cww` command line, the `cww` terminal UI and the settings app all use it to read the daemon's state, pause it, manage shared folders and follow the audit log. This document is the contract for those clients. The tunnel to Chat with Work is a different protocol; see [PROTOCOL.md](PROTOCOL.md).
+The daemon (`cww daemon run`) listens on a local control channel. The `cww` command line, the `cww` terminal UI and the settings app all use it to read the daemon's state, pause it, manage shared folders (and whether Chat with Work may change files in them) and follow the audit log. This document is the contract for those clients. The tunnel to Chat with Work is a different protocol; see [PROTOCOL.md](PROTOCOL.md).
 
 Nothing here is reachable from the network or from other users on the machine.
 
@@ -98,7 +98,8 @@ There is no authentication beyond this: any process running as the user can driv
       "available": true,
       "index": "ready",
       "indexed_files": 1532,
-      "local_path": "/home/carmine/Documents/Work"
+      "local_path": "/home/carmine/Documents/Work",
+      "writable": false
     }
   ]
 }
@@ -110,6 +111,7 @@ There is no authentication beyond this: any process running as the user can driv
 - `sandbox.kind` is `landlock`, `seatbelt` or `none`; `sandbox.state` is `enforced`, `partial` (an older kernel enforces some of the rules), `off` or `unavailable`, with a `detail` when it isn't enforced.
 - `roots[].index` is `pending`, `indexing`, `ready`, `error` or `disabled`. During the first pass, `indexed_files` counts files seen so far. `available` is false when the folder is missing, for example on an unmounted drive.
 - `local_path` is the absolute path. It is shown to the local user only and never sent to Chat with Work.
+- `writable` is true when the user allowed changes in the folder (see `roots_writable`).
 
 ### `pause` and `resume`
 
@@ -156,11 +158,12 @@ or `{"event": "error", "error": "..."}` and exit status 1. `browser_url` is `nul
 | `label` | string | Shown to Chat with Work. Defaults to the folder name. 80 characters at most. |
 | `follow_symlinks` | bool | Default false. Follow links that stay inside the folder. |
 | `i_know` | bool | Default false. Allow `/`, the home folder, whole drives and system folders. Clients should only set it after asking the user. |
+| `writable` | bool | Default false. Allow changes in it from the start (see `roots_writable`). Clients should only set it after asking the user. |
 
 ```json
 {
   "ok": true,
-  "root": { "id": "documents", "label": "Documents", "path": "/home/carmine/Documents", "follow_symlinks": false }
+  "root": { "id": "documents", "label": "Documents", "path": "/home/carmine/Documents", "follow_symlinks": false, "writable": false }
 }
 ```
 
@@ -173,6 +176,16 @@ The rules are the same as `cww roots add`. Errors include: the folder doesn't ex
 ```
 
 `root` is an ID, a path, or a label that matches exactly one root. Answers with the removed `root`. Its documents are dropped from the index, and a `root_removed` audit entry is written.
+
+### `roots_writable`
+
+```json
+{"cmd": "roots_writable", "root": "documents", "writable": true}
+```
+
+Allows changes in a shared folder (`writable: true`), or makes it read-only again (`false`). `root` is an ID, a path, or a label that matches exactly one root. While a folder allows changes, Chat with Work can create, edit, move and delete files in it with the change tools (PROTOCOL.md section 8.7), each approved by the person in Chat with Work, with old versions and deleted files kept in the system trash. Clients should say that, and ask, before turning it on; turning it off needs no question. Only this channel and `config.toml` can change it, never the server.
+
+Answers with the updated `root` and writes a `root_changes_allowed` or `root_changes_stopped` audit entry. With the sandbox on, the daemon restarts under rules that give exactly the folders that allow changes (and their trash) write rights, and reconnects within a second; without it, it reconnects so the server lists the tools again. `cww roots allow-changes <root>` and `cww roots deny-changes <root>` do the same from the command line.
 
 ### `suggested_roots`
 
@@ -209,6 +222,7 @@ Changes the label Chat with Work sees. `root` is an ID; `label` is 1 to 80 chara
 {
   "ok": true,
   "builtin": [".ssh", ".gnupg", ".env*", "*.pem", "…"],
+  "never_changed": [".git", ".bashrc", ".vscode", "…"],
   "extra": ["*.secret"],
   "removed": ["*.key"],
   "own_dirs": ["/home/carmine/.config/cww", "…"],
@@ -217,7 +231,7 @@ Changes the label Chat with Work sees. `root` is an ID; `label` is 1 to 80 chara
 }
 ```
 
-The deny list in effect, for clients to show: `builtin` is the built-in list minus the patterns under `[deny] remove`, `extra` the patterns under `[deny] extra`, and `own_dirs` cww's own directories, which are always denied. The list can only be changed by editing `config.toml`; there is deliberately no request for it.
+The deny list in effect, for clients to show: `builtin` is the built-in list minus the patterns under `[deny] remove`, `extra` the patterns under `[deny] extra`, and `own_dirs` cww's own directories, which are always denied. `never_changed` is the built-in list of paths that can be read but never changed, even in a folder that allows changes (version control internals, shell startup files, autostart, editor settings that run tasks), minus `[deny] remove`. The list can only be changed by editing `config.toml`; there is deliberately no request for it.
 
 ### `audit_tail`
 
@@ -398,10 +412,15 @@ The daemon never polls to produce events, and a client that waits on a subscript
 | Field | Present | Meaning |
 |---|---|---|
 | `ts` | always | RFC 3339, UTC. |
-| `event` | always | `tool` for a tool call. Daemon events: `started`, `stopped`, `connected`, `disconnected`, `revoked`, `paused`, `resumed`, `reloaded`, `root_added`, `root_removed`, `root_labeled`, `shutdown_requested`, `restarting` (to widen the sandbox for a new folder). |
-| `tool` | tool calls | `roots`, `search`, `list`, `read`, or an unknown name the server tried. |
+| `event` | always | `tool` for a tool call. Daemon events: `started`, `stopped`, `connected`, `disconnected`, `revoked`, `paused`, `resumed`, `reloaded`, `root_added`, `root_removed`, `root_labeled`, `root_changes_allowed`, `root_changes_stopped`, `shutdown_requested`, `restarting` (to fit the sandbox to a new set of folders). |
+| `tool` | tool calls | `roots`, `search`, `list`, `read`, a change tool (`create`, `write`, `edit`, `mkdir`, `move`, `delete`, `create_document`), or an unknown name the server tried. |
 | `decision` | tool calls | `allowed`, `denied` or `error`. |
-| `path`, `query` | when given | The tool path (`root:relative`) or search query, truncated. |
+| `path`, `query` | when given | The tool path (`root:relative`; the source, for `move`) or search query, truncated. |
+| `to` | moves | Where a `move` went. |
+| `effect` | changes | What a change did: `created`, `replaced`, `appended`, `edited`, `created_folder`, `moved`, `trashed`, or `unchanged` (the folder was there). |
+| `dry_run` | dry runs | `true` when the call only checked a change and changed nothing. |
+| `written` | changes | Bytes written to disk. |
+| `trash` | changes | Where the old version, the deleted item, or the file a move replaced went in the system trash, as an absolute path on this computer. Never sent to the server. |
 | `code`, `reason` | refusals and errors | A PROTOCOL.md error code and its message. |
 | `results`, `bytes` | answered calls | Hits or entries returned, and bytes sent to the server. |
 | `duration_ms` | tool calls | How long the daemon took to answer, in milliseconds (one decimal). |
@@ -436,7 +455,7 @@ Some failures carry a `code` for clients to act on, with more fields where they 
 Connecting fails: `ENOENT` or `ECONNREFUSED` on Unix, "file not found" for the pipe on Windows. Clients should then:
 
 - Show that the daemon is stopped, and offer to start it: `cww daemon install` registers and starts the per-user service (systemd, launchd or a Scheduled Task).
-- Read `config.toml` directly for roots and pairing if they need them. `cww roots add|remove`, `cww pause|resume` and `cww login|logout` all work without a daemon; they edit the file and the daemon picks it up when it starts.
+- Read `config.toml` directly for roots and pairing if they need them. `cww roots add|remove|allow-changes|deny-changes`, `cww pause|resume` and `cww login|logout` all work without a daemon; they edit the file and the daemon picks it up when it starts.
 - Read the audit log file directly for history.
 
 ## 7. Versioning
