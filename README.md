@@ -10,6 +10,16 @@ The Chat with Work Local Agent (`cww` on the command line) is the open-source co
 
 ## Install
 
+**The desktop app** (macOS 11 or later, Windows 10 and 11, Linux) carries `cww` inside it, so it's all most people need. Download it from the [latest release](https://github.com/crmne/chatwithwork-local-agent/releases/latest):
+
+| Platform | Download | Then |
+|---|---|---|
+| macOS (Apple silicon and Intel) | `cww-app-vX.Y.Z-macos-universal.dmg`, or `brew install --cask crmne/tap/cww-app` | Drag **Chat with Work Local Agent** to Applications and open it. It lives in the menu bar, with no Dock icon. Signed with Developer ID and notarized. |
+| Windows (x64, Arm) | `cww-app-vX.Y.Z-x86_64-pc-windows-msvc.zip` (or `aarch64-…`) | Extract it to a folder you'll keep, such as `%LOCALAPPDATA%\Programs\cww-app` (the daemon's logon task points at `cww-agent.exe` there), and run `cww-app.exe`. These builds aren't signed yet: on SmartScreen's warning choose **More info**, then **Run anyway**. |
+| Linux (x86_64, arm64) | `cww-app-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (or `aarch64-…`) | Put `cww-app` and `cww` on your `PATH`, `cww-app.desktop` in `~/.local/share/applications/` and `cww-app.svg` in `~/.local/share/icons/hicolor/scalable/apps/`. Needs glibc 2.35 or newer and a tray that shows StatusNotifierItems. |
+
+On first run the app starts the background agent with the `cww` beside it, pairs the computer, and offers to share your Documents folder. To remove it, run `cww daemon uninstall` with that `cww`, then delete the app. The rest of this section installs `cww` on its own, for the terminal UI, servers, and people who prefer the command line.
+
 **macOS**
 
 ```sh
@@ -56,10 +66,10 @@ It installs `cww` into `~/.local/bin` after checking it against the release's ch
 cargo install --locked --git https://github.com/crmne/chatwithwork-local-agent
 ```
 
-Release archives come with SHA-256 checksums and GitHub artifact attestations. The macOS binary is signed with Developer ID and notarized. To check a download:
+Release archives come with SHA-256 checksums, signed for the desktop app's updater, and GitHub artifact attestations. The macOS binary and app are signed with Developer ID and notarized. To check a download:
 
 ```sh
-gh attestation verify cww-v0.1.0-macos-universal.tar.gz --repo crmne/chatwithwork-local-agent
+gh attestation verify cww-v0.2.0-macos-universal.tar.gz --repo crmne/chatwithwork-local-agent
 ```
 
 [PACKAGING.md](PACKAGING.md) explains how each package is built and signed.
@@ -207,7 +217,7 @@ The UI uses no CPU while nothing happens, follows `NO_COLOR`, and falls back to 
 cargo run --release -p cww-app
 ```
 
-It is a client of the control channel, like the terminal UI. See [docs/settings-app.md](docs/settings-app.md).
+Install it as described under [Install](#install). It is a client of the control channel, like the terminal UI. See [docs/settings-app.md](docs/settings-app.md).
 
 ## What the assistant can do
 

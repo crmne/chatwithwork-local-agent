@@ -76,8 +76,8 @@ One dependency needed a fix: `blocking` 1.7.0 (pulled in by zbus for AccessKit's
 
 ## Platform notes
 
-- **Linux:** CI's Linux build carries `cww-app`, `cww-app.desktop` and its icon, `cww-app.svg`. To install them by hand, put the binary on the `PATH`, the entry in `~/.local/share/applications/`, and the icon in `~/.local/share/icons/hicolor/scalable/apps/`, where the entry's `Icon=cww-app` finds it. The tray item is a StatusNotifierItem, which Waybar, KDE, and GNOME with the AppIndicator extension show. Without a tray host the app opens its window and quits when it closes. Dark mode comes from the `org.gnome.desktop.interface color-scheme` setting when the windowing system doesn't report it.
-- **macOS:** the app must be in a bundle (`packaging/macos/bundle.sh`) for Finder, Launchpad and notarization; `cww` ships inside it, next to `cww-app`.
+- **Linux:** each release's `cww-app-vX.Y.Z-<arch>-unknown-linux-gnu.tar.gz` (and CI's Linux build) carries `cww-app`, `cww` (in the release archives), `cww-app.desktop` and its icon, `cww-app.svg`. The release builds need glibc 2.35 or newer. To install them by hand, put the binary on the `PATH`, the entry in `~/.local/share/applications/`, and the icon in `~/.local/share/icons/hicolor/scalable/apps/`, where the entry's `Icon=cww-app` finds it. The tray item is a StatusNotifierItem, which Waybar, KDE, and GNOME with the AppIndicator extension show. Without a tray host the app opens its window and quits when it closes. Dark mode comes from the `org.gnome.desktop.interface color-scheme` setting when the windowing system doesn't report it.
+- **macOS:** the app must be in a bundle (`packaging/macos/bundle.sh`) for Finder, Launchpad and notarization; `cww` ships inside it, next to `cww-app`. Releases ship it notarized and stapled as `cww-app-vX.Y.Z-macos-universal.dmg` and `.zip`, and as the Homebrew cask `crmne/tap/cww-app`.
 - **Windows:** the tray icon is in the notification area; a left click opens the window and a right click the menu. The app talks to the daemon over its named pipe, through the `cww` crate's client, which checks the pipe belongs to the current user.
 
 ## Development

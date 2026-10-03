@@ -4,11 +4,13 @@ Every way to install the Chat with Work Local Agent comes from one release: a `v
 
 | Platform | What users install | Built by |
 |---|---|---|
-| macOS | Homebrew formula (`brew install crmne/tap/cww`), a signed and notarized `.pkg`, or the one-line installer | `release.yml`, job `macos` |
-| Windows | Per-user `.msi` (x64, arm64), WinGet, Scoop, or the PowerShell installer | `release.yml`, job `build` |
-| Linux | `.deb`, `.rpm`, AUR (`chatwithwork-local-agent`, `-bin`, `-git`), Homebrew, Nix flake, or the one-line installer | `release.yml` and `packaging.yml` |
+| macOS | The desktop app: a notarized `.dmg` and `.zip` (`cww-app-vX.Y.Z-macos-universal`), or the Homebrew cask (`brew install --cask crmne/tap/cww-app`). `cww` alone: Homebrew formula (`brew install crmne/tap/cww`), a signed and notarized `.pkg`, or the one-line installer | `release.yml`, job `macos` |
+| Windows | The desktop app: a zip per architecture (`cww-app-vX.Y.Z-<target>.zip`). `cww` alone: per-user `.msi` (x64, arm64), WinGet, Scoop, or the PowerShell installer | `release.yml`, job `build` |
+| Linux | The desktop app: an archive per architecture (`cww-app-vX.Y.Z-<arch>-unknown-linux-gnu.tar.gz`). `cww` alone: `.deb`, `.rpm`, AUR (`chatwithwork-local-agent`, `-bin`, `-git`), Homebrew, Nix flake, or the one-line installer | `release.yml` (jobs `build` and `linux-app`) and `packaging.yml` |
 
-Linux binaries are static (musl), so one build per architecture runs on every distribution and the packages have no dependencies.
+`cww`'s Linux binaries are static (musl), so one build per architecture runs on every distribution and the packages have no dependencies. The desktop app on Linux links only the C library and loads Wayland, X11 and OpenGL at run time; `linux-app` builds it on Ubuntu 22.04, so it needs glibc 2.35 or newer, and fails the build if it ever needs more.
+
+Every desktop app download carries `cww` beside `cww-app` (inside the bundle on macOS), and the app starts the daemon with that copy. The app's files are in `checksums.txt` with everything else, so `checksums.txt.sig` covers them for the app's updater.
 
 ## Files
 
@@ -21,7 +23,10 @@ Linux binaries are static (musl), so one build per architecture runs on every di
 | `packaging/linux/postinstall.sh` | Tells `.deb`/`.rpm` users how to start. Starts nothing: the daemon runs per user. |
 | `packaging/arch/*/PKGBUILD.in`, `cww.install` | AUR recipes; `build-local.sh` builds the source recipe from the working tree. |
 | `packaging/homebrew/cww.rb.in` | The formula, with a `brew services` definition. |
-| `packaging/macos/` | `pkg.sh` (the installer package), its `postinstall`, `distribution.xml` and pages, and `import-installer-identity.sh` for CI. |
+| `packaging/homebrew/cww-app.rb.in` | The desktop app's cask, from the notarized `.dmg`. |
+| `packaging/macos/` | `bundle.sh` (the desktop app's bundle), `pkg.sh` (the installer package), its `postinstall`, `distribution.xml` and pages, and `import-installer-identity.sh` for CI. |
+| `packaging/linux/cww-app.desktop` | The desktop app's entry, shipped in its Linux archives with the icon as `cww-app.svg`. |
+| `.github/workflows/desktop-preview.yml` | By hand: the desktop app for macOS and Windows as a `desktop-preview-<run>` prerelease, to try a change between releases. |
 | `packaging/windows/` | `cww.wxs` (WiX 5 MSI), `build-msi.ps1`, and `sign.ps1` for certificate signing. |
 | `packaging/winget/`, `packaging/scoop/` | Manifest templates. |
 | `packaging/install.sh`, `install.ps1` | The one-line installers, attached to each release as `cww-installer.sh` and `cww-installer.ps1`. |
@@ -31,11 +36,11 @@ Linux binaries are static (musl), so one build per architecture runs on every di
 
 ## Releasing
 
-1. Bump `version` in `Cargo.toml` and run `cargo build` so `Cargo.lock` follows.
+1. Bump `version` in `Cargo.toml` and `app/Cargo.toml` (they move together) and run `cargo build` so `Cargo.lock` follows.
 2. Write `packaging/release-notes/vX.Y.Z.md`.
 3. Push `main`, wait for CI, then tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-`release.yml` checks the tag matches `Cargo.toml` and is on `main`, builds every target, signs what it has credentials for, attests the archives (`gh attestation verify <file> --repo crmne/chatwithwork-local-agent`), and publishes the release with `checksums.txt` and the installers. Tags with a `-` (`v1.2.0-beta.1`) become draft prereleases and skip the package managers.
+`release.yml` checks the tag matches `Cargo.toml` and is on `main`, builds every target and the desktop app, signs what it has credentials for (the app bundle and its disk image are notarized and stapled too), attests the archives (`gh attestation verify <file> --repo crmne/chatwithwork-local-agent`), and publishes the release with `checksums.txt` and the installers. Tags with a `-` (`v1.2.0-beta.1`) become draft prereleases and skip the package managers.
 
 For a stable tag, `packaging.yml` then runs the shared [native-packages](https://github.com/crmne/native-packages/tree/v0.8.1) workflow: it downloads the Linux archives, verifies them against `checksums.txt`, builds and attaches the `.deb` and `.rpm` files, renders every recipe with the published checksums, and pushes the AUR and Homebrew ones when enabled. The rendered recipes are attached as `chatwithwork-local-agent-X.Y.Z-packaging.tar.xz`.
 
@@ -48,8 +53,8 @@ For a stable tag, `packaging.yml` then runs the shared [native-packages](https:/
   ```sh
   native-packages validate
   # dist/ needs release-shaped inputs; see the "inputs" job in packaging.yml
-  native-packages build --version 0.1.0 --target linux-amd64 --output /tmp/np
-  bash packaging/test-install.sh ubuntu:24.04 /tmp/np
+  native-packages build --version 0.2.0 --target linux-amd64 --output dist/np
+  bash packaging/test-install.sh ubuntu:24.04 dist/np
   packaging/arch/build-local.sh                 # makepkg from the working tree
   nix build .#default
   ```
@@ -60,7 +65,7 @@ A complete set of secrets turns each kind of signing on. With none, the release 
 
 ### macOS
 
-The same secrets as ZapFast and TonePush. `native-packages notarize-macos` signs the universal binary with the hardened runtime and a timestamp, and notarizes it; the Homebrew formula uses that archive. A bare binary can't carry a stapled ticket, so Gatekeeper checks it online the first time.
+The same secrets as ZapFast and TonePush. `native-packages notarize-macos` signs the universal binary with the hardened runtime and a timestamp, and notarizes it; the Homebrew formula uses that archive. The same Developer ID Application identity signs the desktop app (`bundle.sh` signs the `cww` inside it first, then the bundle), and the app and its `.dmg` are each notarized and stapled, so both open offline without warnings. A bare binary can't carry a stapled ticket, so Gatekeeper checks it online the first time.
 
 - `APPLE_CERTIFICATE_P12`: base64 PKCS#12 Developer ID **Application** certificate and private key.
 - `APPLE_CERTIFICATE_PASSWORD`: its export password.
@@ -91,7 +96,7 @@ The notarization secrets (`APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`) are
 
 ### Windows
 
-Unsigned Windows binaries that register a logon task are what Microsoft Defender's behaviour models look for, and SmartScreen warns about any unsigned MSI a browser downloaded. `cww.exe`, `cww-agent.exe` and the MSI are all signed with SHA-256 and an RFC 3161 timestamp once one of these is set up. Sign releases before publishing them to WinGet.
+Unsigned Windows binaries that register a logon task are what Microsoft Defender's behaviour models look for, and SmartScreen warns about any unsigned MSI or program a browser downloaded. `cww.exe`, `cww-agent.exe`, `cww-app.exe` and the MSI are all signed with SHA-256 and an RFC 3161 timestamp once one of these is set up. Sign releases before publishing them to WinGet.
 
 #### What SmartScreen needs
 
@@ -128,13 +133,15 @@ Individual developer accounts are free. Microsoft signs Store packages itself, s
 | Destination | How it's published | Needs |
 |---|---|---|
 | GitHub release (`.deb`, `.rpm`, recipes) | Automatic | Nothing |
-| Homebrew, `crmne/homebrew-tap` `Formula/cww.rb` | Automatic when `PUBLISH_HOMEBREW=true` | `HOMEBREW_TAP_SSH_KEY` (a deploy key with write access to the tap only) or `HOMEBREW_TAP_GITHUB_TOKEN` |
+| Homebrew, `crmne/homebrew-tap` `Formula/cww.rb` and `Casks/cww-app.rb` | Automatic when `PUBLISH_HOMEBREW=true` | `HOMEBREW_TAP_SSH_KEY` (a deploy key with write access to the tap only) or `HOMEBREW_TAP_GITHUB_TOKEN` |
 | AUR `chatwithwork-local-agent`, `-bin`, `-git` | Automatic when `PUBLISH_AUR=true` | `AUR_SSH_KEY`, `AUR_KNOWN_HOSTS`, and the three AUR packages registered to that key |
 | WinGet, `ChatWithWork.LocalAgent` | By hand, below | A fork of `microsoft/winget-pkgs` |
 | Scoop | By hand, below | A bucket repository |
 | Nix | `nix profile install github:crmne/chatwithwork-local-agent` works from the repository; nixpkgs is a separate submission | - |
 
 `PUBLISH_AUR` and `PUBLISH_HOMEBREW` are repository **variables**; the rest are secrets.
+
+**The desktop app** is in the Homebrew cask only. Not yet published, each a follow-up: WinGet and Scoop manifests for the Windows zips (a portable `zip` installer; better once the builds are signed), the app in the MSI, and a Linux package (`.deb`, `.rpm`, or an AUR `chatwithwork-local-agent-app-bin` from the archives). The `.deb` and `.rpm` stay `cww` only: native-packages builds one package per configuration, from the static archives, and the app's glibc build would bring dependencies they don't have.
 
 **WinGet.** Unpack the release's packaging archive and copy `recipes/winget/*.yaml` to `manifests/c/ChatWithWork/LocalAgent/X.Y.Z/` in a `winget-pkgs` fork. On Windows, run `winget validate --manifest <dir>` and `winget install --manifest <dir>`, then open the pull request (or `wingetcreate submit <dir>`). The manifests use the MSI's fixed UpgradeCode, so upgrades replace the previous version.
 
