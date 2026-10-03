@@ -39,19 +39,6 @@ impl Paths {
             .clone()
             .unwrap_or_else(|| self.daemon.socket_path())
     }
-
-    /// The app's own single-instance endpoint, next to the daemon's.
-    pub fn instance_path(&self) -> PathBuf {
-        let socket = self.socket_path();
-        #[cfg(windows)]
-        {
-            PathBuf::from(format!("{}-app", socket.display()))
-        }
-        #[cfg(unix)]
-        {
-            socket.with_file_name("app.sock")
-        }
-    }
 }
 
 pub fn home_dir() -> Option<PathBuf> {
@@ -89,7 +76,6 @@ mod tests {
             cww::paths::Paths::under(&base).socket_path()
         );
         assert_eq!(paths.app_state_file(), base.join("config").join("app.json"));
-        assert_ne!(paths.instance_path(), paths.socket_path());
         let moved = Paths {
             socket: Some(base.join("elsewhere.sock")),
             ..paths

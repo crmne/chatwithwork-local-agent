@@ -19,7 +19,7 @@ use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 
 use crate::control::Client;
 use crate::events::{AppEvent, Events, Waker};
-use crate::instance::{self, Instance};
+use crate::instance::{self, Start};
 use crate::model::{Status, TrayView};
 use crate::paths::Paths;
 use crate::tray::Tray;
@@ -36,6 +36,9 @@ pub struct Options {
     pub screenshot: Option<std::path::PathBuf>,
     /// How to pair; `cww login` unless the demo replaces it.
     pub account: Option<Arc<dyn crate::pairing::Account>>,
+    /// The single-instance slot to claim: the user's, or the demo's. None
+    /// for a screenshot, which runs beside anything.
+    pub instance: Option<fastframe_instance::Slot>,
 }
 
 /// Our own wake-ups travel as a repaint request for a viewport that
@@ -89,16 +92,14 @@ pub fn run(paths: Paths, options: Options) -> anyhow::Result<()> {
     });
     let (events, rx) = Events::new(waker);
 
-    if options.screenshot.is_none() {
-        match instance::claim(&paths.instance_path(), !options.background) {
-            Ok(Instance::Secondary) => {
-                log::info!("already running; asked it to open its window");
-                return Ok(());
-            }
-            Ok(Instance::Primary(primary)) => primary.listen(events.clone()),
-            Err(e) => log::warn!("single-instance check failed: {e}"),
-        }
-    }
+    // Held until the app exits: the system lets go of it then.
+    let _instance = match &options.instance {
+        Some(slot) => match instance::claim(slot, options.background, events.clone())? {
+            Start::Run(guard) => Some(guard),
+            Start::HandedOver => return Ok(()),
+        },
+        None => None,
+    };
 
     let onboarded = AppState::load(&paths).onboarded;
     let account = options

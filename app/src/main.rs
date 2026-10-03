@@ -79,6 +79,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, String>
         page: None,
         screenshot: None,
         account: None,
+        instance: None,
     };
     let mut demo = None;
     while let Some(arg) = args.next() {
@@ -144,10 +145,17 @@ fn run(args: Args) -> anyhow::Result<()> {
         }
         let mut options = args.shell;
         options.account = Some(server.account());
+        if options.screenshot.is_none() {
+            options.instance = Some(instance::demo_slot());
+        }
         return shell::run(server.paths.clone(), options);
     }
     let paths = paths::Paths::from_env()?;
-    shell::run(paths, args.shell)
+    let mut options = args.shell;
+    if options.screenshot.is_none() {
+        options.instance = Some(instance::slot());
+    }
+    shell::run(paths, options)
 }
 
 #[cfg(test)]

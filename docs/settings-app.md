@@ -52,7 +52,7 @@ The daemon pushes status changes and audit entries (`subscribe` in CONTROL.md) i
 | main (winit event loop) | `epoll_wait`, until a tray click or a status change wakes it |
 | tray (Linux: ksni's D-Bus thread) | D-Bus |
 | `cww-watch` | reading the daemon's socket; while the daemon is down, a file-system watch on the socket's directory |
-| `cww-instance` | `accept`, for a second launch asking for the window |
+| `fastframe-instance` | `accept`, for a second launch asking for the window |
 
 The settings window is created when it opens and dropped when it closes, GL context and all, so a closed window costs nothing, and nothing redraws while it is hidden. On Linux the app returns the window's heap to the system with `malloc_trim` when it closes.
 
@@ -67,6 +67,14 @@ Measured on Linux (Arch, Hyprland, release build), per-thread context switches f
 On macOS (27, Apple silicon), `top` counted no idle wake-ups and no CPU time over 90 seconds in the tray, with a 13 MB footprint. On Windows 11, against the real daemon, the tray-only app had a 12 MB working set (2 MB private) and used one 15.6 ms scheduler tick of CPU in 60 seconds, while the daemon was still reporting its first index pass; against the stand-in daemon it used none.
 
 One dependency needed a fix: `blocking` 1.7.0 (pulled in by zbus for AccessKit's screen reader bridge on Linux) keeps an idle pool thread alive that wakes every 500 ms forever. `app/Cargo.toml` pins 1.6.2, which lets it exit. Upstream should change its exit test back to "idle and timed out".
+
+## One app per user
+
+The app runs once per user, through [fastframe-instance](https://github.com/crmne/fastframe/tree/main/crates/fastframe-instance). The running app holds a lock in a private per-user directory (`$XDG_RUNTIME_DIR/cww-app` on Linux, the user's local application data on macOS and Windows), which the system releases when the process ends, even after a crash. A second launch, from the launcher or at login, hands its request to the running app and exits: `show` opens the window (or brings it forward), and `ping`, from a `--background` start at login, leaves it closed. Requests travel over a socket only the user can open (`0600`, in a `0700` directory); on Windows over a loopback port, where each request must carry a random token from the user's profile.
+
+If an app holds the lock but does not answer within a few seconds (hung, say), the new launch does not start a second copy, which would put a second tray item and window on the same settings: it exits with an error that says to quit the running app and open it again.
+
+`--demo` and `--demo-fresh` use a slot of their own beside the real app's, so a demo runs next to the installed app, one demo at a time. `--screenshot` claims no slot and runs beside anything, as the tests do. The slot does not follow `CWW_HOME`: an app started against another daemon home still hands over to the one already running.
 
 ## Starting at login
 

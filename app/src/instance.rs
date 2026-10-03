@@ -1,320 +1,176 @@
-//! One app per user. A second launch (from the launcher, or at login while
-//! the app already runs) asks the first to open its settings window, then
-//! exits.
+//! One app per user, through fastframe-instance. A second launch (from the
+//! launcher, or at login while the app already runs) asks the running one to
+//! open its settings window, then exits.
 //!
-//! The first instance listens on a socket next to the daemon's (a named
-//! pipe on Windows), blocked in accept until someone knocks.
+//! The running app holds a lock in a private per-user directory, which the
+//! system releases when the process ends, even after a crash, and answers
+//! later launches on a socket only the user can open (on Windows, a loopback
+//! port guarded by a token in the user's profile). The demo has a slot of
+//! its own, so it runs beside the real app.
 
-use std::io::Write;
-#[cfg(unix)]
-use std::io::{BufRead, BufReader};
-use std::path::Path;
+use fastframe_instance::{Claim, Guard, Slot};
 
 use crate::events::{AppEvent, Events};
 
-pub enum Instance {
-    /// This process is the app. Call [`Primary::listen`] once events flow.
-    Primary(Primary),
-    /// Another instance was already running and has been told.
-    Secondary,
+/// The slot's name. Changing it would let a new version start beside an
+/// older one that is still running.
+const APP_ID: &str = "cww-app";
+
+/// The real app's slot: one per user.
+pub fn slot() -> Slot {
+    Slot::new(APP_ID)
 }
 
-#[cfg(unix)]
-pub struct Primary(std::os::unix::net::UnixListener);
+/// The demo's slot, beside the real app's: one demo at a time.
+#[cfg_attr(not(feature = "demo"), allow(dead_code))]
+pub fn demo_slot() -> Slot {
+    slot().scoped("demo")
+}
 
-#[cfg(windows)]
-pub struct Primary(std::path::PathBuf, windows::Pipe);
+/// Whether this launch goes on.
+#[derive(Debug)]
+pub enum Start {
+    /// This process is the app. Keep the guard until it exits.
+    Run(Guard),
+    /// The running app took the request; this launch is done.
+    HandedOver,
+}
 
-/// Claim the instance endpoint, or knock on the running instance. With
-/// `show`, the running instance opens its settings window.
-pub fn claim(path: &Path, show: bool) -> std::io::Result<Instance> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        use std::os::unix::net::{UnixListener, UnixStream};
+/// What a launch asks the running app: `show` opens its window, `ping` (a
+/// start at login) only checks it runs.
+fn request(background: bool) -> &'static str {
+    if background { "ping" } else { "show" }
+}
 
-        if let Some(dir) = path.parent() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .create(dir)
-                .and_then(|()| {
-                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                })?;
-        }
-        // Launches claim one at a time. Otherwise two could both find
-        // nobody listening, and the second would remove the socket the first
-        // just bound and bind its own: two primaries. Under the lock, the
-        // second finds the first listening. The kernel drops the lock if the
-        // process dies, so a crash never leaves it held.
-        let mut lock_path = path.as_os_str().to_owned();
-        lock_path.push(".lock");
-        let claiming = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
-            .open(&lock_path)?;
-        claiming.lock()?;
-
-        for _ in 0..3 {
-            match UnixStream::connect(path) {
-                Ok(mut stream) => {
-                    let _ = stream.write_all(if show { b"show\n" } else { b"ping\n" });
-                    return Ok(Instance::Secondary);
-                }
-                // Nobody is listening: no file, or one left by a crash.
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                    ) => {}
-                // Anything else (permissions, resources) says nothing about
-                // whether an instance runs, so never replace its socket.
-                Err(e) => return Err(e),
-            }
-            // Nobody is listening, so a file left there is stale.
-            let _ = std::fs::remove_file(path);
-            match UnixListener::bind(path) {
-                Ok(listener) => {
-                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-                    return Ok(Instance::Primary(Primary(listener)));
-                }
-                // Bound between our connect and bind by an app that didn't
-                // take the lock.
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        Err(std::io::Error::other("couldn't claim the app's socket"))
+/// The running app's answer to a later launch, on the listener's thread.
+fn answer(events: &Events, request: &str) -> Option<String> {
+    match request {
+        "show" => events.send(AppEvent::OpenSettings),
+        "ping" => {}
+        _ => return None,
     }
-    #[cfg(windows)]
-    {
-        match windows::Pipe::create(path, true) {
-            Ok(pipe) => Ok(Instance::Primary(Primary(path.to_path_buf(), pipe))),
-            Err(_) => {
-                let mut pipe = std::fs::OpenOptions::new().write(true).open(path)?;
-                let _ = pipe.write_all(if show { b"show\n" } else { b"ping\n" });
-                Ok(Instance::Secondary)
-            }
+    Some("ok".to_owned())
+}
+
+/// Becomes the app, or hands the launch to the one already running.
+///
+/// An app that holds the slot but does not answer is still running (the
+/// lock goes with the process), so this launch does not start a second
+/// copy, with a second tray item and window on the same settings: it stops
+/// with an error that says what to do.
+pub fn claim(slot: &Slot, background: bool, events: Events) -> anyhow::Result<Start> {
+    match slot.claim(request(background), move |request| answer(&events, request)) {
+        Claim::First(guard) => Ok(Start::Run(guard)),
+        Claim::Running(_) => {
+            log::info!("already running; handed the launch over");
+            Ok(Start::HandedOver)
         }
+        Claim::Unanswered => anyhow::bail!(
+            "Chat with Work is already running but did not answer. \
+             Quit it from its menu, or end the cww-app process, and open it again."
+        ),
     }
 }
 
-impl Primary {
-    /// Answer knocks for as long as the process runs.
-    pub fn listen(self, events: Events) {
-        let spawned = std::thread::Builder::new()
-            .name("cww-instance".into())
-            .spawn(move || self.serve(&events));
-        if let Err(e) = spawned {
-            log::warn!("single-instance listener: {e}");
-        }
-    }
-
-    #[cfg(unix)]
-    fn serve(self, events: &Events) {
-        for stream in self.0.incoming().flatten() {
-            let mut line = String::new();
-            let _ = BufReader::new(stream).read_line(&mut line);
-            if line.trim() == "show" {
-                events.send(AppEvent::OpenSettings);
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    fn serve(self, events: &Events) {
-        let Primary(path, mut pipe) = self;
-        loop {
-            if let Some(line) = pipe.accept_line()
-                && line.trim() == "show"
-            {
-                events.send(AppEvent::OpenSettings);
-            }
-            match windows::Pipe::create(&path, false) {
-                Ok(next) => pipe = next,
-                Err(e) => {
-                    log::warn!("single-instance pipe: {e}");
-                    return;
-                }
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-mod windows {
-    use std::os::windows::ffi::OsStrExt;
-    use std::path::Path;
-
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND, ReadFile,
-    };
-    use windows_sys::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
-    };
-
-    pub struct Pipe(HANDLE);
-
-    // SAFETY: a pipe handle can be used from any thread.
-    unsafe impl Send for Pipe {}
-
-    /// Create one server instance of the pipe `path`.
-    fn create_raw(path: &Path, first: bool) -> std::io::Result<HANDLE> {
-        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let flags = PIPE_ACCESS_INBOUND
-            | if first {
-                FILE_FLAG_FIRST_PIPE_INSTANCE
-            } else {
-                0
-            };
-        // SAFETY: `name` is NUL-terminated; default security (the creator
-        // and administrators) applies.
-        let handle = unsafe {
-            CreateNamedPipeW(
-                name.as_ptr(),
-                flags,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                PIPE_UNLIMITED_INSTANCES,
-                64 * 1024,
-                64 * 1024,
-                0,
-                std::ptr::null(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(handle)
-    }
-
-    /// Block until a client connects to this instance.
-    fn connect_raw(handle: HANDLE) -> std::io::Result<()> {
-        // SAFETY: the handle is a pipe we created.
-        if unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) } != 0 {
-            return Ok(());
-        }
-        let e = std::io::Error::last_os_error();
-        // ERROR_PIPE_CONNECTED: the client connected first.
-        if e.raw_os_error() == Some(535) {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    }
-
-    impl Pipe {
-        pub fn create(path: &Path, first: bool) -> std::io::Result<Self> {
-            create_raw(path, first).map(Self)
-        }
-
-        /// Block until a client connects, and read what it says.
-        pub fn accept_line(&mut self) -> Option<String> {
-            connect_raw(self.0).ok()?;
-            let mut buf = [0u8; 64];
-            let mut read = 0u32;
-            // SAFETY: `buf` outlives the call and its length is passed.
-            let ok = unsafe {
-                ReadFile(
-                    self.0,
-                    buf.as_mut_ptr(),
-                    buf.len() as u32,
-                    &mut read,
-                    std::ptr::null_mut(),
-                )
-            } != 0;
-            // SAFETY: as above.
-            unsafe { DisconnectNamedPipe(self.0) };
-            ok.then(|| String::from_utf8_lossy(&buf[..read as usize]).into_owned())
-        }
-    }
-
-    impl Drop for Pipe {
-        fn drop(&mut self) {
-            // SAFETY: we own the handle.
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-}
-
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
+
     use super::*;
     use crate::events::Waker;
 
-    #[test]
-    fn a_second_launch_knocks_on_the_first() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("run/app.sock");
-        let Instance::Primary(primary) = claim(&path, true).unwrap() else {
-            panic!("the first launch is the primary");
+    fn events() -> (Events, Receiver<AppEvent>) {
+        Events::new(Waker::new(|| {}))
+    }
+
+    fn running(slot: &Slot) -> (Guard, Receiver<AppEvent>) {
+        let (events, rx) = events();
+        let Start::Run(guard) = claim(slot, false, events).unwrap() else {
+            panic!("the first launch runs");
         };
-        let (events, rx) = Events::new(Waker::new(|| {}));
-        primary.listen(events);
-        assert!(matches!(claim(&path, false).unwrap(), Instance::Secondary));
-        assert!(matches!(claim(&path, true).unwrap(), Instance::Secondary));
-        let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert_eq!(
-            event,
-            AppEvent::OpenSettings,
-            "only `show` opens the window"
+        (guard, rx)
+    }
+
+    #[test]
+    fn a_second_launch_asks_the_first_to_open_its_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let slot = Slot::at(tmp.path(), APP_ID);
+        let (_guard, rx) = running(&slot);
+
+        let (later, later_rx) = events();
+        assert!(matches!(
+            claim(&slot, false, later).unwrap(),
+            Start::HandedOver
+        ));
+        let event = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(event, AppEvent::OpenSettings);
+        assert!(
+            later_rx.try_recv().is_err(),
+            "the later launch runs nothing"
+        );
+    }
+
+    #[test]
+    fn a_launch_at_login_leaves_the_window_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let slot = Slot::at(tmp.path(), APP_ID);
+        let (_guard, rx) = running(&slot);
+
+        let (later, _) = events();
+        assert!(matches!(
+            claim(&slot, true, later).unwrap(),
+            Start::HandedOver
+        ));
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    }
+
+    #[test]
+    fn unknown_requests_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let slot = Slot::at(tmp.path(), APP_ID);
+        let (_guard, rx) = running(&slot);
+
+        assert_eq!(slot.send("ping").unwrap(), "ok");
+        assert!(
+            slot.send("quit").is_err(),
+            "no reply to a request it refuses"
         );
         assert!(rx.try_recv().is_err());
     }
 
     #[test]
-    fn a_socket_it_cannot_reach_is_left_alone() {
-        use std::os::unix::fs::PermissionsExt;
+    fn an_app_that_does_not_answer_is_not_started_twice() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("app.sock");
-        let live = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        // root can connect anyway; the check needs an ordinary user.
-        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-            return;
-        }
-        let err = claim(&path, true).err().expect("an error, not a claim");
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(path.exists(), "the live socket is still there");
-        drop(live);
+        let slot = Slot::at(tmp.path(), APP_ID);
+        // A copy that holds the lock but never listens (hung, say).
+        let held = std::fs::File::create(tmp.path().join("instance.lock")).unwrap();
+        held.lock().unwrap();
+
+        let (later, later_rx) = events();
+        let error = claim(&slot, false, later).unwrap_err();
+        assert!(error.to_string().contains("already running"), "{error}");
+        assert!(later_rx.try_recv().is_err());
     }
 
     #[test]
-    fn simultaneous_launches_make_one_primary() {
-        for _ in 0..20 {
-            let tmp = tempfile::tempdir().unwrap();
-            let path = tmp.path().join("app.sock");
-            // A crash left the socket: every launch finds nobody listening.
-            drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
-            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
-            let launches: Vec<_> = (0..4)
-                .map(|_| {
-                    let (path, barrier) = (path.clone(), std::sync::Arc::clone(&barrier));
-                    std::thread::spawn(move || {
-                        barrier.wait();
-                        claim(&path, false).unwrap()
-                    })
-                })
-                .collect();
-            let primaries: Vec<Primary> = launches
-                .into_iter()
-                .filter_map(|l| match l.join().unwrap() {
-                    Instance::Primary(p) => Some(p),
-                    Instance::Secondary => None,
-                })
-                .collect();
-            assert_eq!(primaries.len(), 1);
-        }
+    fn the_slot_frees_up_when_the_app_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let slot = Slot::at(tmp.path(), APP_ID);
+        let (guard, _rx) = running(&slot);
+        drop(guard);
+        let (_guard, _rx) = running(&slot);
     }
 
     #[test]
-    fn stale_sockets_are_replaced() {
+    fn the_demo_runs_beside_the_app() {
+        assert_ne!(demo_slot().dir(), slot().dir());
+        assert!(demo_slot().dir().starts_with(slot().dir()));
+
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("app.sock");
-        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
-        assert!(path.exists(), "a crashed instance left its socket");
-        assert!(matches!(claim(&path, true).unwrap(), Instance::Primary(_)));
+        let app = Slot::at(tmp.path(), APP_ID);
+        let (_app, app_rx) = running(&app);
+        let (_demo, _demo_rx) = running(&app.clone().scoped("demo"));
+        assert!(app_rx.try_recv().is_err(), "the demo did not knock");
     }
 }
