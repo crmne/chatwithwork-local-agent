@@ -1,4 +1,4 @@
-//! Chat with Work Local Agent: the menu bar app and settings window for the
+//! Chat with Work: the menu bar app and settings window for the
 //! `cww` daemon. It shows the daemon's state, pauses and resumes it, and
 //! manages shared folders and pairing, all over the daemon's control socket
 //! (CONTROL.md).
@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use ui::Page;
 
 const USAGE: &str = "\
-Chat with Work Local Agent
+Chat with Work
 
 Usage: cww-app [options]
 

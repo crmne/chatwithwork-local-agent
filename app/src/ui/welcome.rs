@@ -16,7 +16,7 @@ impl SettingsApp {
             ui.add(egui::Image::new(&texture).fit_to_exact_size(Vec2::splat(56.0)));
             ui.add_space(4.0);
             ui.label(
-                RichText::new("Welcome to Chat with Work Local Agent")
+                RichText::new("Welcome to Chat with Work")
                     .heading()
                     .color(theme.palette.text),
             );
@@ -128,7 +128,7 @@ impl SettingsApp {
         ui.horizontal(|ui| {
             widgets::switch(ui, &theme, &mut self.welcome_autostart, "Start at login");
             ui.label(format!(
-                "Show Chat with Work Local Agent in the {} when you log in",
+                "Show Chat with Work in the {} when you log in",
                 super::general::tray_place(theme.platform)
             ));
         });

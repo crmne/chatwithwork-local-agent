@@ -40,7 +40,7 @@ impl ksni::Tray for Item {
     }
 
     fn title(&self) -> String {
-        "Chat with Work Local Agent".into()
+        "Chat with Work".into()
     }
 
     fn category(&self) -> ksni::Category {

@@ -25,7 +25,7 @@ impl SettingsApp {
 
         group(ui, &theme, |ui| {
             let description = format!(
-                "Show Chat with Work Local Agent in the {} when you log in. The agent itself \
+                "Show Chat with Work in the {} when you log in. The agent itself \
                  always runs in the background once it's started.",
                 tray_place(theme.platform)
             );
@@ -114,7 +114,7 @@ impl SettingsApp {
         widgets::section(ui, &theme, "About");
         group(ui, &theme, |ui| {
             ui.label(RichText::new(format!(
-                "Chat with Work Local Agent {}",
+                "Chat with Work {}",
                 env!("CARGO_PKG_VERSION")
             )));
             ui.add(

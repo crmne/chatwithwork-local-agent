@@ -165,7 +165,7 @@ fn create_window<'a>(
 ) -> EframeWinitApplication<'a> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Chat with Work Local Agent")
+            .with_title("Chat with Work")
             .with_app_id("cww-app")
             .with_inner_size([840.0, 620.0])
             .with_min_inner_size([660.0, 460.0])
@@ -174,7 +174,7 @@ fn create_window<'a>(
         ..Default::default()
     };
     eframe::create_native(
-        "Chat with Work Local Agent",
+        "Chat with Work",
         options,
         Box::new(move |cc| {
             cc.egui_ctx

@@ -119,7 +119,7 @@ fn entry(exe: &Path) -> String {
         format!(
             "[Desktop Entry]\n\
              Type=Application\n\
-             Name=Chat with Work Local Agent\n\
+             Name=Chat with Work\n\
              Comment=Share folders you choose with Chat with Work\n\
              Exec={} --background\n\
              Icon=cww-app\n\

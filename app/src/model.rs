@@ -206,7 +206,7 @@ impl Platform {
 
     pub fn quit_item(self) -> &'static str {
         match self {
-            Self::MacOs => "Quit Chat with Work Local Agent",
+            Self::MacOs => "Quit Chat with Work",
             Self::Windows => "Exit",
             Self::Linux => "Quit",
         }
@@ -261,7 +261,7 @@ impl TrayView {
         };
         Self {
             health,
-            tooltip: format!("Chat with Work Local Agent: {}", health.label()),
+            tooltip: format!("Chat with Work: {}", health.label()),
             headline,
             detail,
             paused,
@@ -447,9 +447,6 @@ mod tests {
     fn menus_use_each_platforms_words() {
         assert_eq!(Platform::MacOs.settings_item(), "Settings…");
         assert_eq!(Platform::Windows.quit_item(), "Exit");
-        assert_eq!(
-            Platform::MacOs.quit_item(),
-            "Quit Chat with Work Local Agent"
-        );
+        assert_eq!(Platform::MacOs.quit_item(), "Quit Chat with Work");
     }
 }

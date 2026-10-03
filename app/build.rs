@@ -8,8 +8,8 @@ fn main() {
         let mut resource = winresource::WindowsResource::new();
         resource
             .set_icon("assets/cww-app.ico")
-            .set("ProductName", "Chat with Work Local Agent")
-            .set("FileDescription", "Chat with Work Local Agent")
+            .set("ProductName", "Chat with Work")
+            .set("FileDescription", "Chat with Work")
             .set("CompanyName", "Plenty UG")
             .set("LegalCopyright", "MIT or Apache 2.0");
         if let Err(error) = resource.compile() {
