@@ -347,3 +347,27 @@ fn a_stopped_agent_can_be_started_from_the_window() {
     harness.get_by_label("Start Local Agent");
     harness.get_by_label_contains("Not running");
 }
+
+/// A wheel notch scrolls as far as it does in other apps (fastframe-scroll's
+/// step), not egui's 40 points.
+#[test]
+fn a_wheel_notch_scrolls_as_far_as_other_apps() {
+    let mut fx = fixture(Scenario::Sample, Some(Page::Activity));
+    let row = "Read documents:Plans/Budget 2027.xlsx";
+    fx.wait_for_label(row);
+    let before = fx.harness.get_by_label_contains(row).rect().top();
+    fx.harness
+        .hover_at(fx.harness.get_by_label_contains(row).rect().center());
+    fx.harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -1.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    fx.harness.run_steps(60);
+    let moved = before - fx.harness.get_by_label_contains(row).rect().top();
+    assert!(
+        (moved - fastframe_scroll::WHEEL_STEP).abs() < 1.0,
+        "{moved}"
+    );
+}

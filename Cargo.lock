@@ -1352,6 +1352,7 @@ dependencies = [
  "env_logger",
  "fastframe-emoji",
  "fastframe-instance",
+ "fastframe-scroll",
  "fastframe-text",
  "fastframe-theme",
  "image",
@@ -2034,6 +2035,14 @@ dependencies = [
  "directories",
  "getrandom 0.4.3",
  "log",
+]
+
+[[package]]
+name = "fastframe-scroll"
+version = "0.3.1"
+source = "git+https://github.com/crmne/fastframe?rev=c62c229199fa3d26514e8ae6cdd89a8a921273d2#c62c229199fa3d26514e8ae6cdd89a8a921273d2"
+dependencies = [
+ "egui",
 ]
 
 [[package]]

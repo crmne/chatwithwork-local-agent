@@ -61,6 +61,10 @@ fastframe-theme = { git = "https://github.com/crmne/fastframe", rev = "c62c22919
 fastframe-emoji = { git = "https://github.com/crmne/fastframe", rev = "c62c229199fa3d26514e8ae6cdd89a8a921273d2" }
 # One running copy per user: a second launch asks it to open its window.
 fastframe-instance = { git = "https://github.com/crmne/fastframe", rev = "c62c229199fa3d26514e8ae6cdd89a8a921273d2" }
+# Scrolling that feels like the platform's: a wheel notch scrolls as far
+# as in other apps, and on Linux touchpad gestures keep their speed and
+# glide on after the fingers lift.
+fastframe-scroll = { git = "https://github.com/crmne/fastframe", rev = "c62c229199fa3d26514e8ae6cdd89a8a921273d2" }
 # Maps the system UI font instead of reading it: San Francisco is 8 MB.
 memmap2 = "0.9"
 # Waits for the daemon's socket to appear instead of polling for it.

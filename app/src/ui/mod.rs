@@ -300,6 +300,9 @@ pub struct SettingsApp {
     system_fonts: bool,
     /// Reveals a switch between light and dark from the middle outwards.
     transition: fastframe_theme::Transition,
+    /// The wheel step, and the touchpad's speed and glide on Linux, for
+    /// every scroll area in the window.
+    scrolling: fastframe_scroll::Scrolling,
     /// The Chat page, made the first time it's shown.
     chat: Option<chat::ChatPage>,
     /// The style the window has now: the Chat page's (in this theme) or
@@ -323,6 +326,7 @@ impl SettingsApp {
             attached: false,
             system_fonts: !cfg!(test),
             transition: fastframe_theme::Transition::default(),
+            scrolling: fastframe_scroll::Scrolling::default(),
             chat: None,
             styled_for_chat: None,
             reveal: !cfg!(test),
@@ -366,6 +370,8 @@ impl SettingsApp {
 
     /// The whole window.
     pub fn show(&mut self, ui: &mut Ui) {
+        // Before any scroll area reads this frame's input.
+        self.scrolling.apply(ui.ctx());
         if !self.attached {
             // Fonts take effect from the next pass, so draw nothing now.
             self.attached = true;
