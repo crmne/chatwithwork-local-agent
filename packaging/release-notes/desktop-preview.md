@@ -2,9 +2,9 @@ A preview of the Chat with Work Local Agent desktop app: a menu bar item on macO
 
 ## macOS (11 or later, Apple silicon and Intel)
 
-1. Download `cww-app-macos-universal.dmg`, open it, and drag Chat with Work Local Agent to Applications. The app is signed with Developer ID and notarized, so it opens without warnings. (`cww-app-macos-universal.zip` holds the same app.)
+1. Download `cww-app-macos-universal.dmg`, open it, and drag Chat with Work to Applications. The app is signed with Developer ID and notarized, so it opens without warnings. (`cww-app-macos-universal.zip` holds the same app.)
 2. Open it from Applications. It has no Dock icon; look for the icon in the menu bar.
-3. The `cww` command is inside the app, at `/Applications/Chat with Work Local Agent.app/Contents/MacOS/cww`. Starting the agent from the app runs `cww daemon install` with that copy, so it replaces a LaunchAgent that points at a Homebrew `cww`.
+3. The `cww` command is inside the app, at `/Applications/Chat with Work.app/Contents/MacOS/cww`. Starting the agent from the app runs `cww daemon install` with that copy, so it replaces a LaunchAgent that points at a Homebrew `cww`.
 
 ## Windows 10 and 11 (x64 or arm64)
 

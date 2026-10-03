@@ -83,14 +83,14 @@ jobs:
           version="$(cargo pkgid -p cww-app | sed 's/.*[#@]//')-preview.${GITHUB_RUN_NUMBER}"
           mkdir -p dist
           CODESIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" packaging/macos/bundle.sh \
-            universal/cww-app universal/cww "dist/Chat with Work Local Agent.app" "$version"
-          app="dist/Chat with Work Local Agent.app"
+            universal/cww-app universal/cww "dist/Chat with Work.app" "$version"
+          app="dist/Chat with Work.app"
           codesign --display --verbose=2 "$app" 2>&1 | grep -q "flags=0x10000(runtime)"
           codesign --display --verbose=2 "$app/Contents/MacOS/cww" 2>&1 | grep -q "flags=0x10000(runtime)"
 
       - name: Notarize and staple the app
         run: |
-          app="dist/Chat with Work Local Agent.app"
+          app="dist/Chat with Work.app"
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-app.zip"
           xcrun notarytool submit "$RUNNER_TEMP/notarize-app.zip" \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
@@ -107,14 +107,14 @@ jobs:
 
       - name: Disk image and zip
         run: |
-          app="dist/Chat with Work Local Agent.app"
+          app="dist/Chat with Work.app"
           dmg="dist/cww-app-macos-universal.dmg"
           ditto -c -k --keepParent "$app" dist/cww-app-macos-universal.zip
           staging="$RUNNER_TEMP/dmg"
           mkdir -p "$staging"
-          ditto "$app" "$staging/Chat with Work Local Agent.app"
+          ditto "$app" "$staging/Chat with Work.app"
           ln -s /Applications "$staging/Applications"
-          hdiutil create -volname "Chat with Work Local Agent" -srcfolder "$staging" \
+          hdiutil create -volname "Chat with Work" -srcfolder "$staging" \
             -fs HFS+ -format UDZO -ov "$dmg"
           codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
           xcrun notarytool submit "$dmg" \

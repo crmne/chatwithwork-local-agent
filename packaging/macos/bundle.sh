@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build "Chat with Work Local Agent.app" on macOS from release binaries.
+# Build "Chat with Work.app" on macOS from release binaries.
 #
 #   packaging/macos/bundle.sh <cww-app> <cww> <output.app> <version>
 #

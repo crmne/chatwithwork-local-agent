@@ -14,8 +14,8 @@ The Chat with Work Local Agent (`cww` on the command line) is the open-source co
 
 | Platform | Download | Then |
 |---|---|---|
-| macOS (Apple silicon and Intel) | `cww-app-vX.Y.Z-macos-universal.dmg`, or `brew install --cask crmne/tap/cww-app` | Drag **Chat with Work Local Agent** to Applications and open it. It lives in the menu bar, with no Dock icon. Signed with Developer ID and notarized. |
-| Windows (x64, Arm) | `cww-app-vX.Y.Z-x86_64-pc-windows-msvc.zip` (or `aarch64-…`) | Extract it to a folder you'll keep, such as `%LOCALAPPDATA%\Programs\cww-app` (the daemon's logon task points at `cww-agent.exe` there), and run `cww-app.exe`. These builds aren't signed yet: on SmartScreen's warning choose **More info**, then **Run anyway**. |
+| macOS (Apple silicon and Intel) | `chat-with-work-vX.Y.Z-macos-universal.dmg`, or `brew install --cask crmne/tap/chat-with-work` | Drag **Chat with Work** to Applications and open it. It lives in the menu bar, with no Dock icon. Signed with Developer ID and notarized. |
+| Windows (x64, Arm) | `chat-with-work-vX.Y.Z-x86_64-pc-windows-msvc.zip` (or `aarch64-…`) | Extract it to a folder you'll keep, such as `%LOCALAPPDATA%\Programs\Chat with Work` (the daemon's logon task points at `cww-agent.exe` there), and run **Chat with Work**. These builds aren't signed yet: on SmartScreen's warning choose **More info**, then **Run anyway**. |
 | Linux (x86_64, arm64) | `cww-app-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (or `aarch64-…`) | Put `cww-app` and `cww` on your `PATH`, `cww-app.desktop` in `~/.local/share/applications/` and `cww-app.svg` in `~/.local/share/icons/hicolor/scalable/apps/`. Needs glibc 2.35 or newer and a tray that shows StatusNotifierItems. |
 
 On first run the app starts the background agent with the `cww` beside it, pairs the computer, and offers to share your Documents folder. To remove it, run `cww daemon uninstall` with that `cww`, then delete the app. The rest of this section installs `cww` on its own, for the terminal UI, servers, and people who prefer the command line.

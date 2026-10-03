@@ -151,10 +151,13 @@ jobs:
             (cd dist && 7z a "$name.zip" "$name")
             # The desktop app with the daemon beside it, as the preview
             # builds had it: the app starts the cww.exe next to it.
-            app="cww-app-v${VERSION}-${{ matrix.target }}"
+            app="chat-with-work-v${VERSION}-${{ matrix.target }}"
             release="target/${{ matrix.target }}/release"
             mkdir -p "dist/$app"
-            cp "$release/cww-app.exe" "$release/cww.exe" "$release/cww-agent.exe" "dist/$app/"
+            # The app is "Chat with Work" where people open it; cww and its
+            # agent keep their names.
+            cp "$release/cww-app.exe" "dist/$app/Chat with Work.exe"
+            cp "$release/cww.exe" "$release/cww-agent.exe" "dist/$app/"
             cp README.md LICENSE-MIT LICENSE-APACHE "dist/$app/"
             (cd dist && 7z a "$app.zip" "$app")
             rm -rf "dist/$app"
@@ -321,7 +324,7 @@ jobs:
 
       - name: Bundle and sign the desktop app
         run: |
-          app="$RUNNER_TEMP/app/Chat with Work Local Agent.app"
+          app="$RUNNER_TEMP/app/Chat with Work.app"
           mkdir -p "$RUNNER_TEMP/app"
           CODESIGN_IDENTITY="$APPLE_SIGNING_IDENTITY" packaging/macos/bundle.sh \
             universal/cww-app universal/cww "$app" "$VERSION"
@@ -333,7 +336,7 @@ jobs:
       - name: Notarize and staple the desktop app
         if: env.APPLE_SIGNING_IDENTITY != ''
         run: |
-          app="$RUNNER_TEMP/app/Chat with Work Local Agent.app"
+          app="$RUNNER_TEMP/app/Chat with Work.app"
           ditto -c -k --keepParent "$app" "$RUNNER_TEMP/notarize-app.zip"
           xcrun notarytool submit "$RUNNER_TEMP/notarize-app.zip" \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" \
@@ -350,14 +353,14 @@ jobs:
 
       - name: Desktop app disk image and zip
         run: |
-          app="$RUNNER_TEMP/app/Chat with Work Local Agent.app"
-          dmg="dist/cww-app-v${VERSION}-macos-universal.dmg"
-          ditto -c -k --keepParent "$app" "dist/cww-app-v${VERSION}-macos-universal.zip"
+          app="$RUNNER_TEMP/app/Chat with Work.app"
+          dmg="dist/chat-with-work-v${VERSION}-macos-universal.dmg"
+          ditto -c -k --keepParent "$app" "dist/chat-with-work-v${VERSION}-macos-universal.zip"
           staging="$RUNNER_TEMP/dmg"
           mkdir -p "$staging"
-          ditto "$app" "$staging/Chat with Work Local Agent.app"
+          ditto "$app" "$staging/Chat with Work.app"
           ln -s /Applications "$staging/Applications"
-          hdiutil create -volname "Chat with Work Local Agent" -srcfolder "$staging" \
+          hdiutil create -volname "Chat with Work" -srcfolder "$staging" \
             -fs HFS+ -format UDZO -ov "$dmg"
           if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
             codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"

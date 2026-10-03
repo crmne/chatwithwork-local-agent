@@ -70,9 +70,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           packaging/macos/bundle.sh target/release/cww-app target/release/cww \
-            "dist/Chat with Work Local Agent.app" "$(cargo pkgid -p cww-app | sed 's/.*[#@]//')"
-          ditto -c -k --keepParent "dist/Chat with Work Local Agent.app" dist/cww-app-macos.zip
-          rm -rf "dist/Chat with Work Local Agent.app"
+            "dist/Chat with Work.app" "$(cargo pkgid -p cww-app | sed 's/.*[#@]//')"
+          ditto -c -k --keepParent "dist/Chat with Work.app" dist/cww-app-macos.zip
+          rm -rf "dist/Chat with Work.app"
       - name: Collect the Linux binary and desktop entry
         if: runner.os == 'Linux'
         run: |

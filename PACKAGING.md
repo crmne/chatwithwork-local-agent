@@ -4,8 +4,8 @@ Every way to install the Chat with Work Local Agent comes from one release: a `v
 
 | Platform | What users install | Built by |
 |---|---|---|
-| macOS | The desktop app: a notarized `.dmg` and `.zip` (`cww-app-vX.Y.Z-macos-universal`), or the Homebrew cask (`brew install --cask crmne/tap/cww-app`). `cww` alone: Homebrew formula (`brew install crmne/tap/cww`), a signed and notarized `.pkg`, or the one-line installer | `release.yml`, job `macos` |
-| Windows | The desktop app: a zip per architecture (`cww-app-vX.Y.Z-<target>.zip`). `cww` alone: per-user `.msi` (x64, arm64), WinGet, Scoop, or the PowerShell installer | `release.yml`, job `build` |
+| macOS | The desktop app: a notarized `.dmg` and `.zip` (`chat-with-work-vX.Y.Z-macos-universal`, holding `Chat with Work.app`), or the Homebrew cask (`brew install --cask crmne/tap/chat-with-work`). `cww` alone: Homebrew formula (`brew install crmne/tap/cww`), a signed and notarized `.pkg`, or the one-line installer | `release.yml`, job `macos` |
+| Windows | The desktop app: a zip per architecture (`chat-with-work-vX.Y.Z-<target>.zip`, holding `Chat with Work.exe` with `cww.exe` and `cww-agent.exe`). `cww` alone: per-user `.msi` (x64, arm64), WinGet, Scoop, or the PowerShell installer | `release.yml`, job `build` |
 | Linux | The desktop app: an archive per architecture (`cww-app-vX.Y.Z-<arch>-unknown-linux-gnu.tar.gz`). `cww` alone: `.deb`, `.rpm`, AUR (`chatwithwork-local-agent`, `-bin`, `-git`), Homebrew, Nix flake, or the one-line installer | `release.yml` (jobs `build` and `linux-app`) and `packaging.yml` |
 
 `cww`'s Linux binaries are static (musl), so one build per architecture runs on every distribution and the packages have no dependencies. The desktop app on Linux links only the C library and loads Wayland, X11 and OpenGL at run time; `linux-app` builds it on Ubuntu 22.04, so it needs glibc 2.35 or newer, and fails the build if it ever needs more.
@@ -23,7 +23,7 @@ Every desktop app download carries `cww` beside `cww-app` (inside the bundle on 
 | `packaging/linux/postinstall.sh` | Tells `.deb`/`.rpm` users how to start. Starts nothing: the daemon runs per user. |
 | `packaging/arch/*/PKGBUILD.in`, `cww.install` | AUR recipes; `build-local.sh` builds the source recipe from the working tree. |
 | `packaging/homebrew/cww.rb.in` | The formula, with a `brew services` definition. |
-| `packaging/homebrew/cww-app.rb.in` | The desktop app's cask, from the notarized `.dmg`. |
+| `packaging/homebrew/chat-with-work.rb.in` | The desktop app's cask, from the notarized `.dmg`. |
 | `packaging/macos/` | `bundle.sh` (the desktop app's bundle), `pkg.sh` (the installer package), its `postinstall`, `distribution.xml` and pages, and `import-installer-identity.sh` for CI. |
 | `packaging/linux/cww-app.desktop` | The desktop app's entry, shipped in its Linux archives with the icon as `cww-app.svg`. |
 | `.github/workflows/desktop-preview.yml` | By hand: the desktop app for macOS and Windows as a `desktop-preview-<run>` prerelease, to try a change between releases. |
@@ -133,7 +133,7 @@ Individual developer accounts are free. Microsoft signs Store packages itself, s
 | Destination | How it's published | Needs |
 |---|---|---|
 | GitHub release (`.deb`, `.rpm`, recipes) | Automatic | Nothing |
-| Homebrew, `crmne/homebrew-tap` `Formula/cww.rb` and `Casks/cww-app.rb` | Automatic when `PUBLISH_HOMEBREW=true` | `HOMEBREW_TAP_SSH_KEY` (a deploy key with write access to the tap only) or `HOMEBREW_TAP_GITHUB_TOKEN` |
+| Homebrew, `crmne/homebrew-tap` `Formula/cww.rb` and `Casks/chat-with-work.rb` | Automatic when `PUBLISH_HOMEBREW=true` | `HOMEBREW_TAP_SSH_KEY` (a deploy key with write access to the tap only) or `HOMEBREW_TAP_GITHUB_TOKEN` |
 | AUR `chatwithwork-local-agent`, `-bin`, `-git` | Automatic when `PUBLISH_AUR=true` | `AUR_SSH_KEY`, `AUR_KNOWN_HOSTS`, and the three AUR packages registered to that key |
 | WinGet, `ChatWithWork.LocalAgent` | By hand, below | A fork of `microsoft/winget-pkgs` |
 | Scoop | By hand, below | A bucket repository |

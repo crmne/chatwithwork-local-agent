@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Chat with Work Local Agent</string>
-    <key>CFBundleDisplayName</key><string>Chat with Work Local Agent</string>
+    <key>CFBundleName</key><string>Chat with Work</string>
+    <key>CFBundleDisplayName</key><string>Chat with Work</string>
     <key>CFBundleIdentifier</key><string>com.chatwithwork.local-agent</string>
     <key>CFBundleExecutable</key><string>cww-app</string>
     <key>CFBundleIconFile</key><string>cww-app</string>
