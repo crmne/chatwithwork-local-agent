@@ -322,6 +322,11 @@ fn a_settled_chat_asks_for_no_more_frames() {
     });
     fx.open(11);
     fx.wait_for_label("The Acme contract renews");
+    // Each logo's fetch asks for one frame when it lands; on a slower
+    // channel (Windows' pipe) they can still be on their way here.
+    fx.wait("the logos", |h| {
+        h.state().chat_ref().is_some_and(|c| c.logos_pending() == 0)
+    });
     // Hovers and rises settle, then nothing more is asked for.
     fx.harness.try_run().expect("a settled page stops drawing");
 }
