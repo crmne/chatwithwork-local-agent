@@ -1101,7 +1101,14 @@ impl Writer {
                 }
                 EntryKind::File => {
                     tree.bytes += stat.size;
-                    if stat.links > 1 || name.to_str().is_none() || is_program(dir, &name, &stat)? {
+                    // Only a copy to another drive cares, so a file that
+                    // can't be read now (another program has it open)
+                    // counts as one it can't carry, rather than failing a
+                    // move within the drive or a delete.
+                    if stat.links > 1
+                        || name.to_str().is_none()
+                        || is_program(dir, &name, &stat).unwrap_or(true)
+                    {
                         tree.uncopyable = true;
                     }
                 }
