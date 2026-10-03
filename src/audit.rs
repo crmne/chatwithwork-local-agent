@@ -205,8 +205,33 @@ fn rotate(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// One human-readable line for `cww log`.
+/// `text` with every character that could forge or hide part of a line on
+/// a terminal (control characters, direction marks, invisible characters)
+/// written as `\u{...}`.
+pub fn escape_for_terminal(text: &str) -> std::borrow::Cow<'_, str> {
+    use crate::reader::safe_fs::is_unsafe_in_path;
+    if !text.chars().any(is_unsafe_in_path) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(
+        text.chars()
+            .map(|c| {
+                if is_unsafe_in_path(c) {
+                    format!("\\u{{{:x}}}", c as u32)
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect(),
+    )
+}
+
+/// One human-readable line for `cww log`, safe to print on a terminal.
 pub fn format_line(line: &str) -> String {
+    escape_for_terminal(&format_entry(line)).into_owned()
+}
+
+fn format_entry(line: &str) -> String {
     let Ok(e) = serde_json::from_str::<AuditEntry>(line) else {
         return line.to_string();
     };
@@ -275,7 +300,10 @@ pub fn format_line(line: &str) -> String {
 pub fn print_log(path: &Path, lines: usize, follow: bool, raw: bool) -> Result<()> {
     let show = |line: &str| {
         if raw {
-            println!("{line}");
+            // JSON escapes control characters itself; direction marks and
+            // invisible characters only appear inside strings, where
+            // `\u{...}` keeps them visible.
+            println!("{}", escape_for_terminal(line));
         } else {
             println!("{}", format_line(line));
         }
@@ -379,6 +407,23 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+        // Whatever is in the log, a printed line can't forge another line
+        // or hide what it says.
+        let mut forged = AuditEntry::event("tool");
+        forged.tool = Some("read".into());
+        forged.path = Some("docs:x\n2026-01-01T00:00:00Z ok read docs:y \u{1b}[2K".into());
+        forged.reason = Some("txt.exe\u{202E}".into());
+        let printed = format_line(&serde_json::to_string(&forged).unwrap());
+        assert!(
+            !printed.contains('\n') && !printed.contains('\u{1b}'),
+            "{printed}"
+        );
+        assert!(!printed.contains('\u{202E}'), "{printed}");
+        assert!(
+            printed.contains("\\u{a}") && printed.contains("\\u{202e}"),
+            "{printed}"
+        );
+        assert_eq!(format_line("not json\u{1b}[31m"), "not json\\u{1b}[31m");
         let last = tail(&path, 1).unwrap();
         assert_eq!(last.len(), 1);
         assert_eq!(last[0].event, "connected");

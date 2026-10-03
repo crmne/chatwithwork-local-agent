@@ -113,7 +113,18 @@ impl LocalFiles {
             || (CHANGE_TOOLS.contains(&name) && self.inner.writer.enabled());
         if !known {
             let mut entry = AuditEntry::event("tool");
-            entry.tool = Some(name.chars().take(64).collect());
+            entry.tool = Some(
+                name.chars()
+                    .take(64)
+                    .map(|c| {
+                        if crate::reader::safe_fs::is_unsafe_in_path(c) {
+                            '?'
+                        } else {
+                            c
+                        }
+                    })
+                    .collect(),
+            );
             entry.chat_id = chat_id;
             entry.request_id = Some(request_id);
             entry.decision = Some(Decision::Denied);

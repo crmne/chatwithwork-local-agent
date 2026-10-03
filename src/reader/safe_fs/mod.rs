@@ -49,6 +49,23 @@ use crate::policy::DenyList;
 const MAX_PATH_LEN: usize = 4096;
 const MAX_COMPONENT_LEN: usize = 255;
 
+/// Characters no tool path may hold: control characters (a newline or an
+/// escape sequence would forge lines in the audit log and the terminal),
+/// direction overrides and isolates, which make a name read differently
+/// from what it is (`invoice\u{202E}fdp.exe`), zero-width characters, and
+/// line and paragraph separators.
+pub fn is_unsafe_in_path(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
+}
+
 /// A validated path relative to a root. Empty means the root itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RelPath(Vec<String>);
@@ -157,6 +174,12 @@ impl ToolPath {
         if input.contains('\0') {
             return Err(ToolError::invalid_path(
                 "NUL bytes are not allowed in paths",
+            ));
+        }
+        if input.chars().any(is_unsafe_in_path) {
+            return Err(ToolError::invalid_path(
+                "control characters, direction marks and invisible characters are not allowed \
+                 in paths",
             ));
         }
         if input.contains('\\') {
@@ -371,6 +394,12 @@ mod tests {
             "docs:a/../../x",
             "docs:/etc/passwd",
             "docs:a\0b",
+            "docs:a\nb.md",
+            "docs:fake\r\n2026-01-01 ok read docs:x",
+            "docs:\u{1b}[2Jx",
+            "docs:invoice\u{202E}fdp.exe",
+            "docs:a\u{200B}b",
+            "docs:a\u{2066}b",
             "C:\\Windows\\system.ini",
             "c:/Windows",
             "no-colon",

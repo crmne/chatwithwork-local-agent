@@ -326,6 +326,7 @@ Every path is **`<root_id>:<relative path>`**. The daemon rejects the following 
 | Absolute paths (leading `/`), a leading `~`, or a relative part starting with `/` | `invalid_path` |
 | `..` in any component | `invalid_path` |
 | NUL bytes or backslashes anywhere | `invalid_path` |
+| Control characters (newlines, escapes), direction marks and isolates (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069), zero-width characters (U+200B to U+200D, U+2060 to U+2064, U+FEFF), or line and paragraph separators anywhere: they could forge or hide part of an audit log line. A file whose name has one can't be read or changed by path | `invalid_path` |
 | Longer than 4096 bytes, or a component longer than 255 bytes | `invalid_path` |
 | Well-formed, but no shared root has this ID | `unknown_root` |
 
