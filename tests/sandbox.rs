@@ -73,7 +73,9 @@ fn only_shared_folders_are_readable() {
 /// A folder that allows changes is writable under the sandbox, through
 /// cww's changes and its system trash; a read-only folder, the rest of the
 /// home folder, and the rest of the data directory stay closed to writes,
-/// even to code that skips cww's own checks.
+/// even to code that skips cww's own checks. Linux only: on macOS the trash
+/// is the real `~/.Trash`, which a test shouldn't fill.
+#[cfg(target_os = "linux")]
 #[test]
 fn only_folders_that_allow_changes_are_writable() {
     let tmp = tempfile::tempdir().unwrap();

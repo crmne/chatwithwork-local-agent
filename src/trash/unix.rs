@@ -259,6 +259,9 @@ fn location(trash: &Trash, dev: u64, near: &Path) -> Result<Location, String> {
     // SAFETY: the kernel fills f_mntonname with a NUL-terminated path.
     let mount = unsafe { std::ffi::CStr::from_ptr(stat.f_mntonname.as_ptr()) };
     let mount = PathBuf::from(std::ffi::OsStr::from_bytes(mount.to_bytes()));
+    if device(&mount)? != dev {
+        return Err(format!("{} is not the item's volume", mount.display()));
+    }
     let trashes = mount.join(".Trashes");
     let meta = fs::symlink_metadata(&trashes)
         .map_err(|e| format!("{} has no .Trashes: {e}", mount.display()))?;

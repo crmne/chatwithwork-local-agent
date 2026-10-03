@@ -2567,7 +2567,12 @@ async fn changes_files_over_the_wire() {
     assert_eq!(deleted["structuredContent"]["kind"], "dir");
     assert!(!docs.join("archive").exists());
     assert_eq!(
-        std::fs::read_to_string(trash.join("files/archive/2026/q4.md")).unwrap(),
+        std::fs::read_to_string(if cfg!(target_os = "macos") {
+            trash.join("archive/2026/q4.md")
+        } else {
+            trash.join("files/archive/2026/q4.md")
+        })
+        .unwrap(),
         "newer\n"
     );
     #[cfg(not(target_os = "macos"))]

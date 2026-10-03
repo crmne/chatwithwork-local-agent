@@ -104,8 +104,18 @@ fn write(
     })
 }
 
+/// Where trashed items land: `files/` in a freedesktop trash, the trash
+/// itself on macOS.
+fn trash_files(trash: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        trash.to_path_buf()
+    } else {
+        trash.join("files")
+    }
+}
+
 fn trashed(f: &Fixture) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(f.trash.join("files"))
+    let mut names: Vec<String> = fs::read_dir(trash_files(&f.trash))
         .map(|d| {
             d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
                 .collect()
@@ -339,7 +349,12 @@ fn replaces_and_appends_keeping_the_old_version_in_the_trash() {
         fs::read_to_string(f.docs.join("notes.md")).unwrap(),
         "new\nmore\n"
     );
-    assert_eq!(trashed(&f), ["notes.2.md", "notes.md"]);
+    let second = if cfg!(target_os = "macos") {
+        "notes 2.md"
+    } else {
+        "notes.2.md"
+    };
+    assert_eq!(trashed(&f), [second, "notes.md"]);
 
     // Writing a file that isn't there creates it.
     let made = write(&f, "docs:fresh.md", "fresh", WriteMode::Append).unwrap();
@@ -541,17 +556,20 @@ fn deletes_to_the_trash_only() {
     assert!(!f.docs.join("notes.md").exists());
     let at = gone.trashed_to.unwrap();
     assert_eq!(fs::read_to_string(&at).unwrap(), "# Notes\nOne\nTwo\n");
-    let record = fs::read_to_string(f.trash.join("info/notes.md.trashinfo")).unwrap();
-    assert!(
-        record.contains(&format!("Path={}/notes.md", f.docs.display())),
-        "{record}"
-    );
+    #[cfg(not(target_os = "macos"))]
+    {
+        let record = fs::read_to_string(f.trash.join("info/notes.md.trashinfo")).unwrap();
+        assert!(
+            record.contains(&format!("Path={}/notes.md", f.docs.display())),
+            "{record}"
+        );
+    }
 
     fs::write(f.docs.join("sub/a.md"), "a").unwrap();
     let folder = delete("docs:sub").unwrap();
     assert_eq!(folder.entries, Some(1));
     assert!(!f.docs.join("sub").exists());
-    assert!(f.trash.join("files/sub/a.md").exists());
+    assert!(trash_files(&f.trash).join("sub/a.md").exists());
 
     assert_eq!(code(delete("docs:")), ErrorCode::InvalidPath);
     assert_eq!(code(delete("docs:missing.md")), ErrorCode::NotFound);
