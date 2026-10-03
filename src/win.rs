@@ -12,8 +12,8 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, GetAce, GetTokenInformation,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
+    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, RevertToSelf, TOKEN_OWNER, TOKEN_QUERY,
+    TOKEN_USER, TokenOwner, TokenUser,
 };
 use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
 use windows_sys::Win32::System::Threading::{
@@ -49,6 +49,20 @@ pub fn current_user_sid() -> Result<String> {
 pub fn user_sid() -> Option<&'static str> {
     static SID: OnceLock<Option<String>> = OnceLock::new();
     SID.get_or_init(|| current_user_sid().ok()).as_deref()
+}
+
+/// The string SID Windows makes the owner of what this process creates:
+/// the user, or `BUILTIN\Administrators` when the process runs elevated.
+pub fn default_owner_sid() -> Option<&'static str> {
+    static SID: OnceLock<Option<String>> = OnceLock::new();
+    SID.get_or_init(|| {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return None;
+        }
+        owner_of_token(&OwnedHandle(token)).ok()
+    })
+    .as_deref()
 }
 
 /// What an allow entry of a DACL grants.
@@ -277,6 +291,29 @@ fn user_of_token(token: &OwnedHandle) -> Result<String> {
     }
     let user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
     sid_string(user.User.Sid)
+}
+
+fn owner_of_token(token: &OwnedHandle) -> Result<String> {
+    let mut needed = 0u32;
+    unsafe {
+        GetTokenInformation(token.0, TokenOwner, std::ptr::null_mut(), 0, &mut needed);
+    }
+    // u64 elements keep the buffer aligned for TOKEN_OWNER.
+    let mut buf = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+    let ok = unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenOwner,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    let owner = unsafe { &*(buf.as_ptr() as *const TOKEN_OWNER) };
+    sid_string(owner.Owner)
 }
 
 fn sid_string(sid: PSID) -> Result<String> {

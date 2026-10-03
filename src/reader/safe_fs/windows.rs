@@ -473,12 +473,17 @@ fn stat_of(file: &File) -> io::Result<EntryStat> {
 /// Volumes that keep owners and ACLs have this flag (NTFS, ReFS; not FAT).
 const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 
-/// Owned by someone other than the user the daemon runs as. A file whose
-/// owner can't be read counts as someone else's, unless its volume keeps
-/// no owners at all (FAT). The handle needs `READ_CONTROL`.
+/// Owned by someone other than the user the daemon runs as. What this
+/// user makes is owned by them, or by `BUILTIN\Administrators` when they
+/// run elevated (the token's default owner), and both count as theirs. A
+/// file whose owner can't be read counts as someone else's, unless its
+/// volume keeps no owners at all (FAT). The handle needs `READ_CONTROL`.
 fn is_foreign(file: &File) -> bool {
     match crate::win::file_owner_sid(file) {
-        Ok(owner) => crate::win::user_sid() != Some(owner.as_str()),
+        Ok(owner) => {
+            let owner = Some(owner.as_str());
+            owner != crate::win::user_sid() && owner != crate::win::default_owner_sid()
+        }
         Err(_) => volume_flags(file).is_none_or(|flags| flags & FILE_PERSISTENT_ACLS != 0),
     }
 }
