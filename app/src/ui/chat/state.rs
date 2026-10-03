@@ -246,8 +246,6 @@ pub struct ChatState {
     pub list: ChatList,
     /// What's typed in the sidebar's search.
     pub search: String,
-    /// The menu under the person's name is open.
-    pub user_menu: bool,
     /// The open chat; `None` is a new one.
     pub open: Option<u64>,
     pub transcript: Option<Transcript>,
@@ -300,7 +298,6 @@ impl Default for ChatState {
             access: Access::Unknown,
             list: ChatList::default(),
             search: String::new(),
-            user_menu: false,
             open: None,
             transcript: None,
             loading: false,

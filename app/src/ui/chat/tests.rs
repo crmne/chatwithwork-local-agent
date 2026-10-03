@@ -559,24 +559,36 @@ fn a_pinned_project_is_current_while_one_of_its_chats_is_open() {
 }
 
 #[test]
-fn the_menu_under_your_name_opens_settings_here_and_on_the_web() {
+fn your_name_opens_settings_on_the_web_and_this_computer_its_own() {
     OPENED.with(|o| o.borrow_mut().clear());
     let mut fx = fixture(Options::default());
     fx.ready();
+    // As on the web, your name links to Settings: no menu.
     fx.harness.get_by_label("Settings and usage").click();
-    fx.wait_for_label("Usage");
-    fx.harness.get_by_label("Usage").click();
     fx.harness.run_steps(2);
     assert_eq!(
         OPENED.with(|o| o.borrow().clone()),
-        ["https://chatwithwork.com/northwind/settings?tab=usage"]
+        ["https://chatwithwork.com/northwind/settings?tab=account"]
     );
-    assert!(fx.harness.query_by_label("Usage").is_none(), "it closes");
-    fx.harness.get_by_label("Settings and usage").click();
-    fx.wait_for_label("Shared Folders");
-    fx.harness.get_by_label("Shared Folders").click();
+    assert!(fx.harness.query_by_label("Usage").is_none(), "no menu");
+    assert_eq!(fx.harness.state().page(), Page::Chat);
+    // This computer's settings are one link of their own.
+    fx.harness.get_by_label("This computer").click();
     fx.harness.run_steps(2);
     assert_eq!(fx.harness.state().page(), Page::Folders);
+}
+
+#[test]
+fn the_logotype_starts_a_new_chat_as_on_the_web() {
+    let mut fx = fixture(Options::default());
+    fx.ready();
+    fx.open(11);
+    fx.wait("the chat", |h| {
+        h.state().chat_state().is_some_and(|s| s.open == Some(11))
+    });
+    fx.harness.get_by_label("Chat with Work").click();
+    fx.harness.run_steps(2);
+    assert_eq!(fx.harness.state().chat_state().unwrap().open, None);
 }
 
 #[test]
@@ -1188,9 +1200,9 @@ fn review_screens() -> Vec<Screen> {
             },
         },
         Screen {
-            name: "user-menu",
+            name: "account",
             chat: Some(11),
-            setup: |fx| fx.chat().state_mut().user_menu = true,
+            setup: nothing,
         },
         Screen {
             name: "project-chat",
@@ -1334,6 +1346,10 @@ fn renders_review_screens() {
             (screen.setup)(&mut fx);
             fx.logos();
             fx.harness.event(egui::Event::PointerGone);
+            // Your name, hovered, as the web's link shows it.
+            if screen.name == "account" {
+                fx.harness.get_by_label("Settings and usage").hover();
+            }
             fx.harness.run_steps(12);
             let image = fx.harness.render().expect("rendering");
             let theme = if dark { "dark" } else { "light" };

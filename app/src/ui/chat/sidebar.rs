@@ -1,7 +1,8 @@
 //! The sidebar (`sidebar.css`, `account_switcher.css`, `sidebar_pins.css`):
 //! the logotype and its toggle, New chat and Chats, the search field, the
-//! Recent chats, what's pinned, and your name at the foot, with the credits when they run low, opening the menu
-//! of Settings: the web's tabs, and this computer's own pages.
+//! Recent chats, what's pinned, and your name at the foot, with the credits
+//! when they run low, opening the web's Settings. One link the web doesn't
+//! have, This computer, opens this computer's own settings pages.
 
 use egui::{Color32, Id, Key, Rect, Sense, Ui, pos2, vec2};
 
@@ -23,10 +24,10 @@ pub enum Event {
     Open(u64),
     /// The header's button: collapse when docked, close as a drawer.
     Toggle,
-    /// One of this computer's settings pages, from the menu under your name.
+    /// This computer's settings pages, from the sidebar's This computer.
     Page(crate::ui::Page),
     /// A page of the web, in the browser: Chats, All projects, a pinned
-    /// project, a Settings tab.
+    /// project, Settings.
     OpenUrl(String),
     /// Rename a chat, from its row's menu.
     Rename(u64, String),
@@ -82,14 +83,29 @@ impl Sidebar<'_> {
         );
         let inner_right = rect.right() - 1.0;
 
-        // Header: the logotype, and the toggle.
+        // Header: the logotype, which starts a new chat as the web's link
+        // does, and the toggle.
         let header_center = rect.top() + 14.0 + 16.0;
-        self.images.logotype(
+        let logo_width = self.images.logotype(
             &painter,
             pos2(rect.left() + 16.0, header_center),
             22.0,
             p.dark,
         );
+        let logo = Rect::from_min_size(
+            pos2(rect.left() + 16.0, header_center - 11.0),
+            vec2(logo_width, 22.0),
+        );
+        let home = ui.interact(logo, Id::new("chat-logotype"), Sense::click());
+        home.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Link, true, "Chat with Work")
+        });
+        if home.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if home.clicked() {
+            event = Some(Event::NewChat);
+        }
         let toggle = Rect::from_center_size(
             pos2(inner_right - 8.0 - 16.0, header_center),
             vec2(32.0, 32.0),
@@ -149,6 +165,24 @@ impl Sidebar<'_> {
             }
             y += LINK;
         }
+        // This computer's own settings: the one link the web doesn't have,
+        // in the style of the web's links beside it.
+        y += 2.0;
+        let row = Rect::from_min_max(
+            pos2(rect.left() + 8.0, y),
+            pos2(inner_right - 8.0, y + LINK),
+        );
+        if self.link(
+            ui,
+            row,
+            Icon::Laptop,
+            "This computer",
+            false,
+            Id::new("chat-this-computer"),
+        ) {
+            event = Some(Event::Page(crate::ui::Page::Folders));
+        }
+        y += LINK;
         y += 8.0;
 
         // Search.
@@ -170,7 +204,11 @@ impl Sidebar<'_> {
             pos2(rect.left() + 8.0, rect.bottom() - 8.0 - foot),
             pos2(inner_right - 8.0, rect.bottom() - 8.0),
         );
-        self.person(ui, account_rect, meter.as_ref(), state);
+        if self.person(ui, account_rect, meter.as_ref())
+            && let Some(url) = settings_url(state)
+        {
+            event = Some(Event::OpenUrl(url));
+        }
 
         // What's pinned.
         let pins = pins(state);
@@ -196,9 +234,6 @@ impl Sidebar<'_> {
         let list_rect =
             Rect::from_min_max(pos2(rect.left(), y), pos2(inner_right, pins_rect.top()));
         if let Some(e) = self.list(ui, list_rect, state) {
-            event = Some(e);
-        }
-        if let Some(e) = self.user_menu(ui, rect, account_rect, state) {
             event = Some(e);
         }
         event
@@ -431,24 +466,14 @@ impl Sidebar<'_> {
 
     /// `.sidebar__account`: your initials (the web shows your Gravatar,
     /// which only the browser fetches), your name, and the credits meter
-    /// while they run low. It opens the menu of Settings.
-    fn person(
-        &self,
-        ui: &mut Ui,
-        account: Rect,
-        meter: Option<&cww::tui::chat::Credits>,
-        state: &mut ChatState,
-    ) {
+    /// while they run low. True when clicked: it opens the web's Settings.
+    fn person(&self, ui: &mut Ui, account: Rect, meter: Option<&cww::tui::chat::Credits>) -> bool {
         let p = self.palette;
         let painter = ui.painter().clone();
         let id = Id::new("chat-account");
         let response = ui.interact(account, id, Sense::click());
-        let open = state.user_menu;
         response.widget_info(|| {
-            let mut info =
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Settings and usage");
-            info.selected = Some(open);
-            info
+            egui::WidgetInfo::labeled(egui::WidgetType::Link, true, "Settings and usage")
         });
         let t = widgets::hover(ui, id, response.hovered(), tokens::INSTANT);
         if t > 0.0 {
@@ -498,9 +523,7 @@ impl Sidebar<'_> {
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        if response.clicked() {
-            state.user_menu = !state.user_menu;
-        }
+        response.clicked()
     }
 
     /// `.meter--battery`: what's left bright on the left, what's used
@@ -547,167 +570,6 @@ impl Sidebar<'_> {
         let at = pos2(rect.left(), track.bottom() + 5.0);
         widgets::label(ui, Rect::from_min_size(at, galley.size()), &caption);
         painter.galley(at, galley, color);
-    }
-
-    /// The menu under your name: the web's Settings tabs, which open in the
-    /// browser, then this computer's own pages.
-    fn user_menu(
-        &self,
-        ui: &mut Ui,
-        sidebar: Rect,
-        anchor: Rect,
-        state: &mut ChatState,
-    ) -> Option<Event> {
-        if !state.user_menu {
-            return None;
-        }
-        let p = self.palette;
-        enum Item {
-            Title(&'static str),
-            Web(Icon, String, String),
-            Local(Icon, crate::ui::Page),
-            Divider,
-        }
-        let mut items = Vec::new();
-        if !state.list.links.settings.is_empty() {
-            items.push(Item::Title("Chat with Work"));
-            for tab in &state.list.links.settings {
-                let icon = tab
-                    .icon
-                    .as_deref()
-                    .and_then(Icon::named)
-                    .unwrap_or(Icon::GearSix);
-                items.push(Item::Web(icon, tab.label.clone(), tab.url.clone()));
-            }
-            items.push(Item::Divider);
-        }
-        items.push(Item::Title("This computer"));
-        for (icon, page) in [
-            (Icon::FolderSimple, crate::ui::Page::Folders),
-            (Icon::LockSimple, crate::ui::Page::Privacy),
-            (Icon::Clock, crate::ui::Page::Activity),
-            (Icon::Laptop, crate::ui::Page::Account),
-            (Icon::GearSix, crate::ui::Page::General),
-        ] {
-            items.push(Item::Local(icon, page));
-        }
-        // `.menu-title` and a `.menu__divider`; items 33.8 high, 1 apart.
-        let height_of = |item: &Item| match item {
-            Item::Title(_) => 32.5,
-            Item::Divider => 9.0,
-            _ => 34.8,
-        };
-        let content: f32 = items.iter().map(height_of).sum();
-        let width = sidebar.width() - 16.0;
-        let height = (5.0 + content + 5.0).min(anchor.top() - sidebar.top() - 16.0);
-        let rect = Rect::from_min_size(
-            pos2(sidebar.left() + 8.0, anchor.top() - 4.0 - height),
-            vec2(width, height),
-        );
-        let mut event = None;
-        let mut close = false;
-        egui::Area::new(Id::new("chat-user-menu"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(rect.min)
-            .show(ui.ctx(), |ui| {
-                controls::menu_panel(ui.painter(), rect, p);
-                let inner = rect.shrink(5.0);
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-                child.set_clip_rect(inner);
-                egui::ScrollArea::vertical()
-                    .id_salt("chat-user-menu-scroll")
-                    .max_height(inner.height())
-                    .show(&mut child, |ui| {
-                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                        for (n, item) in items.iter().enumerate() {
-                            let (row, _) = ui.allocate_exact_size(
-                                vec2(inner.width(), height_of(item)),
-                                Sense::hover(),
-                            );
-                            let row = match item {
-                                Item::Web(..) | Item::Local(..) => {
-                                    Rect::from_min_size(row.min, vec2(row.width(), 33.8))
-                                }
-                                _ => row,
-                            };
-                            let id = Id::new(("chat-user-menu-item", n));
-                            match item {
-                                Item::Title(text) => {
-                                    // `.menu-title`: mono, faint.
-                                    let galley = paint::layout(
-                                        ui.painter(),
-                                        paint::job(
-                                            text,
-                                            Type::mono(11.0, 16.5),
-                                            p.ink_faint,
-                                            f32::INFINITY,
-                                        ),
-                                    );
-                                    let at = pos2(
-                                        row.left() + 12.0,
-                                        row.center().y - galley.size().y / 2.0,
-                                    );
-                                    widgets::label(
-                                        ui,
-                                        Rect::from_min_size(at, galley.size()),
-                                        text,
-                                    );
-                                    ui.painter().galley(at, galley, p.ink_faint);
-                                }
-                                Item::Divider => {
-                                    ui.painter().hline(
-                                        row.x_range(),
-                                        row.center().y,
-                                        egui::Stroke::new(1.0, p.line),
-                                    );
-                                }
-                                Item::Web(icon, label, url) => {
-                                    if controls::menu_item(
-                                        ui,
-                                        id,
-                                        row,
-                                        Some(*icon),
-                                        label,
-                                        false,
-                                        false,
-                                        p,
-                                        self.images,
-                                    )
-                                    .clicked()
-                                    {
-                                        close = true;
-                                        event = Some(Event::OpenUrl(url.clone()));
-                                    }
-                                }
-                                Item::Local(icon, page) => {
-                                    if controls::menu_item(
-                                        ui,
-                                        id,
-                                        row,
-                                        Some(*icon),
-                                        page.title(),
-                                        false,
-                                        false,
-                                        p,
-                                        self.images,
-                                    )
-                                    .clicked()
-                                    {
-                                        close = true;
-                                        event = Some(Event::Page(*page));
-                                    }
-                                }
-                            }
-                        }
-                    });
-            });
-        if close
-            || controls::pressed_outside(ui, &[rect, anchor])
-            || ui.input(|i| i.key_pressed(Key::Escape))
-        {
-            state.user_menu = false;
-        }
-        event
     }
 
     fn search(&self, ui: &mut Ui, rect: Rect, state: &mut ChatState) {
@@ -1139,6 +1001,16 @@ impl Sidebar<'_> {
         }
         event
     }
+}
+
+/// The web's Settings, which opens on its Account tab, as the link under
+/// the web's sidebar does.
+fn settings_url(state: &ChatState) -> Option<String> {
+    let tabs = &state.list.links.settings;
+    tabs.iter()
+        .find(|tab| tab.tab == "account")
+        .or(tabs.first())
+        .map(|tab| tab.url.clone())
 }
 
 /// What the person pinned, projects then chats, each in pin order, as far
