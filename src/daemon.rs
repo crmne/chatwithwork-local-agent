@@ -444,6 +444,16 @@ impl Daemon {
         let paths = self.paths.clone();
         let new = Config::load(&paths)?;
         let roots: Vec<std::path::PathBuf> = new.roots.iter().map(|r| r.path.clone()).collect();
+        // A folder that no longer allows changes is read-only from now on,
+        // not only once the daemon has restarted under a new sandbox.
+        let still_writable: Vec<String> = new
+            .roots
+            .iter()
+            .filter(|r| r.writable)
+            .map(|r| r.id.clone())
+            .collect();
+        let writer = Arc::clone(&self.writer);
+        tokio::task::spawn_blocking(move || writer.stop_changes(&still_writable)).await?;
         if crate::sandbox::plan().is_some_and(|plan| !plan.covers(&roots, &writable_roots(&new))) {
             // The kernel won't let this process read the new folder, or
             // its write rights don't match the folders that allow changes.

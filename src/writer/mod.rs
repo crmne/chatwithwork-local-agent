@@ -435,6 +435,15 @@ impl Writer {
         self.lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Stop changes at once in every folder but `still_writable` (IDs),
+    /// before the daemon restarts under a sandbox without their write
+    /// rights: waits for a change already running, then refuses every
+    /// later one there. Never allows changes anywhere.
+    pub fn stop_changes(&self, still_writable: &[String]) {
+        let _one = self.one_at_a_time();
+        self.reader.stop_changes(still_writable);
+    }
+
     /// Whether any shared folder allows changes, which decides whether the
     /// change tools are offered at all.
     pub fn enabled(&self) -> bool {
@@ -485,7 +494,7 @@ impl Writer {
     fn target(&self, view: &ChangeView, path: &str) -> Result<Target, ToolError> {
         let parsed = ToolPath::parse(path)?;
         let root = view.root(&parsed.root_id)?;
-        if !root.writable {
+        if !view.writable(&root.id) {
             return Err(not_writable(&root));
         }
         let Some(name) = parsed.rel.file_name().map(str::to_string) else {
@@ -968,7 +977,7 @@ impl Writer {
         // With parents: make each missing folder on the way.
         let parsed = ToolPath::parse(&req.path)?;
         let root = view.root(&parsed.root_id)?;
-        if !root.writable {
+        if !view.writable(&root.id) {
             return Err(not_writable(&root));
         }
         if parsed.rel.is_root() {

@@ -442,6 +442,17 @@ impl Reader {
         }
     }
 
+    /// Make every folder but `still_writable` (IDs) read-only right away,
+    /// whatever the config said when it was loaded.
+    pub fn stop_changes(&self, still_writable: &[String]) {
+        let mut state = self.state.write().expect("reader state");
+        for root in &mut state.configured {
+            if !still_writable.contains(&root.id) {
+                root.writable = false;
+            }
+        }
+    }
+
     /// Whether any shared folder allows changes.
     pub fn any_writable(&self) -> bool {
         let state = self.state.read().expect("reader state");

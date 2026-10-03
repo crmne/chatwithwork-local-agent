@@ -1208,3 +1208,35 @@ fn replacing_swaps_in_one_step_and_keeps_group_and_attributes() {
         .count();
     assert_eq!(temps, 0);
 }
+
+/// Stopping changes holds at once, before any restart: the next change in
+/// that folder is refused, the others go on.
+#[test]
+fn stopping_changes_holds_at_once() {
+    let f = fixture();
+    create(&f, "docs:before.md", "x").unwrap();
+    f.writer.stop_changes(&["other".to_string()]);
+    assert_eq!(
+        code(create(&f, "docs:after.md", "x")),
+        ErrorCode::NotWritable
+    );
+    let mkdir = f.writer.mkdir(&MkdirRequest {
+        path: "docs:a/b".into(),
+        parents: true,
+        dry_run: false,
+    });
+    assert_eq!(code(mkdir), ErrorCode::NotWritable);
+    assert!(!f.docs.join("after.md").exists());
+    create(&f, "other:still.md", "x").unwrap();
+    // It never turns changes on.
+    f.writer
+        .stop_changes(&["docs".to_string(), "ro".to_string()]);
+    assert_eq!(
+        code(create(&f, "docs:after.md", "x")),
+        ErrorCode::NotWritable
+    );
+    assert_eq!(code(create(&f, "ro:x.md", "x")), ErrorCode::NotWritable);
+    // Once no folder allows changes, the change tools go away.
+    f.writer.stop_changes(&[]);
+    assert!(!f.writer.enabled());
+}
