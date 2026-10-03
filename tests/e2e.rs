@@ -2246,25 +2246,30 @@ async fn keeps_the_chat_list_current_for_the_terminal() {
     let tools = s.request("tools/list", json!({})).await;
     assert!(tools["result"]["tools"].is_array(), "{tools}");
 
-    // The last watcher gone, the daemon unsubscribes at once.
+    // The last watcher gone, the daemon unsubscribes at once. Windows has
+    // no way to hang up a pipe another thread reads (Events::closer), so
+    // there it happens at the next heartbeat instead.
     hang_up(&first_closer);
     hang_up(&second_closer);
-    let mut unsubscribed = false;
-    for _ in 0..20 {
-        let Some(text) = tokio::time::timeout(Duration::from_secs(10), next_text(&mut s.ws))
-            .await
-            .ok()
-            .flatten()
-        else {
-            break;
-        };
-        let frame: Value = serde_json::from_str(&text).unwrap();
-        if frame["command"] == "unsubscribe" && frame["identifier"] == identifier {
-            unsubscribed = true;
-            break;
+    #[cfg(unix)]
+    {
+        let mut unsubscribed = false;
+        for _ in 0..20 {
+            let Some(text) = tokio::time::timeout(Duration::from_secs(10), next_text(&mut s.ws))
+                .await
+                .ok()
+                .flatten()
+            else {
+                break;
+            };
+            let frame: Value = serde_json::from_str(&text).unwrap();
+            if frame["command"] == "unsubscribe" && frame["identifier"] == identifier {
+                unsubscribed = true;
+                break;
+            }
         }
+        assert!(unsubscribed, "the daemon leaves the list's channel");
     }
-    assert!(unsubscribed, "the daemon leaves the list's channel");
 
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(10), daemon)
@@ -2984,4 +2989,248 @@ async fn allowing_changes_is_a_local_switch() {
         .expect("daemon stops")
         .unwrap()
         .unwrap();
+}
+
+/// `path` as the Recycle Bin records it: without the `\\?\` prefix that
+/// `canonicalize` adds.
+#[cfg(windows)]
+fn plain(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    path.strip_prefix(r"\\?\").unwrap_or(&path).to_string()
+}
+
+/// The user's own `$Recycle.Bin\<SID>` on the drive holding `path`.
+#[cfg(windows)]
+fn recycle_bin_of(path: &Path) -> PathBuf {
+    let out = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()
+        .unwrap();
+    let line = String::from_utf8_lossy(&out.stdout);
+    let sid = line
+        .trim()
+        .rsplit(',')
+        .next()
+        .unwrap()
+        .trim_matches('"')
+        .to_string();
+    let drive = plain(path).chars().take(2).collect::<String>();
+    PathBuf::from(format!("{drive}\\$Recycle.Bin\\{sid}"))
+}
+
+/// The `$I` records in `bin` naming a path under `under`, with their `$R`s.
+#[cfg(windows)]
+fn recycled_from(bin: &Path, under: &Path) -> Vec<(PathBuf, PathBuf, String)> {
+    let mut found = Vec::new();
+    let under = plain(under).to_lowercase();
+    for entry in std::fs::read_dir(bin).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_prefix("$I") else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(entry.path()) else {
+            continue;
+        };
+        // Format 2: version, size, deletion time, name length, then UTF-16.
+        if bytes.len() < 28 {
+            continue;
+        }
+        let units: Vec<u16> = bytes[28..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|u| *u != 0)
+            .collect();
+        let original = String::from_utf16_lossy(&units);
+        if original.to_lowercase().starts_with(&under) {
+            found.push((entry.path(), bin.join(format!("$R{id}")), original));
+        }
+    }
+    found
+}
+
+/// The 8.3 short name Windows gave `path`, if the volume makes them.
+#[cfg(windows)]
+fn short_name(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut buf = vec![0u16; 1024];
+    let n = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetShortPathNameW(
+            wide.as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+        )
+    } as usize;
+    if n == 0 || n > buf.len() {
+        return None;
+    }
+    let short = std::ffi::OsString::from_wide(&buf[..n]);
+    let short = PathBuf::from(short)
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+    let long = path.file_name()?.to_string_lossy().to_string();
+    (short != long).then_some(short)
+}
+
+/// What only Windows has: the Recycle Bin, Mark-of-the-Web, 8.3 short
+/// names, case-insensitive names, junctions and programs without an
+/// execute bit, through the real daemon. Items the test puts in the
+/// Recycle Bin are taken out again at the end.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changes_files_on_windows() {
+    let fx = fixture();
+    let mut server = FakeServer::start().await;
+    pair_for_changes(&fx, &server, true, None);
+    let docs = fx.base.join("work/docs");
+    // A folder shared read-only inside the writable one, and Git's folder.
+    std::fs::create_dir_all(docs.join("Private")).unwrap();
+    std::fs::write(docs.join("Private/salaries.md"), "private\n").unwrap();
+    std::fs::create_dir_all(docs.join(".git")).unwrap();
+    std::fs::write(docs.join(".git/config"), "[core]\n").unwrap();
+    std::fs::write(docs.join("tool.dat"), b"MZ\x90\x00not really a program").unwrap();
+    let mut config = Config::load(&fx.paths).unwrap();
+    config.roots.push(Root {
+        id: "private".into(),
+        label: "Private".into(),
+        path: docs.join("Private"),
+        follow_symlinks: false,
+        writable: false,
+    });
+    config.save(&fx.paths).unwrap();
+    let bin = recycle_bin_of(&fx.base);
+
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(cww::daemon::run(fx.paths.clone(), shutdown.clone(), false));
+    let mut s = connect(&mut server).await;
+
+    // A new file carries Mark-of-the-Web.
+    let made = s
+        .call(
+            "create",
+            json!({ "path": "docs:plans/q4.md", "content": "Q4: ship\n" }),
+        )
+        .await;
+    assert_eq!(made["isError"], false, "{made}");
+    let zone = std::fs::read_to_string(format!(
+        "{}:Zone.Identifier",
+        docs.join("plans/q4.md").display()
+    ))
+    .expect("a Zone.Identifier stream");
+    assert!(zone.contains("ZoneId=3"), "{zone}");
+
+    // A replace keeps the old version in the Recycle Bin; a delete moves
+    // the file there, with a record Explorer can restore from.
+    let replaced = s
+        .call(
+            "write",
+            json!({ "path": "docs:plans/q4.md", "content": "Q4: ship it\n" }),
+        )
+        .await;
+    assert_eq!(
+        replaced["structuredContent"]["effect"], "replaced",
+        "{replaced}"
+    );
+    assert_eq!(replaced["structuredContent"]["previous"]["in_trash"], true);
+    assert_eq!(
+        std::fs::read_to_string(docs.join("plans/q4.md")).unwrap(),
+        "Q4: ship it\n"
+    );
+    let deleted = s
+        .call("delete", json!({ "path": "docs:plans/q3.txt" }))
+        .await;
+    assert_eq!(
+        deleted["structuredContent"]["effect"], "trashed",
+        "{deleted}"
+    );
+    assert!(!docs.join("plans/q3.txt").exists());
+    let recycled = recycled_from(&bin, &fx.base);
+    let contents: Vec<String> = recycled
+        .iter()
+        .map(|(_, r, _)| std::fs::read_to_string(r).unwrap_or_default())
+        .collect();
+    assert!(contents.iter().any(|c| c == "Q4: ship\n"), "{recycled:?}");
+    assert!(
+        contents
+            .iter()
+            .any(|c| c == "Falcon launch moves to October.\n"),
+        "{recycled:?}"
+    );
+    assert!(
+        recycled
+            .iter()
+            .any(|(_, _, o)| o.ends_with("plans\\q3.txt")),
+        "the record names where it was: {recycled:?}"
+    );
+
+    // Git's folder, by its 8.3 short name too.
+    let git = s
+        .call(
+            "write",
+            json!({ "path": "docs:.git/config", "content": "x" }),
+        )
+        .await;
+    assert_eq!(error_code(&git), "denied", "{git}");
+    match short_name(&docs.join(".git")) {
+        Some(short) => {
+            let by_short = s
+                .call(
+                    "write",
+                    json!({ "path": format!("docs:{short}/config"), "content": "x" }),
+                )
+                .await;
+            assert!(by_short["isError"] == true, "{short}: {by_short}");
+            eprintln!("8.3 name {short} refused: {}", error_code(&by_short));
+        }
+        None => eprintln!("this volume makes no 8.3 names: short-name check skipped"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(docs.join(".git/config")).unwrap(),
+        "[core]\n"
+    );
+
+    // The read-only folder inside, however its name is spelled.
+    for path in [
+        "docs:Private/x.md",
+        "docs:PRIVATE/x.md",
+        "docs:private/x.md",
+    ] {
+        let r = s
+            .call("create", json!({ "path": path, "content": "x" }))
+            .await;
+        assert_eq!(r["isError"], true, "{path}: {r}");
+    }
+    let moved = s
+        .call("move", json!({ "from": "docs:PRIVATE", "to": "docs:p2" }))
+        .await;
+    assert_eq!(moved["isError"], true, "{moved}");
+    assert!(docs.join("Private/salaries.md").exists());
+
+    // A junction out, a hard link, and a program without an execute bit.
+    for path in ["docs:linked/new.md", "docs:hardlink.txt"] {
+        let r = s
+            .call("write", json!({ "path": path, "content": "x" }))
+            .await;
+        assert_eq!(r["isError"], true, "{path}: {r}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(fx.base.join("outside/secret.txt")).unwrap(),
+        "supersecret-outside Falcon\n"
+    );
+    let program = s
+        .call(
+            "move",
+            json!({ "from": "docs:tool.dat", "to": "docs:plans/tool.dat" }),
+        )
+        .await;
+    assert_eq!(program["isError"], true, "{program}");
+
+    shutdown.cancel();
+    let _ = daemon.await;
+    // Leave the person's Recycle Bin as it was.
+    for (i, r, _) in recycled_from(&bin, &fx.base) {
+        let _ = std::fs::remove_file(&i);
+        let _ = std::fs::remove_file(&r).or_else(|_| std::fs::remove_dir_all(&r));
+    }
 }

@@ -533,7 +533,9 @@ mod tests {
     }
 
     /// Seatbelt gives changes only the writes they make, and takes them
-    /// away again from folders shared read-only inside.
+    /// away again from folders shared read-only inside. Unix paths: the
+    /// profile only exists on macOS.
+    #[cfg(unix)]
     #[test]
     fn seatbelt_keeps_read_only_folders_inside_read_only() {
         let docs = PathBuf::from("/Users/u/Documents");
