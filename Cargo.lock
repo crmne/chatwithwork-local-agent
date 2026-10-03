@@ -1998,8 +1998,8 @@ checksum = "9afc2bd4d5a73106dd53d10d73d3401c2f32730ba2c0b93ddb888a8983680471"
 
 [[package]]
 name = "fastframe-emoji"
-version = "0.3.1"
-source = "git+https://github.com/crmne/fastframe?rev=c62c229199fa3d26514e8ae6cdd89a8a921273d2#c62c229199fa3d26514e8ae6cdd89a8a921273d2"
+version = "0.4.0"
+source = "git+https://github.com/crmne/fastframe?tag=v0.4.0#53bfeea16e0ba6129e2ded0bd2ed75195819b9a6"
 dependencies = [
  "egui",
  "fastframe-fonts",
@@ -2016,8 +2016,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-fonts"
-version = "0.3.1"
-source = "git+https://github.com/crmne/fastframe?rev=c62c229199fa3d26514e8ae6cdd89a8a921273d2#c62c229199fa3d26514e8ae6cdd89a8a921273d2"
+version = "0.4.0"
+source = "git+https://github.com/crmne/fastframe?tag=v0.4.0#53bfeea16e0ba6129e2ded0bd2ed75195819b9a6"
 dependencies = [
  "directories",
  "egui",
@@ -2029,8 +2029,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-instance"
-version = "0.3.1"
-source = "git+https://github.com/crmne/fastframe?rev=c62c229199fa3d26514e8ae6cdd89a8a921273d2#c62c229199fa3d26514e8ae6cdd89a8a921273d2"
+version = "0.4.0"
+source = "git+https://github.com/crmne/fastframe?tag=v0.4.0#53bfeea16e0ba6129e2ded0bd2ed75195819b9a6"
 dependencies = [
  "directories",
  "getrandom 0.4.3",
@@ -2039,16 +2039,16 @@ dependencies = [
 
 [[package]]
 name = "fastframe-scroll"
-version = "0.3.1"
-source = "git+https://github.com/crmne/fastframe?rev=c62c229199fa3d26514e8ae6cdd89a8a921273d2#c62c229199fa3d26514e8ae6cdd89a8a921273d2"
+version = "0.4.0"
+source = "git+https://github.com/crmne/fastframe?tag=v0.4.0#53bfeea16e0ba6129e2ded0bd2ed75195819b9a6"
 dependencies = [
  "egui",
 ]
 
 [[package]]
 name = "fastframe-text"
-version = "0.3.1"
-source = "git+https://github.com/crmne/fastframe?rev=c62c229199fa3d26514e8ae6cdd89a8a921273d2#c62c229199fa3d26514e8ae6cdd89a8a921273d2"
+version = "0.4.0"
+source = "git+https://github.com/crmne/fastframe?tag=v0.4.0#53bfeea16e0ba6129e2ded0bd2ed75195819b9a6"
 dependencies = [
  "egui",
  "zbus",
@@ -2056,8 +2056,8 @@ dependencies = [
 
 [[package]]
 name = "fastframe-theme"
-version = "0.3.1"
-source = "git+https://github.com/crmne/fastframe?rev=c62c229199fa3d26514e8ae6cdd89a8a921273d2#c62c229199fa3d26514e8ae6cdd89a8a921273d2"
+version = "0.4.0"
+source = "git+https://github.com/crmne/fastframe?tag=v0.4.0#53bfeea16e0ba6129e2ded0bd2ed75195819b9a6"
 dependencies = [
  "directories",
  "egui",

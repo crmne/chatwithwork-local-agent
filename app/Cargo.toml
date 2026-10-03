@@ -48,23 +48,23 @@ directories = "6"
 open = "5"
 # Local times in the activity log.
 jiff = "0.2"
-# Every fastframe crate comes from one revision of fastframe's main branch,
-# so they share one version. Move them to the next release tag together.
+# Every fastframe crate comes from the same release, so they share one
+# version. Move them together.
 # Follows the desktop's font rendering (hinting, sub-pixel positions, and
 # linear coverage on Linux), shared with the other fastframe apps.
-fastframe-text = { git = "https://github.com/crmne/fastframe", rev = "c62c229199fa3d26514e8ae6cdd89a8a921273d2" }
+fastframe-text = { version = "0.4.0", git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 # Reveals a switch between light and dark from the middle of the window
 # outwards, as Omarchy does.
-fastframe-theme = { git = "https://github.com/crmne/fastframe", rev = "c62c229199fa3d26514e8ae6cdd89a8a921273d2" }
+fastframe-theme = { version = "0.4.0", git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 # Draws color emoji in the platform's own style in every egui text, such
 # as folder and file names.
-fastframe-emoji = { git = "https://github.com/crmne/fastframe", rev = "c62c229199fa3d26514e8ae6cdd89a8a921273d2" }
+fastframe-emoji = { version = "0.4.0", git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 # One running copy per user: a second launch asks it to open its window.
-fastframe-instance = { git = "https://github.com/crmne/fastframe", rev = "c62c229199fa3d26514e8ae6cdd89a8a921273d2" }
+fastframe-instance = { version = "0.4.0", git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 # Scrolling that feels like the platform's: a wheel notch scrolls as far
 # as in other apps, and on Linux touchpad gestures keep their speed and
 # glide on after the fingers lift.
-fastframe-scroll = { git = "https://github.com/crmne/fastframe", rev = "c62c229199fa3d26514e8ae6cdd89a8a921273d2" }
+fastframe-scroll = { version = "0.4.0", git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 # Maps the system UI font instead of reading it: San Francisco is 8 MB.
 memmap2 = "0.9"
 # Waits for the daemon's socket to appear instead of polling for it.

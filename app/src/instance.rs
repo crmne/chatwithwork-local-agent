@@ -66,8 +66,9 @@ pub fn claim(slot: &Slot, background: bool, events: Events) -> anyhow::Result<St
             Ok(Start::HandedOver)
         }
         Claim::Unanswered => anyhow::bail!(
-            "Chat with Work is already running but did not answer. \
-             Quit it from its menu, or end the cww-app process, and open it again."
+            "Chat with Work is already running but did not answer in {} seconds. \
+             Quit it from its menu, or end the cww-app process, and open it again.",
+            fastframe_instance::ANSWER_WAIT.as_secs()
         ),
     }
 }
