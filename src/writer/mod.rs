@@ -42,6 +42,11 @@ use crate::trash::Trash;
 /// The longest diff a dry run returns, in bytes.
 const MAX_DIFF_BYTES: usize = 32 * 1024;
 
+/// How deep a folder moved or deleted may go. Each level holds an open
+/// handle while it is looked through, so this stays well below the limit
+/// on open files.
+const MAX_DEPTH: usize = 64;
+
 /// The umask the daemon started with, before it tightened its own: new
 /// files and folders get the modes any other program would give them.
 static UMASK: OnceLock<u32> = OnceLock::new();
@@ -268,6 +273,9 @@ struct Target {
     name: String,
     /// The logical absolute path. Local use only.
     abs: PathBuf,
+    /// The path as the kernel names it: the real path of the opened
+    /// folder, plus the name. Local use only.
+    real: PathBuf,
     dir: ChangeDir,
 }
 
@@ -483,11 +491,13 @@ impl Writer {
                 _ => e,
             })?;
         // The name as the kernel will see it, in the folder as it really is.
-        Self::check_denied(view, &real.join(&name))?;
+        let real = real.join(&name);
+        Self::check_denied(view, &real)?;
         Ok(Target {
             tool_path: ToolPath::display(&root.id, &parsed.rel),
             name,
             abs,
+            real,
             dir,
         })
     }
@@ -952,14 +962,23 @@ impl Writer {
         Ok(result)
     }
 
-    /// Look through a folder about to be moved or deleted: nothing in it may
-    /// be on the deny list, and it may hold at most `max_change_entries`.
+    /// Look through a folder about to be moved or deleted. Nothing in it
+    /// may be on either deny list, where it is (by its path and by its
+    /// real path) and, for a move, where it would land (`dest`: the logical
+    /// and the real path of the folder's new place). It may hold at most
+    /// `max_change_entries`, no shared folder, and go at most
+    /// [`MAX_DEPTH`] levels deep.
     fn inspect_tree(
         &self,
         view: &ChangeView,
         dir: &ChangeDir,
+        dest: Option<(&Path, &Path)>,
+        depth: usize,
         tree: &mut Tree,
     ) -> Result<(), ToolError> {
+        if depth >= MAX_DEPTH {
+            return Err(too_deep());
+        }
         let real_dir = self.real(dir)?;
         for (name, stat) in dir.entries()? {
             tree.entries += 1;
@@ -973,13 +992,13 @@ impl Writer {
                     ),
                 ));
             }
-            for abs in [dir.path.join(&name), real_dir.join(&name)] {
-                if let Some(pattern) = view.deny.denied_by(&abs) {
-                    return Err(ToolError::denied(format!(
-                        "The folder holds something on the deny list ({pattern}), so it can't \
-                         be moved or deleted."
-                    )));
-                }
+            let dest = dest.map(|(abs, real)| (abs.join(&name), real.join(&name)));
+            let mut paths = vec![dir.path.join(&name), real_dir.join(&name)];
+            if let Some((abs, real)) = &dest {
+                paths.extend([abs.clone(), real.clone()]);
+            }
+            for path in &paths {
+                Self::check_contents(view, path)?;
             }
             match stat.kind {
                 EntryKind::Dir => {
@@ -987,7 +1006,10 @@ impl Writer {
                         return Err(holds_shared_folder());
                     }
                     let sub = dir.subdir(&name)?;
-                    self.inspect_tree(view, &sub, tree)?;
+                    let dest = dest
+                        .as_ref()
+                        .map(|(abs, real)| (abs.as_path(), real.as_path()));
+                    self.inspect_tree(view, &sub, dest, depth + 1, tree)?;
                 }
                 EntryKind::File => {
                     tree.bytes += stat.size;
@@ -1001,12 +1023,32 @@ impl Writer {
         Ok(())
     }
 
+    /// Both deny lists, for something inside a folder moved or deleted.
+    fn check_contents(view: &ChangeView, path: &Path) -> Result<(), ToolError> {
+        if let Some(pattern) = view.deny.denied_by(path) {
+            return Err(ToolError::denied(format!(
+                "The folder holds something on the deny list ({pattern}), so it can't be moved \
+                 or deleted."
+            )));
+        }
+        if let Some(pattern) = view.write_deny.denied_by(path) {
+            return Err(ToolError::denied(format!(
+                "The folder holds something cww never changes ({pattern}), or would put \
+                 something there, so it can't be moved or deleted."
+            )));
+        }
+        Ok(())
+    }
+
     /// Check an existing item a move or delete takes away.
+    /// For a move, `dest` is where it goes, whose paths everything inside
+    /// a folder is checked against too.
     fn check_source(
         &self,
         view: &ChangeView,
         t: &Target,
         verb: &str,
+        dest: Option<&Target>,
     ) -> Result<(EntryStat, Option<Tree>), ToolError> {
         let stat = t.dir.entry(t.name())?.ok_or_else(|| {
             ToolError::new(
@@ -1035,7 +1077,8 @@ impl Writer {
                 }
                 let sub = t.dir.subdir(t.name())?;
                 let mut tree = Tree::default();
-                self.inspect_tree(view, &sub, &mut tree)?;
+                let dest = dest.map(|d| (d.abs.as_path(), d.real.as_path()));
+                self.inspect_tree(view, &sub, dest, 1, &mut tree)?;
                 Ok((stat, Some(tree)))
             }
             EntryKind::Symlink => Err(ToolError::denied(
@@ -1051,7 +1094,7 @@ impl Writer {
         let _one = self.one_at_a_time();
         let view = self.reader.change_view();
         let t = self.target(&view, &req.path)?;
-        let (stat, tree) = self.check_source(&view, &t, "delete")?;
+        let (stat, tree) = self.check_source(&view, &t, "delete", None)?;
         let mut result =
             ChangeResult::new(t.tool_path.clone(), Effect::Trashed, stat.kind, req.dry_run);
         result.entries = tree.as_ref().map(|t| t.entries);
@@ -1082,7 +1125,7 @@ impl Writer {
                 "from and to are the same path.",
             ));
         }
-        let (stat, tree) = self.check_source(&view, &src, "move")?;
+        let (stat, tree) = self.check_source(&view, &src, "move", Some(&dst))?;
         if stat.kind == EntryKind::Dir && dst.abs.starts_with(&src.abs) {
             return Err(ToolError::invalid_argument(
                 "A folder can't be moved into itself.",
@@ -1199,7 +1242,7 @@ impl Writer {
                 let copied = (|| {
                     let from = src.dir.subdir(src.name())?;
                     let to = dst.dir.subdir(OsStr::new(&temp))?;
-                    copy_tree(&from, &to, cap)?;
+                    copy_tree(&from, &to, cap, 1)?;
                     match dst.dir.rename(OsStr::new(&temp), &dst.dir, dst.name()) {
                         Ok(()) => Ok(()),
                         Err(RenameError::Exists) => Err(ToolError::new(
@@ -1234,10 +1277,31 @@ fn holds_shared_folder() -> ToolError {
     )
 }
 
-/// Copy the contents of `from` into `to`: regular files and folders only.
-fn copy_tree(from: &ChangeDir, to: &ChangeDir, cap: u64) -> Result<(), ToolError> {
+fn too_deep() -> ToolError {
+    ToolError::new(
+        ErrorCode::TooLarge,
+        format!(
+            "The folder goes more than {MAX_DEPTH} levels deep, more than one change may move or \
+             delete."
+        ),
+    )
+}
+
+/// Copy the contents of `from` into `to`: regular files with one link that
+/// aren't programs, and folders, at most [`MAX_DEPTH`] levels deep.
+fn copy_tree(from: &ChangeDir, to: &ChangeDir, cap: u64, depth: usize) -> Result<(), ToolError> {
+    if depth >= MAX_DEPTH {
+        return Err(too_deep());
+    }
     for (name, stat) in from.entries()? {
         match stat.kind {
+            EntryKind::File if stat.links > 1 || stat.executable() => {
+                return Err(ToolError::new(
+                    ErrorCode::NotChangeable,
+                    "The folder holds programs or files with more than one hard link, so it \
+                     can't be moved to another drive.",
+                ));
+            }
             EntryKind::File => {
                 let (bytes, read) = from.read(&name, cap)?;
                 let staged = to.stage(&bytes, read.mode & 0o666)?;
@@ -1252,7 +1316,7 @@ fn copy_tree(from: &ChangeDir, to: &ChangeDir, cap: u64) -> Result<(), ToolError
                         stat.mode & 0o777
                     },
                 )?;
-                copy_tree(&from.subdir(&name)?, &to.subdir(&name)?, cap)?;
+                copy_tree(&from.subdir(&name)?, &to.subdir(&name)?, cap, depth + 1)?;
             }
             _ => {
                 return Err(ToolError::new(

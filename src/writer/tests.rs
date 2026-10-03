@@ -859,6 +859,11 @@ fn checks_changes_against_the_real_path_of_each_folder() {
     });
     assert_eq!(code(refused), ErrorCode::Denied);
     assert!(docs.join("keys/SSH~1/notes.md").exists());
+    let refused = writer.delete(&DeleteRequest {
+        path: "docs:proj".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
     // Elsewhere, changes work as usual.
     writer
         .create(&CreateRequest {
@@ -965,4 +970,59 @@ fn folders_shared_read_only_stay_read_only_whatever_name_reaches_them() {
         "keep"
     );
     assert!(!f.docs.join("outer/Private/new.md").exists());
+}
+
+/// Moving or deleting a folder applies both lists to everything in it,
+/// where it is and where it would land.
+#[test]
+fn folder_contents_meet_both_lists_at_both_ends() {
+    let f = fixture();
+    let delete = |path: &str| {
+        f.writer.delete(&DeleteRequest {
+            path: path.into(),
+            dry_run: false,
+        })
+    };
+    let mv = |from: &str, to: &str| {
+        f.writer.move_entry(&MoveRequest {
+            from: from.into(),
+            to: to.into(),
+            replace: false,
+            dry_run: false,
+        })
+    };
+    // A project with Git internals in it stays where it is.
+    fs::create_dir_all(f.docs.join("proj/.git/hooks")).unwrap();
+    fs::write(f.docs.join("proj/.git/config"), "[core]\n").unwrap();
+    assert_eq!(code(delete("docs:proj")), ErrorCode::Denied);
+    assert_eq!(code(mv("docs:proj", "docs:proj2")), ErrorCode::Denied);
+    assert!(f.docs.join("proj/.git/config").exists());
+    // A harmless folder can't land where its contents would be never
+    // changed: stuff/autostart/x.txt would become .config/autostart/x.txt.
+    fs::create_dir_all(f.docs.join("stuff/autostart")).unwrap();
+    fs::write(f.docs.join("stuff/autostart/x.txt"), "x").unwrap();
+    assert_eq!(code(mv("docs:stuff", "docs:.config")), ErrorCode::Denied);
+    assert!(f.docs.join("stuff/autostart/x.txt").exists());
+    assert!(!f.docs.join(".config").exists());
+    // Elsewhere it moves.
+    mv("docs:stuff", "docs:things").unwrap();
+    assert!(f.docs.join("things/autostart/x.txt").exists());
+}
+
+#[test]
+fn refuses_folders_nested_too_deep() {
+    let f = fixture();
+    let mut deep = f.docs.join("deep");
+    for _ in 0..MAX_DEPTH + 2 {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let refused = f.writer.delete(&DeleteRequest {
+        path: "docs:deep".into(),
+        dry_run: false,
+    });
+    let err = refused.unwrap_err();
+    assert_eq!(err.code, ErrorCode::TooLarge);
+    assert!(err.message.contains("levels deep"), "{}", err.message);
+    assert!(deep.exists());
 }
