@@ -47,7 +47,8 @@ permissions:
 jobs:
   # Inputs for packaging this commit: the static Linux builds as a release
   # would name them, the source archive, and stand-ins for the macOS and
-  # Windows assets that only the recipes' checksums refer to.
+  # Windows assets (the desktop app's disk image among them) that only the
+  # recipes' checksums refer to.
   inputs:
     if: inputs.version == ''
     name: build inputs (${{ matrix.target }})
@@ -89,6 +90,7 @@ jobs:
             for stand_in in macos-universal.tar.gz x86_64-pc-windows-msvc.msi aarch64-pc-windows-msvc.msi x86_64-pc-windows-msvc.zip aarch64-pc-windows-msvc.zip; do
               echo "stand-in for packaging tests" > "dist/cww-v${VERSION}-${stand_in}"
             done
+            echo "stand-in for packaging tests" > "dist/cww-app-v${VERSION}-macos-universal.dmg"
           fi
       - uses: actions/upload-artifact@v7
         with:

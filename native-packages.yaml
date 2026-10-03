@@ -96,6 +96,10 @@ assets:
   MACOS:
     file: cww-v@VERSION@-macos-universal.tar.gz
     local: dist/cww-v@VERSION@-macos-universal.tar.gz
+  # The desktop app's notarized disk image, for the Homebrew cask.
+  MACOS_APP:
+    file: cww-app-v@VERSION@-macos-universal.dmg
+    local: dist/cww-app-v@VERSION@-macos-universal.dmg
   # Built (and signed, when the Windows secrets exist) by the release
   # workflow's Windows jobs.
   WINDOWS_X64_MSI:
@@ -117,6 +121,7 @@ assets:
     local: dist/chatwithwork-local-agent-@VERSION@.tar.gz
 templates:
   homebrew/Formula/cww.rb: packaging/homebrew/cww.rb.in
+  homebrew/Casks/cww-app.rb: packaging/homebrew/cww-app.rb.in
   arch/chatwithwork-local-agent/PKGBUILD: packaging/arch/chatwithwork-local-agent/PKGBUILD.in
   arch/chatwithwork-local-agent/chatwithwork-local-agent.install: packaging/arch/cww.install
   arch/chatwithwork-local-agent-bin/PKGBUILD: packaging/arch/chatwithwork-local-agent-bin/PKGBUILD.in
@@ -135,6 +140,7 @@ repositories:
     package_path: "."
     files:
       homebrew/Formula/cww.rb: Formula/cww.rb
+      homebrew/Casks/cww-app.rb: Casks/cww-app.rb
     version_file: Formula/cww.rb
     version_pattern: 'version "([^"]+)"'
     publish: push
