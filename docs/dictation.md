@@ -2,38 +2,33 @@
 
 Status: plan, 2026-10-03. Nothing is built.
 
-Carmine's direction: the browser uses the Web Speech API, with a cloud transcription fallback where it's missing or not private; the native apps, `cww-app` included, transcribe on the device. The TUI can wait, or use a helper later.
+Every Chat with Work client dictates the same way: the recording is transcribed in the EU by Chat with Work's own transcription, never by Google, Apple or the operating system. It is charged in credits to the organization, like the web's dictation, and the server doesn't keep the audio.
 
 ## In the desktop app
 
-**Audio stays on the computer.** Speech is turned into text on the device and only the text goes into the composer, so nothing new leaves the machine and nothing is billed.
+- A microphone button in the composer, where the web puts its own (the app follows the web's control), plus a shortcut. Press to start, press again or Esc to stop; a recording stops by itself at 5 minutes, the server's limit.
+- While it records, the app measures the microphone's level, and sends nothing when it heard only silence (a model hears silence as a sentence it makes up), as the web's composer does.
+- On stop, the recording goes to Chat with Work and the text comes back into the composer, where the person edits and sends it. Nothing is sent to the chat by itself.
+- Refusals read as the web's do: no credits left, a guest, too long, too fast, or the service unavailable, with the server's sentence.
+- No CPU while not dictating: the microphone is opened when dictation starts and closed when it stops.
 
-| Platform | Engine | Notes |
-|---|---|---|
-| macOS | Apple's on-device speech recognition (`SFSpeechRecognizer` with `requiresOnDeviceRecognition`, through `objc2` bindings) | Free and fast on Apple silicon. Needs the microphone and speech recognition permissions, so the bundle gains `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription`. The newer `SpeechAnalyzer` (macOS 26) is better but Swift-only, so it would take a small Swift shim; later. |
-| Windows | Local Whisper (below) | `Windows.Media.SpeechRecognition` exists but its offline quality is modest; Whisper is better and the same as Linux. Win+H voice typing already works in the composer with no code. |
-| Linux | Local Whisper (below) | No speech-to-text in the OS. |
+## How the audio travels
 
-**Local Whisper** is whisper.cpp through `whisper-rs`, with OpenAI's Whisper weights (MIT). The model is downloaded on first use, not shipped: `base` (about 140 MB) by default, `small` (about 470 MB) for better accuracy, both multilingual. It runs faster than real time on a recent CPU; Vulkan or CUDA speed it up where present. The download comes from a URL we control (the Chat with Work CDN or a GitHub release), checked against a pinned SHA-256, and is the only new network access; README and the threat model say so. Licenses and size go through `cargo deny` before anything is merged; whisper.cpp adds a few MB to the binary.
-
-**Audio** comes from `cpal` (the platform's own audio API), resampled to 16 kHz mono with `rubato`, held in memory only, and dropped when dictation stops.
-
-## How it works for the person
-
-- A microphone button in the composer, where the web puts its own (the app follows the web's control once the web has it), plus a shortcut. Press to start, press again or Esc to stop.
-- Text appears in the composer as it's recognized (partial results every second or two, settled when a pause ends a phrase). Nothing is sent until the person sends it.
-- The first use on Linux and Windows asks to download the model, says how large it is, and shows progress.
-- Settings, General: the engine (on macOS: Apple or Whisper), the Whisper model size, and the language (automatic by default).
-- No CPU while not dictating: the engine and the model are loaded when dictation starts and dropped a while after it ends.
-
-## Steps
-
-1. An optional `dictation` feature in `cww-app`, so builds without it stay as small as today.
-2. Audio capture and the Whisper engine behind one `Dictation` interface (start, partial text, final text, stop), tested on recorded WAV fixtures, not a live microphone.
-3. The composer button and states, matched to the web's once it ships, with offscreen snapshots.
-4. The macOS engine and the bundle's permission strings.
-5. Model download with progress and checksum, and the settings.
+- **Recording:** `cpal` (the platform's own audio API), downmixed to mono and resampled to 16 kHz, kept in memory only, and written as WAV (16-bit), which the server accepts: 5 minutes is about 9.6 MB, under its 10 MB limit. Opus could replace it later to make uploads smaller.
+- **Upload:** the app has no web session, so the recording goes through the daemon, as attachments do: the app hands the bytes to the daemon over the control socket (a `dictate` request with the audio and its type), and the daemon sends them with the device's token to Chat with Work. Only a computer whose chats are allowed can dictate. The daemon keeps nothing.
+- **The server's side:** a Local Agent counterpart of the web's dictation endpoint, with the same checks, limits, refusals and charging, the same DPoP token and the `local_agent:chat` permission:
+  - `GET /local_agent/dictations/new` answers `{ "cloud": bool, "reason": ... }`, so the button can say why before anyone records. `cloud: false` with no reason reads as unavailable.
+  - `POST /local_agent/dictations` with a multipart `audio` part answers `{ "text": ... }`; an empty text means no words were heard.
+  - Refusals carry `{ "error", "error_description" }`: 400 `invalid`, 403 `no_credits`, `forbidden`, `chat_access_required` or `insufficient_scope`, 413 `too_large`, 415 `unsupported`, 429 `rate_limited`, 502 `transcription_failed`, 503 `unavailable`.
 
 ## The TUI
 
-Skipped for now. `cww` is also the static, sandboxed daemon, so microphone capture doesn't belong in it. If the terminal gets dictation later, it would run a small `cww-dictate` helper (the app's engine as its own binary) that writes recognized text to the TUI over a pipe.
+Not planned for now: `cww` is also the static, sandboxed daemon, and recording audio doesn't belong in it. The daemon's `dictate` request would let a small helper add it later.
+
+## Steps
+
+1. The server's Local Agent dictation endpoints (built in Chat with Work, not deployed yet).
+2. The daemon's `dictate` relay, with its limits, documented in CONTROL.md and PROTOCOL.md.
+3. Audio capture, the silence check and WAV encoding behind one `Dictation` interface in `cww-app`, tested on recorded fixtures rather than a live microphone.
+4. The composer's button and states, matched to the web's, with offscreen snapshots.
+5. The macOS microphone permission (`NSMicrophoneUsageDescription` in the bundle) and the README.
