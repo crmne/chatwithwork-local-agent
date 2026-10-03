@@ -336,22 +336,21 @@ impl ChatState {
         self.access == Access::Ready
     }
 
-    /// The chats the search leaves, newest first.
+    /// Recent, as the web's sidebar lists it: the person's private chats,
+    /// newest started first, that the search's text is in the title of.
+    /// Chats in projects are on the projects' pages.
     pub fn visible(&self) -> Vec<&ChatSummary> {
-        let query = self.search.trim().trim_start_matches('#').to_lowercase();
-        self.list
+        let query = self.search.trim().to_lowercase();
+        let mut chats: Vec<&ChatSummary> = self
+            .list
             .chats
             .iter()
-            .filter(|chat| {
-                query.is_empty()
-                    || chat.title.to_lowercase().contains(&query)
-                    || chat.number.to_string() == query
-                    || chat
-                        .project
-                        .as_ref()
-                        .is_some_and(|p| p.name.to_lowercase().contains(&query))
-            })
-            .collect()
+            .filter(|chat| chat.project.is_none())
+            .filter(|chat| query.is_empty() || chat.title.to_lowercase().contains(&query))
+            .collect();
+        // RFC 3339 in UTC sorts as text; without it, as listed.
+        chats.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        chats
     }
 
     /// A project the list knows, by id.
@@ -1586,12 +1585,46 @@ mod tests {
     }
 
     #[test]
-    fn search_filters_by_title_number_and_project() {
+    fn recent_lists_private_chats_newest_started_first_as_the_web_does() {
         let mut state = ready();
+        state.list.chats = vec![
+            // Answered a moment ago, but started first.
+            ChatSummary {
+                title: "Budget".into(),
+                created_at: at(60),
+                updated_at: at(1),
+                ..summary(1, "idle")
+            },
+            ChatSummary {
+                title: "Contract".into(),
+                created_at: at(30),
+                updated_at: at(30),
+                ..summary(2, "idle")
+            },
+            // In a project: on the project's page, not here.
+            ChatSummary {
+                title: "Launch".into(),
+                created_at: at(10),
+                updated_at: at(10),
+                project: Some(cww::tui::chat::Project {
+                    id: 7,
+                    name: "Falcon".into(),
+                    ..Default::default()
+                }),
+                ..summary(3, "idle")
+            },
+        ];
+        let numbers = |state: &ChatState| -> Vec<u64> {
+            state.visible().iter().map(|chat| chat.number).collect()
+        };
+        assert_eq!(numbers(&state), [2, 1]);
+        // The search looks in titles, as the web's does.
+        state.search = "budg".into();
+        assert_eq!(numbers(&state), [1]);
         state.search = "#1".into();
-        assert_eq!(state.visible().len(), 1);
-        state.search = "chat".into();
-        assert_eq!(state.visible().len(), 2);
+        assert!(numbers(&state).is_empty());
+        state.search = "falcon".into();
+        assert!(numbers(&state).is_empty());
     }
 
     fn models() -> Models {

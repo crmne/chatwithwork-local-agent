@@ -42,6 +42,8 @@ pub struct ChatSummary {
     pub mine: bool,
     /// RFC 3339.
     pub updated_at: String,
+    /// RFC 3339, when it was started; empty from an older server.
+    pub created_at: String,
     pub url: String,
     /// The model the next question goes to; `None` from an older server.
     pub model: Option<ModelRef>,

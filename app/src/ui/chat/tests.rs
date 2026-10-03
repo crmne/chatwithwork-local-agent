@@ -145,7 +145,6 @@ impl Fixture {
         match number {
             12 => "Q3 budget review",
             11 => "Vendor contract renewal",
-            10 => "Falcon launch checklist",
             _ => "Weekly sync summary",
         }
         .into()
@@ -300,8 +299,11 @@ fn the_composer_says_why_it_is_locked_and_the_way_out() {
 #[test]
 fn a_tool_with_its_own_view_gets_a_place_for_it() {
     let mut fx = fixture(Options::default());
-    fx.wait_for_label("Falcon launch checklist");
-    fx.open(10);
+    // A project's chat isn't under Recent, as on the web: open it as its
+    // pin or its link would.
+    fx.wait_for_label("Vendor contract renewal");
+    fx.chat().open(10);
+    fx.harness.run_steps(2);
     fx.wait_for_label("Linear's view");
     fx.harness.get_by_label("Open in browser");
 }
@@ -856,7 +858,7 @@ fn answers_offer_what_the_chat_allows() {
         (Some("11"), Some("115"))
     );
     // A project chat started by someone else: no retry, and no share.
-    fx.harness.get_by_label("Hiring pipeline status").click();
+    fx.chat().open(6);
     fx.wait_for_label("Interviews for the third role finish on Thursday.");
     fx.harness.run_steps(5);
     fx.harness.get_by_label("Branch into a new chat");

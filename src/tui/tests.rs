@@ -1080,6 +1080,7 @@ fn summary(number: u64, title: &str, updated_at: &str) -> ChatSummary {
         project: None,
         mine: true,
         updated_at: updated_at.into(),
+        created_at: updated_at.into(),
         url: format!("https://chatwithwork.com/482139075/chats/{number}"),
         model: None,
         share: None,

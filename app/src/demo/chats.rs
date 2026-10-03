@@ -97,6 +97,7 @@ pub fn can_all() -> Value {
     json!({ "retry": true, "branch": true, "rename": true, "delete": true, "share": true })
 }
 
+/// A private chat, started when it was last updated.
 pub fn summary(number: u64, title: &str, state: &str, updated_at: String) -> Value {
     json!({
         "number": number,
@@ -105,6 +106,7 @@ pub fn summary(number: u64, title: &str, state: &str, updated_at: String) -> Val
         "project": null,
         "model": default_model(),
         "mine": true,
+        "created_at": updated_at,
         "updated_at": updated_at,
         "url": format!("{SERVER}/northwind/chats/{number}"),
         "share": null,
