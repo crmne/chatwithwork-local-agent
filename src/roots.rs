@@ -125,9 +125,29 @@ pub fn add_root(config: &mut Config, paths: &Paths, new: NewRoot<'_>) -> Result<
 
 /// Allow or stop changes in a shared folder, by ID, label or path. Only the
 /// user does this, here or through the control channel; the server can't.
-pub fn set_writable(config: &mut Config, which: &str, writable: bool) -> Result<Root> {
+/// Changes in a folder too broad to share without `--i-know` (the home
+/// folder, one that holds it, a whole drive, a system folder) need
+/// `i_know` too, even when the folder was shared that way: there, every
+/// program's settings and startup files are in reach.
+pub fn set_writable(
+    config: &mut Config,
+    which: &str,
+    writable: bool,
+    i_know: bool,
+) -> Result<Root> {
     let index = find_root(config, which)?;
     let root = &mut config.roots[index];
+    if writable
+        && !i_know
+        && let Some(reason) = too_broad(&root.path)?
+    {
+        bail!(
+            "refusing to allow changes in {}: {reason}, where changes could reach every \
+             program's settings. Allow changes in a narrower folder, or pass --i-know if you \
+             really mean it",
+            root.path.display()
+        );
+    }
     root.writable = writable;
     Ok(root.clone())
 }
@@ -425,17 +445,17 @@ mod tests {
         assert_eq!(root.label, "Shared Docs");
         assert!(!root.writable, "read-only unless asked");
         assert!(
-            set_writable(&mut config, "shared-docs", true)
+            set_writable(&mut config, "shared-docs", true, false)
                 .unwrap()
                 .writable
         );
         assert!(config.roots[0].writable);
         assert!(
-            !set_writable(&mut config, "Shared Docs", false)
+            !set_writable(&mut config, "Shared Docs", false, false)
                 .unwrap()
                 .writable
         );
-        assert!(set_writable(&mut config, "nope", true).is_err());
+        assert!(set_writable(&mut config, "nope", true, false).is_err());
         assert!(
             add_root(&mut config, &paths, new(true)).is_err(),
             "duplicate"
@@ -445,6 +465,36 @@ mod tests {
             "shared-docs"
         );
         assert!(config.roots.is_empty());
+    }
+
+    /// Sharing the home folder takes --i-know; allowing changes there takes
+    /// it again, even though it is already shared.
+    #[test]
+    fn changes_in_the_home_folder_need_i_know() {
+        let home = home_dir().unwrap();
+        let home = home.canonicalize().unwrap_or(home);
+        let mut config = Config::default();
+        config.roots.push(Root {
+            id: "home".into(),
+            label: "Home".into(),
+            path: home,
+            follow_symlinks: false,
+            writable: false,
+        });
+        let err = set_writable(&mut config, "home", true, false).unwrap_err();
+        assert!(err.to_string().contains("--i-know"), "{err}");
+        assert!(!config.roots[0].writable);
+        assert!(
+            set_writable(&mut config, "home", true, true)
+                .unwrap()
+                .writable
+        );
+        // Stopping changes never needs it.
+        assert!(
+            !set_writable(&mut config, "home", false, false)
+                .unwrap()
+                .writable
+        );
     }
 
     #[test]

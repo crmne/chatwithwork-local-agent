@@ -117,6 +117,7 @@ impl Client {
     /// Allow changes in a shared folder, or make it read-only again.
     pub fn set_writable(&self, id: &str, writable: bool) -> Result<()> {
         self.request(&ControlRequest::RootsWritable {
+            i_know: false,
             root: id.into(),
             writable,
         })

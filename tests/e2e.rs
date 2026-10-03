@@ -2881,6 +2881,7 @@ async fn allowing_changes_is_a_local_switch() {
         ControlRequest::RootsWritable {
             root: "docs".into(),
             writable: true,
+            i_know: false,
         },
     )
     .await;
@@ -2909,6 +2910,7 @@ async fn allowing_changes_is_a_local_switch() {
         ControlRequest::RootsWritable {
             root: "docs".into(),
             writable: false,
+            i_know: false,
         },
     )
     .await;

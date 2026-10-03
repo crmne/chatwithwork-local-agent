@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, ToolError};
 use crate::limits::Limiter;
+use crate::policy::fold;
 use crate::reader::safe_fs::{
     ChangeDir, EntryKind, EntryStat, OpenPolicy, RelPath, RenameError, RootHandle, ToolPath,
     temp_name,
@@ -41,6 +42,16 @@ use crate::trash::Trash;
 
 /// The longest diff a dry run returns, in bytes.
 const MAX_DIFF_BYTES: usize = 32 * 1024;
+
+/// What makes a folder Git's internals, whatever it is called: a bare
+/// repository, or a `.git` folder by another name. Git finds a bare
+/// repository from inside it and runs what its `config` says
+/// (`core.fsmonitor`, hooks), so cww never changes one, nor makes one.
+const GIT_MARKERS: [(&str, EntryKind); 3] = [
+    ("HEAD", EntryKind::File),
+    ("objects", EntryKind::Dir),
+    ("refs", EntryKind::Dir),
+];
 
 /// How deep a folder moved or deleted may go. Each level holds an open
 /// handle while it is looked through, so this stays well below the limit
@@ -387,6 +398,9 @@ impl Writer {
         {
             return Err(read_only_inside(&other.label));
         }
+        if git_markers(dir, None)? == GIT_MARKERS.len() {
+            return Err(git_internals());
+        }
         Ok(real)
     }
 
@@ -493,6 +507,14 @@ impl Writer {
         // The name as the kernel will see it, in the folder as it really is.
         let real = real.join(&name);
         Self::check_denied(view, &real)?;
+        // Nor the last of HEAD, objects and refs, which would make the
+        // folder Git's internals.
+        let folded = fold(&name);
+        if GIT_MARKERS.iter().any(|(marker, _)| fold(marker) == folded)
+            && git_markers(&dir, Some(&folded))? == GIT_MARKERS.len() - 1
+        {
+            return Err(git_internals());
+        }
         Ok(Target {
             tool_path: ToolPath::display(&root.id, &parsed.rel),
             name,
@@ -979,6 +1001,9 @@ impl Writer {
         if depth >= MAX_DEPTH {
             return Err(too_deep());
         }
+        if git_markers(dir, None)? == GIT_MARKERS.len() {
+            return Err(git_internals());
+        }
         let real_dir = self.real(dir)?;
         for (name, stat) in dir.entries()? {
             tree.entries += 1;
@@ -1268,6 +1293,28 @@ impl Writer {
         }
         Ok(())
     }
+}
+
+/// How many of [`GIT_MARKERS`] `dir` holds, each as the kind Git wants,
+/// leaving out the one whose folded name is `except`.
+fn git_markers(dir: &ChangeDir, except: Option<&str>) -> Result<usize, ToolError> {
+    let mut found = 0;
+    for (name, kind) in GIT_MARKERS {
+        if except.is_some_and(|e| fold(name) == e) {
+            continue;
+        }
+        if dir.entry(OsStr::new(name))?.is_some_and(|e| e.kind == kind) {
+            found += 1;
+        }
+    }
+    Ok(found)
+}
+
+fn git_internals() -> ToolError {
+    ToolError::denied(
+        "This is Git's internals (a folder with HEAD, objects and refs), which cww never \
+         changes: Git runs what their settings say.",
+    )
 }
 
 fn holds_shared_folder() -> ToolError {

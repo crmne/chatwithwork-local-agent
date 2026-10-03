@@ -120,7 +120,13 @@ enum RootsCommand {
     /// Let Chat with Work change files in a shared folder: create, edit,
     /// move and delete, each approved in Chat with Work, with old versions
     /// and deleted files kept in the system trash.
-    AllowChanges { root: String },
+    AllowChanges {
+        root: String,
+        /// Allow changes even in your home folder, a folder that holds it,
+        /// a whole drive, or a system directory.
+        #[arg(long)]
+        i_know: bool,
+    },
     /// Make a shared folder read-only again.
     DenyChanges { root: String },
 }
@@ -401,15 +407,25 @@ fn roots(paths: &Paths, command: RootsCommand) -> Result<()> {
             );
             notify_daemon(paths, "");
         }
-        RootsCommand::AllowChanges { root } => allow_changes(paths, &mut config, &root, true)?,
-        RootsCommand::DenyChanges { root } => allow_changes(paths, &mut config, &root, false)?,
+        RootsCommand::AllowChanges { root, i_know } => {
+            allow_changes(paths, &mut config, &root, true, i_know)?
+        }
+        RootsCommand::DenyChanges { root } => {
+            allow_changes(paths, &mut config, &root, false, false)?
+        }
     }
     Ok(())
 }
 
 /// `cww roots allow-changes` and `deny-changes`.
-fn allow_changes(paths: &Paths, config: &mut Config, which: &str, writable: bool) -> Result<()> {
-    let root = set_writable(config, which, writable)?;
+fn allow_changes(
+    paths: &Paths,
+    config: &mut Config,
+    which: &str,
+    writable: bool,
+    i_know: bool,
+) -> Result<()> {
+    let root = set_writable(config, which, writable, i_know)?;
     config.save(paths)?;
     if writable {
         println!(

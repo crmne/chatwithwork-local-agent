@@ -522,9 +522,9 @@ impl Daemon {
 
     /// Allow or stop changes in a folder. Only this computer's user can:
     /// the request comes over the control channel, never the tunnel.
-    async fn set_writable(&self, which: String, writable: bool) -> Result<Value> {
+    async fn set_writable(&self, which: String, writable: bool, i_know: bool) -> Result<Value> {
         let root = self
-            .edit_config(move |config, _| set_writable(config, &which, writable))
+            .edit_config(move |config, _| set_writable(config, &which, writable, i_know))
             .await?;
         let mut entry = AuditEntry::event(if writable {
             "root_changes_allowed"
@@ -765,15 +765,7 @@ impl Daemon {
             .iter()
             .map(|p| p.to_path_buf())
             .collect();
-        let never_changed: Vec<&str> = crate::policy::DEFAULT_WRITE_DENY
-            .iter()
-            .copied()
-            .filter(|p| {
-                !removed
-                    .iter()
-                    .any(|r| r.eq_ignore_ascii_case(p.trim_end_matches('/')))
-            })
-            .collect();
+        let never_changed = crate::policy::never_changed(&config.deny.remove);
         json!({
             "builtin": builtin,
             "never_changed": never_changed,
@@ -874,9 +866,11 @@ impl ControlHandler for Daemon {
             }
             request @ ControlRequest::RootsAdd { .. } => self.add_root(request).await,
             ControlRequest::RootsRemove { root } => self.remove_root(root).await,
-            ControlRequest::RootsWritable { root, writable } => {
-                self.set_writable(root, writable).await
-            }
+            ControlRequest::RootsWritable {
+                root,
+                writable,
+                i_know,
+            } => self.set_writable(root, writable, i_know).await,
             ControlRequest::AuditTail { lines } => {
                 let path = self.audit.path().to_path_buf();
                 let n = lines.unwrap_or(50).min(1000);

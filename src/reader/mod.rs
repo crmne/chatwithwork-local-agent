@@ -520,7 +520,13 @@ fn build_state(config: &Config, paths: &Paths) -> Result<State> {
         roots,
         configured: config.roots.clone(),
         deny,
-        write_deny: Arc::new(DenyList::write_from_config(&config.deny)?),
+        write_deny: Arc::new(DenyList::write_from_config(
+            &config.deny,
+            crate::paths::home_dir()
+                .ok()
+                .map(|h| h.canonicalize().unwrap_or(h))
+                .as_deref(),
+        )?),
         allow_hardlinks: config.deny.allow_hardlinks,
         limits: config.limits.clone(),
         index_enabled: config.index.enabled,

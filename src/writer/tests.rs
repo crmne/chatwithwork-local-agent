@@ -1026,3 +1026,74 @@ fn refuses_folders_nested_too_deep() {
     assert!(err.message.contains("levels deep"), "{}", err.message);
     assert!(deep.exists());
 }
+
+/// A bare repository has no `.git` in its path, but Git runs what its
+/// config says from inside it: cww never changes one, nor makes one.
+#[test]
+fn git_internals_are_never_changed_whatever_their_name() {
+    let f = fixture();
+    let repo = f.docs.join("site.git");
+    fs::create_dir_all(repo.join("objects")).unwrap();
+    fs::create_dir_all(repo.join("refs/heads")).unwrap();
+    fs::write(repo.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(repo.join("config"), "[core]\n\tbare = true\n").unwrap();
+    assert_eq!(
+        code(write(
+            &f,
+            "docs:site.git/config",
+            "[core]\n\tfsmonitor = x\n",
+            WriteMode::Replace
+        )),
+        ErrorCode::Denied
+    );
+    assert_eq!(
+        code(create(&f, "docs:site.git/refs/heads/x", "x")),
+        ErrorCode::Denied
+    );
+    let mkdir = f.writer.mkdir(&MkdirRequest {
+        path: "docs:site.git/hooks/sub".into(),
+        parents: true,
+        dry_run: false,
+    });
+    assert_eq!(code(mkdir), ErrorCode::Denied);
+    for path in ["docs:site.git", "docs:"] {
+        let refused = f.writer.delete(&DeleteRequest {
+            path: path.into(),
+            dry_run: false,
+        });
+        assert!(refused.is_err(), "{path}");
+    }
+    fs::create_dir_all(f.docs.join("outer")).unwrap();
+    fs::rename(&repo, f.docs.join("outer/site.git")).unwrap();
+    let refused = f.writer.delete(&DeleteRequest {
+        path: "docs:outer".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    assert_eq!(
+        fs::read_to_string(f.docs.join("outer/site.git/config")).unwrap(),
+        "[core]\n\tbare = true\n"
+    );
+
+    // Nor is one put together a piece at a time.
+    let evil = f.docs.join("evil");
+    fs::create_dir_all(evil.join("objects")).unwrap();
+    fs::create_dir_all(evil.join("refs")).unwrap();
+    fs::write(evil.join("config"), "[core]\n\tfsmonitor = x\n").unwrap();
+    assert_eq!(
+        code(create(&f, "docs:evil/HEAD", "ref: refs/heads/main\n")),
+        ErrorCode::Denied
+    );
+    assert!(!evil.join("HEAD").exists());
+    fs::remove_dir(evil.join("objects")).unwrap();
+    fs::write(evil.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let mkdir = f.writer.mkdir(&MkdirRequest {
+        path: "docs:evil/objects".into(),
+        parents: false,
+        dry_run: false,
+    });
+    assert_eq!(code(mkdir), ErrorCode::Denied);
+    assert!(!evil.join("objects").exists());
+    // A file merely named HEAD elsewhere is fine.
+    create(&f, "docs:sub/HEAD", "x").unwrap();
+}

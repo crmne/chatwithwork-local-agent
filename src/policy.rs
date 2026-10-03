@@ -100,11 +100,17 @@ pub const DEFAULT_DENY: &[&str] = &[
 ];
 
 /// Paths that can be read (unless [`DEFAULT_DENY`] hides them) but never
-/// changed: whatever runs on its own when it changes. Version control
-/// internals (git runs `core.fsmonitor` and hooks), shell startup files,
-/// autostart and launch agents, editor workspace settings that run tasks,
-/// and direnv. Users can drop one under `[deny] remove`, like the deny
-/// list.
+/// changed: whatever runs on its own when it changes, or when a tool is
+/// merely started in a folder. Version control internals (git runs
+/// `core.fsmonitor` and hooks), shell startup files, autostart and launch
+/// agents, editor, debugger and interpreter settings that run code, Python
+/// startup files, and direnv. On top of these, [`HOME_DOT_ENTRIES`]: every
+/// entry of the home folder whose name starts with a dot. Users can drop
+/// one under `[deny] remove`, like the deny list.
+///
+/// Not here, on purpose: build files people ask to have edited (`Makefile`,
+/// `package.json`, `Cargo.toml`, scripts). They run only when the person
+/// builds or runs something, which is the residual risk the README states.
 pub const DEFAULT_WRITE_DENY: &[&str] = &[
     // Version control
     ".git",
@@ -150,16 +156,80 @@ pub const DEFAULT_WRITE_DENY: &[&str] = &[
     "Library/LaunchDaemons",
     "Library/StartupItems",
     "AppData/Roaming/Microsoft/Windows/Start Menu",
+    ".config/uwsm",
     // Editors and tools that run things from a folder's settings
     ".vscode",
+    "*.code-workspace",
     ".idea",
     ".envrc",
     ".direnv",
     ".cargo",
+    ".vim",
+    ".vimrc",
+    ".gvimrc",
+    ".exrc",
+    ".nvimrc",
+    ".nvim.lua",
+    ".config/nvim",
+    ".emacs",
+    ".emacs.d",
+    ".config/emacs",
+    ".dir-locals.el",
+    ".dir-locals-2.el",
+    // Git hook managers and tool version managers that run commands
+    ".husky",
+    ".pre-commit-config.yaml",
+    "lefthook.yml",
+    "lefthook.yaml",
+    ".lefthook.yml",
+    ".lefthook.yaml",
+    "lefthook-local.yml",
+    ".mise.toml",
+    "mise.toml",
+    ".mise.local.toml",
+    "mise.local.toml",
+    ".mise",
+    ".yarnrc",
+    ".yarnrc.yml",
+    // Interpreters and debuggers that run a file in the folder they start in
+    "*.pth",
+    "sitecustomize.py",
+    "usercustomize.py",
+    "site-packages",
+    "dist-packages",
+    ".pdbrc",
+    ".pdbrc.py",
+    ".gdbinit",
+    ".lldbinit",
+    ".irbrc",
+    ".pryrc",
+    ".Rprofile",
     // Windows folder settings
     "desktop.ini",
     "autorun.inf",
 ];
+
+/// The never-changed entry for every name starting with a dot directly in
+/// the home folder (`.config`, `.local`, `.ssh`, `.bashrc`, and whatever
+/// else programs read their settings from). Dropped with `[deny] remove =
+/// ["~/.*"]`.
+pub const HOME_DOT_ENTRIES: &str = "~/.*";
+
+/// The never-changed patterns in effect, as `cww status` lists them.
+pub fn never_changed(removed: &[String]) -> Vec<&'static str> {
+    DEFAULT_WRITE_DENY
+        .iter()
+        .copied()
+        .chain([HOME_DOT_ENTRIES])
+        .filter(|p| !is_removed(removed, p))
+        .collect()
+}
+
+fn is_removed(removed: &[String], pattern: &str) -> bool {
+    removed
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(pattern.trim_end_matches('/')))
+}
 
 #[derive(Debug, Clone)]
 struct Pattern {
@@ -195,12 +265,7 @@ impl DenyList {
                 format!("/{}", parts.join("/"))
             })
             .collect();
-        let kept = |p: &&&str| {
-            !config
-                .remove
-                .iter()
-                .any(|r| r.eq_ignore_ascii_case(p.trim_end_matches('/')))
-        };
+        let kept = |p: &&&str| !is_removed(&config.remove, p);
         let patterns = DEFAULT_DENY
             .iter()
             .filter(kept)
@@ -211,19 +276,33 @@ impl DenyList {
     }
 
     /// The paths changes may never touch, on top of the deny list: the
-    /// built-in [`DEFAULT_WRITE_DENY`], less what `[deny] remove` drops.
-    pub fn write_from_config(config: &DenyConfig) -> Result<Self> {
-        Self::new(
+    /// built-in [`DEFAULT_WRITE_DENY`] and, with a `home` folder, every
+    /// entry in it whose name starts with a dot ([`HOME_DOT_ENTRIES`]),
+    /// less what `[deny] remove` drops.
+    pub fn write_from_config(config: &DenyConfig, home: Option<&Path>) -> Result<Self> {
+        let mut list = Self::new(
             DEFAULT_WRITE_DENY
                 .iter()
-                .filter(|p| {
-                    !config
-                        .remove
-                        .iter()
-                        .any(|r| r.eq_ignore_ascii_case(p.trim_end_matches('/')))
-                })
+                .filter(|p| !is_removed(&config.remove, p))
                 .map(|p| p.to_string()),
-        )
+        )?;
+        if let Some(home) = home
+            && !is_removed(&config.remove, HOME_DOT_ENTRIES)
+        {
+            let parts: Vec<String> = home
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(s) => Some(globset::escape(&s.to_string_lossy())),
+                    _ => None,
+                })
+                .collect();
+            if !parts.is_empty() {
+                let mut pattern = compile(&format!("/{}/.*", parts.join("/")))?;
+                pattern.source = HOME_DOT_ENTRIES.to_string();
+                list.patterns.push(pattern);
+            }
+        }
+        Ok(list)
     }
 
     pub fn new(patterns: impl IntoIterator<Item = String>) -> Result<Self> {
@@ -422,7 +501,7 @@ mod tests {
     #[test]
     fn denies_names_that_fold_to_a_denied_one() {
         let deny = default_list();
-        let write = DenyList::write_from_config(&DenyConfig::default()).unwrap();
+        let write = DenyList::write_from_config(&DenyConfig::default(), None).unwrap();
         for path in [
             "/home/u/.\u{212A}ube/config", // Kelvin sign for K
             "/home/u/.\u{212A}UBE/config",
@@ -487,8 +566,44 @@ mod tests {
     }
 
     #[test]
+    fn nothing_starting_with_a_dot_in_the_home_folder_is_changed() {
+        let home = Path::new("/home/u");
+        let write = DenyList::write_from_config(&DenyConfig::default(), Some(home)).unwrap();
+        for path in [
+            "/home/u/.local/bin/ls",
+            "/home/u/.config/anything/settings.toml",
+            "/home/u/.pythonrc",
+            "/home/u/.Inputrc",
+        ] {
+            assert_eq!(
+                write.denied_by(Path::new(path)),
+                Some(HOME_DOT_ENTRIES),
+                "{path}"
+            );
+        }
+        for path in [
+            "/home/u/notes.md",
+            "/home/u/Documents/.hidden-notes.md",
+            "/home/other/.bashrc2",
+        ] {
+            assert!(!write.is_denied(Path::new(path)), "{path}");
+        }
+        let relaxed = DenyList::write_from_config(
+            &DenyConfig {
+                remove: vec![HOME_DOT_ENTRIES.into()],
+                ..DenyConfig::default()
+            },
+            Some(home),
+        )
+        .unwrap();
+        assert!(!relaxed.is_denied(Path::new("/home/u/.pythonrc")));
+        assert!(never_changed(&[]).contains(&HOME_DOT_ENTRIES));
+        assert!(!never_changed(&[HOME_DOT_ENTRIES.into()]).contains(&HOME_DOT_ENTRIES));
+    }
+
+    #[test]
     fn some_paths_are_never_changed() {
-        let write = DenyList::write_from_config(&DenyConfig::default()).unwrap();
+        let write = DenyList::write_from_config(&DenyConfig::default(), None).unwrap();
         for path in [
             "/home/u/proj/.git/config",
             "/home/u/proj/.git/hooks/pre-commit",
@@ -501,16 +616,33 @@ mod tests {
             "/C:/Users/u/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.txt",
             "/home/u/proj/.envrc",
             "/home/u/photos/Desktop.ini",
+            "/home/u/proj/.venv/lib/python3.13/site-packages/evil.pth",
+            "/home/u/proj/sitecustomize.py",
+            "/home/u/proj/.nvim.lua",
+            "/home/u/proj/.dir-locals.el",
+            "/home/u/proj/.husky/pre-commit",
+            "/home/u/proj/.pre-commit-config.yaml",
+            "/home/u/proj/mise.toml",
+            "/home/u/proj/app.code-workspace",
+            "/home/u/proj/.gdbinit",
         ] {
             assert!(write.is_denied(Path::new(path)), "{path}");
+        }
+        // Build files people want edited stay changeable: they run only when
+        // the person builds.
+        for path in ["/home/u/proj/Makefile", "/home/u/proj/package.json"] {
+            assert!(!write.is_denied(Path::new(path)), "{path}");
         }
         for path in ["/home/u/proj/src/main.rs", "/home/u/notes/git.md"] {
             assert!(!write.is_denied(Path::new(path)), "{path}");
         }
-        let relaxed = DenyList::write_from_config(&DenyConfig {
-            remove: vec![".vscode".into()],
-            ..DenyConfig::default()
-        })
+        let relaxed = DenyList::write_from_config(
+            &DenyConfig {
+                remove: vec![".vscode".into()],
+                ..DenyConfig::default()
+            },
+            None,
+        )
         .unwrap();
         assert!(!relaxed.is_denied(Path::new("/home/u/proj/.vscode/settings.json")));
         assert!(relaxed.is_denied(Path::new("/home/u/proj/.git/config")));

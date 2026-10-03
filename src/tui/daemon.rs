@@ -374,6 +374,7 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
             let request = ControlRequest::RootsWritable {
                 root: id.clone(),
                 writable: *writable,
+                i_know: false,
             };
             let done = |label: &str| {
                 if *writable {
@@ -393,7 +394,7 @@ fn run(paths: &Paths, command: &DaemonCommand) -> Result<(String, bool)> {
                 return Ok((done(&label), false));
             }
             let mut config = Config::load(paths)?;
-            let root = crate::roots::set_writable(&mut config, id, *writable)?;
+            let root = crate::roots::set_writable(&mut config, id, *writable, false)?;
             config.save(paths)?;
             Ok((
                 format!("{} Saved for when the daemon starts.", done(&root.label)),

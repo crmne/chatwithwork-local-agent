@@ -84,6 +84,10 @@ pub enum ControlRequest {
     RootsWritable {
         root: String,
         writable: bool,
+        /// Allow changes even in the home folder, one that holds it, a
+        /// whole drive or a system folder. Only after asking the user.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        i_know: bool,
     },
     /// Stop sharing a folder, by ID, label or path.
     RootsRemove {
