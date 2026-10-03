@@ -69,6 +69,59 @@ pub struct FileSecurity {
     pub unusual: bool,
 }
 
+/// Give the open file `to` (with `WRITE_DAC`) the DACL of the open file
+/// `from` (with `READ_CONTROL`), protected from inheritance if it was.
+pub fn copy_dacl(from: &impl AsRawHandle, to: &impl AsRawHandle) -> Result<()> {
+    use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorControl, PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+        UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            from.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32)).context("reading the access list");
+    }
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    unsafe { GetSecurityDescriptorControl(sd, &mut control, &mut revision) };
+    let protection = if control & SE_DACL_PROTECTED != 0 {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
+    let status = unsafe {
+        SetSecurityInfo(
+            to.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | protection,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null(),
+        )
+    };
+    unsafe {
+        LocalFree(sd);
+    }
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32)).context("setting the access list");
+    }
+    Ok(())
+}
+
 /// The owner SID of an open file or folder (opened with `READ_CONTROL`).
 pub fn file_owner_sid(handle: &impl AsRawHandle) -> Result<String> {
     owner_of(handle.as_raw_handle() as HANDLE, SE_FILE_OBJECT)

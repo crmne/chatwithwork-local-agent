@@ -625,7 +625,7 @@ impl Writer {
             return Ok(result);
         }
         self.limiter.check_change(bytes.len() as u64)?;
-        let staged = t.dir.stage(bytes, new_file_mode())?;
+        let staged = t.dir.stage(bytes, new_file_mode(), None)?;
         t.dir.commit(staged, t.name()).map_err(|e| match e.code {
             ErrorCode::Exists => ToolError::new(
                 ErrorCode::Exists,
@@ -638,8 +638,11 @@ impl Writer {
     }
 
     /// Replace the existing file `t` (described by `old`) with `bytes`:
-    /// write the new version beside it, move the old one to the trash,
-    /// then put the new one in place.
+    /// write the new version beside it, with the old one's group,
+    /// extended attributes or access list, then swap the two in one step
+    /// and move the old one to the trash. Where the filesystem can't swap
+    /// (Windows, and some Linux filesystems), the old one goes to the trash
+    /// first and the new one is put in place after.
     fn replace_file(
         &self,
         t: &Target,
@@ -653,7 +656,37 @@ impl Writer {
         } else {
             old.mode & 0o666
         };
-        let staged = t.dir.stage(bytes, mode)?;
+        let staged = t.dir.stage(bytes, mode, Some(t.name()))?;
+        match t.dir.exchange(&staged, t.name()) {
+            Ok(true) => {
+                // The new version is in place; the old one has the staged
+                // name until it is in the trash.
+                return match t.dir.trash_staged(&staged, t.name(), &self.trash, old) {
+                    Ok(trashed) => {
+                        result.trashed_to = Some(trashed);
+                        result.written = bytes.len() as u64;
+                        if let Some(previous) = &mut result.previous {
+                            previous.in_trash = true;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Put the old version back. Should even that fail,
+                        // it stays beside the file under the hidden name,
+                        // never deleted.
+                        if let Ok(true) = t.dir.exchange(&staged, t.name()) {
+                            t.dir.discard(staged);
+                        }
+                        Err(e)
+                    }
+                };
+            }
+            Ok(false) => {}
+            Err(e) => {
+                t.dir.discard(staged);
+                return Err(e);
+            }
+        }
         let trashed = match t.dir.trash(t.name(), &self.trash, old) {
             Ok(path) => path,
             Err(e) => {
@@ -1258,7 +1291,7 @@ impl Writer {
                         "The file changed while it was being moved. Try again.",
                     ));
                 }
-                let staged = dst.dir.stage(&bytes, stat.mode & 0o666)?;
+                let staged = dst.dir.stage(&bytes, stat.mode & 0o666, None)?;
                 dst.dir.commit(staged, dst.name())?;
             }
             EntryKind::Dir => {
@@ -1361,7 +1394,7 @@ fn copy_tree(from: &ChangeDir, to: &ChangeDir, cap: u64, depth: usize) -> Result
             }
             EntryKind::File => {
                 let (bytes, read) = from.read(&name, cap)?;
-                let staged = to.stage(&bytes, read.mode & 0o666)?;
+                let staged = to.stage(&bytes, read.mode & 0o666, None)?;
                 to.commit(staged, &name)?;
             }
             EntryKind::Dir => {

@@ -34,7 +34,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
     FileAttributeTagInfo, FileIdBothDirectoryInfo, FileRenameInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW, READ_CONTROL,
-    SYNCHRONIZE, SetFileInformationByHandle,
+    SYNCHRONIZE, SetFileInformationByHandle, WRITE_DAC,
 };
 
 use super::{
@@ -610,11 +610,20 @@ impl ChangeDir {
         Ok((bytes, stat))
     }
 
-    pub fn stage(&self, bytes: &[u8], _mode: u32) -> Result<Staged, ToolError> {
+    /// Write `bytes` to a new hidden file in this directory, marked with
+    /// the Mark-of-the-Web, and flush it. With `like`, the name of a file
+    /// it is about to replace, it gets that file's access list too, as far
+    /// as the user may set it.
+    pub fn stage(
+        &self,
+        bytes: &[u8],
+        _mode: u32,
+        like: Option<&OsStr>,
+    ) -> Result<Staged, ToolError> {
         for _ in 0..16 {
             let path = self.child(OsStr::new(&temp_name()));
             let mut file = match OpenOptions::new()
-                .access_mode(FILE_GENERIC_WRITE | DELETE)
+                .access_mode(FILE_GENERIC_WRITE | DELETE | WRITE_DAC | READ_CONTROL)
                 .share_mode(0)
                 .create_new(true)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -624,6 +633,12 @@ impl ChangeDir {
                 Err(e) if is_exists(&e) => continue,
                 Err(e) => return Err(change_error(&e)),
             };
+            if let Some(like) = like
+                && let Ok((old, _)) = self.open_child(like, READ_CONTROL | SYNCHRONIZE)
+                && let Err(e) = crate::win::copy_dacl(&old, &file)
+            {
+                tracing::warn!("keeping the file's access list: {e:#}");
+            }
             let written = file
                 .write_all(bytes)
                 .and_then(|()| file.sync_all())
@@ -650,6 +665,22 @@ impl ChangeDir {
                 })
             }
         }
+    }
+
+    /// Windows has no swap of two names; the caller trashes, then commits.
+    pub fn exchange(&self, _staged: &Staged, _name: &OsStr) -> Result<bool, ToolError> {
+        Ok(false)
+    }
+
+    /// Only after [`ChangeDir::exchange`], which Windows never does.
+    pub fn trash_staged(
+        &self,
+        _staged: &Staged,
+        _shown: &OsStr,
+        _trash: &Trash,
+        _stat: &EntryStat,
+    ) -> Result<PathBuf, ToolError> {
+        Err(ToolError::internal("Windows can't swap files"))
     }
 
     pub fn discard(&self, staged: Staged) {

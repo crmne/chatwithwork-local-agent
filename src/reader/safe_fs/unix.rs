@@ -380,8 +380,16 @@ impl ChangeDir {
 
     /// Write `bytes` to a new hidden file in this directory, with `mode`,
     /// marked as coming from the internet (quarantine, on macOS), and flush
-    /// it to disk. [`ChangeDir::commit`] puts it in place.
-    pub fn stage(&self, bytes: &[u8], mode: u32) -> Result<Staged, ToolError> {
+    /// it to disk. With `like`, the name of a file it is about to replace,
+    /// it also gets that file's group and extended attributes (ACLs among
+    /// them), as far as the user may give them. [`ChangeDir::commit`] or
+    /// [`ChangeDir::exchange`] puts it in place.
+    pub fn stage(
+        &self,
+        bytes: &[u8],
+        mode: u32,
+        like: Option<&OsStr>,
+    ) -> Result<Staged, ToolError> {
         for _ in 0..16 {
             let name = OsString::from(temp_name());
             let fd = match rustix::fs::openat(
@@ -396,6 +404,20 @@ impl ChangeDir {
             };
             let staged = Staged { name };
             let mut file = File::from(fd);
+            if let Some(like) = like
+                && let Ok(old) = rustix::fs::openat(
+                    &self.fd,
+                    like,
+                    OFlags::RDONLY
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC
+                        | OFlags::NOCTTY
+                        | OFlags::NONBLOCK,
+                    Mode::empty(),
+                )
+            {
+                carry_over(&old, &file);
+            }
             let written = file
                 .write_all(bytes)
                 .map_err(|e| e.raw_os_error().map_or(Errno::IO, Errno::from_raw_os_error))
@@ -432,6 +454,59 @@ impl ChangeDir {
                 })
             }
         }
+    }
+
+    /// Swap a staged file with the file `name`, in one step: `name` is the
+    /// new content at once, never missing, and the old file has the staged
+    /// name, for [`ChangeDir::trash_staged`]. `Ok(false)` when the
+    /// filesystem can't swap (`RENAME_EXCHANGE` on Linux, `RENAME_SWAP` on
+    /// macOS); nothing changed then.
+    pub fn exchange(&self, staged: &Staged, name: &OsStr) -> Result<bool, ToolError> {
+        match rustix::fs::renameat_with(
+            &self.fd,
+            &staged.name,
+            &self.fd,
+            name,
+            RenameFlags::EXCHANGE,
+        ) {
+            Ok(()) => {
+                let _ = rustix::fs::fsync(&self.fd);
+                Ok(true)
+            }
+            Err(e)
+                if e == Errno::INVAL
+                    || e == Errno::NOSYS
+                    || e == Errno::NOTSUP
+                    || e == Errno::OPNOTSUPP =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(change_error(e, "putting the file in place")),
+        }
+    }
+
+    /// Move what has the staged name (the old version, after
+    /// [`ChangeDir::exchange`]) to the trash, as the file `shown`.
+    pub fn trash_staged(
+        &self,
+        staged: &Staged,
+        shown: &OsStr,
+        trash: &Trash,
+        stat: &EntryStat,
+    ) -> Result<PathBuf, ToolError> {
+        let name = staged
+            .name
+            .to_str()
+            .ok_or_else(|| ToolError::internal("a temporary name that isn't UTF-8"))?;
+        let went = trash.put(
+            self.fd.as_fd(),
+            name,
+            &self.path.join(shown),
+            stat.identity.0,
+            false,
+        )?;
+        let _ = rustix::fs::fsync(&self.fd);
+        Ok(went)
     }
 
     /// Remove a staged file that won't be used.
@@ -590,6 +665,45 @@ fn mark_from_internet(file: &File) -> Result<(), Errno> {
     ) {
         Ok(()) | Err(Errno::NOTSUP | Errno::OPNOTSUPP) => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+/// Give the new file `to` what the old file `from` has besides its content
+/// and mode: its group, when it isn't the user's own and the user is in
+/// it, and its extended attributes, ACLs among them on Linux. All best
+/// effort: what the user may not set is left out. Attributes only the
+/// system sets (`security.*` such as file capabilities, `trusted.*`) and
+/// the old quarantine mark are never copied.
+fn carry_over(from: &OwnedFd, to: &File) {
+    if let Ok(stat) = rustix::fs::fstat(from)
+        && stat.st_gid != rustix::process::getegid().as_raw()
+    {
+        let _ = rustix::fs::fchown(to, None, Some(rustix::fs::Gid::from_raw(stat.st_gid)));
+    }
+    let mut names = vec![0u8; 64 * 1024];
+    let Ok(len) = rustix::fs::flistxattr(from, &mut names[..]) else {
+        return;
+    };
+    let mut value = vec![0u8; 64 * 1024];
+    for name in names[..len.min(names.len())]
+        .split(|b| *b == 0)
+        .filter(|n| !n.is_empty())
+    {
+        if name.starts_with(b"security.")
+            || name.starts_with(b"trusted.")
+            || name == b"com.apple.quarantine"
+        {
+            continue;
+        }
+        let name = OsStr::from_bytes(name);
+        if let Ok(n) = rustix::fs::fgetxattr(from, name, &mut value[..]) {
+            let _ = rustix::fs::fsetxattr(
+                to,
+                name,
+                &value[..n.min(value.len())],
+                rustix::fs::XattrFlags::empty(),
+            );
+        }
     }
 }
 

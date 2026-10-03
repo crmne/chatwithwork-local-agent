@@ -1108,3 +1108,57 @@ fn git_internals_are_never_changed_whatever_their_name() {
     // A file merely named HEAD elsewhere is fine.
     create(&f, "docs:sub/HEAD", "x").unwrap();
 }
+
+/// A replace swaps the new version in, in one step, and keeps what the
+/// old file had besides its content: its group and extended attributes.
+#[test]
+fn replacing_swaps_in_one_step_and_keeps_group_and_attributes() {
+    use std::os::unix::fs::MetadataExt;
+    let f = fixture();
+    let path = f.docs.join("notes.md");
+    let old_ino = fs::metadata(&path).unwrap().ino();
+    let egid = rustix::process::getegid().as_raw();
+    let other_group = rustix::process::getgroups()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|g| g.as_raw())
+        .find(|g| *g != egid);
+    if let Some(group) = other_group {
+        std::os::unix::fs::chown(&path, None, Some(group)).unwrap();
+    }
+    let has_xattrs = rustix::fs::setxattr(
+        &path,
+        "user.cww.test",
+        b"kept",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .is_ok();
+    let replaced = write(&f, "docs:notes.md", "new\n", WriteMode::Replace).unwrap();
+    let meta = fs::metadata(&path).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+    assert_ne!(meta.ino(), old_ino);
+    // What went to the trash is the old file itself.
+    let trashed = replaced.trashed_to.unwrap();
+    assert_eq!(fs::metadata(&trashed).unwrap().ino(), old_ino);
+    assert_eq!(fs::read_to_string(&trashed).unwrap(), "# Notes\nOne\nTwo\n");
+    if let Some(group) = other_group {
+        assert_eq!(meta.gid(), group);
+    }
+    if has_xattrs {
+        let mut value = [0u8; 16];
+        let n = rustix::fs::getxattr(&path, "user.cww.test", &mut value[..]).unwrap();
+        assert_eq!(&value[..n], b"kept");
+    }
+    // No temporary file is left beside it.
+    let temps = fs::read_dir(&f.docs)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".cww-")
+        })
+        .count();
+    assert_eq!(temps, 0);
+}
