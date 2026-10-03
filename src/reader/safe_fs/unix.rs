@@ -34,12 +34,14 @@ impl RootHandle {
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
             Mode::empty(),
         )?;
+        let stat = rustix::fs::fstat(&dir)?;
         Ok(Self {
             id: root.id.clone(),
             label: root.label.clone(),
             path: root.path.clone(),
             follow_symlinks: root.follow_symlinks,
             writable: root.writable,
+            identity: (stat.st_dev as u64, stat.st_ino as u64),
             dir,
         })
     }
@@ -76,7 +78,7 @@ impl RootHandle {
         Ok(ChangeDir {
             path: self.abs_path(rel),
             fd,
-            dev: stat.st_dev as u64,
+            identity: (stat.st_dev as u64, stat.st_ino as u64),
         })
     }
 
@@ -311,7 +313,8 @@ pub struct ChangeDir {
     /// list, trash records, logs).
     pub path: PathBuf,
     fd: OwnedFd,
-    dev: u64,
+    /// `(device, inode)` of the open directory.
+    identity: (u64, u64),
 }
 
 /// A new file written next to its final name, not yet in place.
@@ -456,13 +459,20 @@ impl ChangeDir {
         )
         .map_err(|e| match e {
             Errno::LOOP | Errno::MLINK => ToolError::denied("Symlinks are never followed."),
+            // `O_DIRECTORY` on a link says "not a directory" on Linux.
+            Errno::NOTDIR
+                if rustix::fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW)
+                    .is_ok_and(|s| FileType::from_raw_mode(s.st_mode) == FileType::Symlink) =>
+            {
+                ToolError::denied("Symlinks are never followed.")
+            }
             other => change_error(other, "opening the folder"),
         })?;
         let stat = rustix::fs::fstat(&fd).map_err(|e| change_error(e, "stat"))?;
         Ok(ChangeDir {
             path: self.path.join(name),
             fd,
-            dev: stat.st_dev as u64,
+            identity: (stat.st_dev as u64, stat.st_ino as u64),
         })
     }
 
@@ -537,7 +547,20 @@ impl ChangeDir {
 
     /// The device the directory is on.
     pub fn device(&self) -> u64 {
-        self.dev
+        self.identity.0
+    }
+
+    /// `(device, inode)` of the open directory: the same folder has the
+    /// same identity whatever name, case or mount reached it.
+    pub fn identity(&self) -> (u64, u64) {
+        self.identity
+    }
+
+    /// Where the kernel says the open directory is (`/proc/self/fd` on
+    /// Linux, `F_GETPATH` on macOS), whatever name reached it. `None` if
+    /// the platform can't say.
+    pub fn real_path(&self) -> Option<PathBuf> {
+        handle_path(&self.fd)
     }
 }
 

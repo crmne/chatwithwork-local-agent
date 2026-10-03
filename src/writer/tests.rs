@@ -803,3 +803,166 @@ fn moves_across_filesystems_by_copying() {
     );
     assert!(!far.join("withlink").exists());
 }
+
+/// Windows reports a folder reached by its 8.3 short name under its long
+/// name. Stand in for that with a real-path resolver that names `GIT~1` as
+/// `.git` and `SSH~1` as `.ssh`: every check must use the real path.
+#[test]
+fn checks_changes_against_the_real_path_of_each_folder() {
+    let f = fixture();
+    fs::create_dir_all(f.docs.join("proj/GIT~1")).unwrap();
+    fs::write(f.docs.join("proj/GIT~1/config"), "[core]\n").unwrap();
+    fs::create_dir_all(f.docs.join("keys/SSH~1")).unwrap();
+    fs::write(f.docs.join("keys/SSH~1/notes.md"), "x").unwrap();
+    let docs = f.docs.clone();
+    let writer = f.writer.with_real_paths(|dir| {
+        dir.real_path().map(|p| {
+            PathBuf::from(
+                p.to_string_lossy()
+                    .replace("GIT~1", ".git")
+                    .replace("SSH~1", ".ssh"),
+            )
+        })
+    });
+    let refused = writer.write(&WriteRequest {
+        path: "docs:proj/GIT~1/config".into(),
+        content: "[core]\n\tfsmonitor = evil\n".into(),
+        ..WriteRequest::default()
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    assert_eq!(
+        fs::read_to_string(docs.join("proj/GIT~1/config")).unwrap(),
+        "[core]\n"
+    );
+    let refused = writer.create(&CreateRequest {
+        path: "docs:proj/GIT~1/hooks.txt".into(),
+        content: "x".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    let refused = writer.mkdir(&MkdirRequest {
+        path: "docs:proj/GIT~1/hooks/x".into(),
+        parents: true,
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    let refused = writer.create(&CreateRequest {
+        path: "docs:keys/SSH~1/authorized_keys".into(),
+        content: "ssh-ed25519 AAAA".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    // A folder holding one can't be moved or deleted either.
+    let refused = writer.delete(&DeleteRequest {
+        path: "docs:keys".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    assert!(docs.join("keys/SSH~1/notes.md").exists());
+    // Elsewhere, changes work as usual.
+    writer
+        .create(&CreateRequest {
+            path: "docs:proj/readme.md".into(),
+            content: "x".into(),
+            dry_run: false,
+        })
+        .unwrap();
+}
+
+/// A folder whose real place can't be told isn't changed.
+#[test]
+fn refuses_changes_where_the_real_path_is_unknown() {
+    let f = fixture();
+    let docs = f.docs.clone();
+    let writer = f.writer.with_real_paths(|_| None);
+    let refused = writer.create(&CreateRequest {
+        path: "docs:new.md".into(),
+        content: "x".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Internal);
+    assert!(!docs.join("new.md").exists());
+}
+
+/// On a case-insensitive disk `PRIVATE` reaches the folder shared read-only
+/// as `private`. Renaming it after it was shared does the same on any disk:
+/// its configured path no longer matches, but its identity does.
+#[test]
+fn folders_shared_read_only_stay_read_only_whatever_name_reaches_them() {
+    let f = fixture();
+    let inner = f.docs.join("private");
+    fs::create_dir_all(&inner).unwrap();
+    fs::write(inner.join("keep.md"), "keep").unwrap();
+    let paths = Paths::under(&f.base.join("cww5"));
+    let root = |id: &str, path: &Path, writable| Root {
+        id: id.into(),
+        label: id.into(),
+        path: path.to_path_buf(),
+        follow_symlinks: false,
+        writable,
+    };
+    let mut config = Config {
+        roots: vec![root("docs", &f.docs, true), root("private", &inner, false)],
+        ..Config::default()
+    };
+    config.index.enabled = false;
+    let reader = Arc::new(Reader::new(&config, &paths, Changes::default()).unwrap());
+    let writer = Writer::new(
+        reader,
+        Arc::new(Limiter::new(Limits::default())),
+        Trash::new(paths.home_trash.clone()),
+    );
+    let other = f.docs.join("PRIVATE");
+    fs::rename(&inner, &other).unwrap();
+
+    let refused = writer.create(&CreateRequest {
+        path: "docs:PRIVATE/new.md".into(),
+        content: "x".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::NotWritable);
+    let refused = writer.write(&WriteRequest {
+        path: "docs:PRIVATE/keep.md".into(),
+        content: "changed".into(),
+        ..WriteRequest::default()
+    });
+    assert_eq!(code(refused), ErrorCode::NotWritable);
+    let refused = writer.mkdir(&MkdirRequest {
+        path: "docs:PRIVATE/a/b".into(),
+        parents: true,
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::NotWritable);
+    let refused = writer.move_entry(&MoveRequest {
+        from: "docs:notes.md".into(),
+        to: "docs:PRIVATE/notes.md".into(),
+        replace: false,
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::NotWritable);
+    let refused = writer.move_entry(&MoveRequest {
+        from: "docs:PRIVATE".into(),
+        to: "docs:p2".into(),
+        replace: false,
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    let refused = writer.delete(&DeleteRequest {
+        path: "docs:PRIVATE".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    // Nor a folder that holds it under yet another name.
+    fs::create_dir_all(f.docs.join("outer")).unwrap();
+    fs::rename(&other, f.docs.join("outer/Private")).unwrap();
+    let refused = writer.delete(&DeleteRequest {
+        path: "docs:outer".into(),
+        dry_run: false,
+    });
+    assert_eq!(code(refused), ErrorCode::Denied);
+    assert_eq!(
+        fs::read_to_string(f.docs.join("outer/Private/keep.md")).unwrap(),
+        "keep"
+    );
+    assert!(!f.docs.join("outer/Private/new.md").exists());
+}

@@ -241,6 +241,9 @@ pub struct RootHandle {
     pub follow_symlinks: bool,
     /// The user allowed changes in this folder.
     pub writable: bool,
+    /// `(device, inode)` of the folder, or its volume serial number and
+    /// file ID on Windows: what identifies it whatever name reaches it.
+    pub identity: (u64, u64),
     dir: sys::DirHandle,
 }
 

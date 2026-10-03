@@ -166,12 +166,14 @@ impl RootHandle {
             ));
         }
         let real = final_path(&file)?;
+        let info = file_info(&file)?;
         Ok(Self {
             id: root.id.clone(),
             label: root.label.clone(),
             path: root.path.clone(),
             follow_symlinks: root.follow_symlinks,
             writable: root.writable,
+            identity: identity_of(&info),
             dir: DirHandle { _file: file, real },
         })
     }
@@ -187,10 +189,7 @@ impl RootHandle {
             file,
             size: ((info.nFileSizeHigh as u64) << 32) | info.nFileSizeLow as u64,
             modified: unix_time(filetime(info.ftLastWriteTime)),
-            identity: (
-                info.dwVolumeSerialNumber as u64,
-                ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
-            ),
+            identity: identity_of(&info),
         })
     }
 
@@ -270,12 +269,13 @@ impl RootHandle {
         policy: OpenPolicy<'_>,
         _strategy: Strategy,
     ) -> Result<ChangeDir, ToolError> {
-        let (dir, _) = self.resolve(rel, Want::Dir, policy, false)?;
+        let (dir, info) = self.resolve(rel, Want::Dir, policy, false)?;
         let real = final_path(&dir).map_err(|e| io_error(&e, "checking the path"))?;
         Ok(ChangeDir {
             path: self.abs_path(rel),
-            dir,
+            _dir: dir,
             real,
+            identity: identity_of(&info),
         })
     }
 
@@ -413,9 +413,12 @@ impl RootHandle {
 pub struct ChangeDir {
     /// The directory's logical absolute path. Local use only.
     pub path: PathBuf,
-    dir: File,
-    /// The path the kernel reports for `dir`.
+    /// Held open while the change runs, like the Unix directory handle.
+    _dir: File,
+    /// The path the kernel reports for `_dir`.
     real: PathBuf,
+    /// The volume serial number and file ID of `_dir`.
+    identity: (u64, u64),
 }
 
 /// A new file written next to its final name, not yet in place.
@@ -432,6 +435,15 @@ fn open_with(path: &Path, access: u32) -> io::Result<File> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
+}
+
+/// The volume serial number and file index: what identifies a file or
+/// folder whatever name reaches it.
+fn identity_of(info: &BY_HANDLE_FILE_INFORMATION) -> (u64, u64) {
+    (
+        info.dwVolumeSerialNumber as u64,
+        ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+    )
 }
 
 fn stat_of(file: &File) -> io::Result<EntryStat> {
@@ -454,10 +466,7 @@ fn stat_of(file: &File) -> io::Result<EntryStat> {
         mode: 0,
         foreign: false,
         readonly: info.dwFileAttributes & FILE_ATTRIBUTE_READONLY != 0,
-        identity: (
-            info.dwVolumeSerialNumber as u64,
-            ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
-        ),
+        identity: identity_of(&info),
     })
 }
 
@@ -498,22 +507,27 @@ impl ChangeDir {
         }
         // An 8.3 short name (`ENVPRO~1`) is another name for a file the
         // deny list may cover: only the file's own name is accepted.
-        if !real.file_name().is_some_and(|n| {
-            n.to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase()
-        }) {
-            return Err(ToolError::denied(
-                "This is a short name for another file; use the file's full name.",
-            ));
+        if !same_name(&real, name) {
+            return Err(short_name());
         }
         Ok((file, stat))
     }
 
+    /// The entry `name`, without following it. An 8.3 short name or any
+    /// other alias for an entry with a different name is refused, so every
+    /// check that sees an entry sees it by its own name.
     pub fn entry(&self, name: &OsStr) -> Result<Option<EntryStat>, ToolError> {
-        match open_with(&self.child(name), FILE_READ_ATTRIBUTES | SYNCHRONIZE) {
-            Ok(file) => stat_of(&file).map(Some).map_err(|e| io_error(&e, "stat")),
-            Err(e) if is_missing(&e) => Ok(None),
-            Err(e) => Err(change_error(&e)),
+        let file = match open_with(&self.child(name), FILE_READ_ATTRIBUTES | SYNCHRONIZE) {
+            Ok(file) => file,
+            Err(e) if is_missing(&e) => return Ok(None),
+            Err(e) => return Err(change_error(&e)),
+        };
+        let stat = stat_of(&file).map_err(|e| io_error(&e, "stat"))?;
+        let real = final_path(&file).map_err(|e| io_error(&e, "checking the path"))?;
+        if !same_name(&real, name) {
+            return Err(short_name());
         }
+        Ok(Some(stat))
     }
 
     pub fn read(&self, name: &OsStr, cap: u64) -> Result<(Vec<u8>, EntryStat), ToolError> {
@@ -603,16 +617,20 @@ impl ChangeDir {
         let real = final_path(&dir).map_err(|e| io_error(&e, "checking the path"))?;
         Ok(ChangeDir {
             path: self.path.join(name),
-            dir,
+            _dir: dir,
             real,
+            identity: stat.identity,
         })
     }
 
+    /// Everything in this directory, links included and not followed.
+    /// Each entry is opened (as a reparse point) and described from its
+    /// handle, so its link count and identity are real.
     pub fn entries(&self) -> Result<Vec<(OsString, EntryStat)>, ToolError> {
         // A fresh handle, so the listing starts at the beginning.
         let dir = open_with(&self.real, windows_sys::Win32::Foundation::GENERIC_READ)
             .map_err(|e| change_error(&e))?;
-        let mut out = Vec::new();
+        let mut names = Vec::new();
         let mut buf = vec![0u64; 8 * 1024];
         loop {
             let ok = unsafe {
@@ -640,32 +658,18 @@ impl ChangeDir {
                 let name =
                     OsString::from_wide(unsafe { std::slice::from_raw_parts(name_ptr, name_len) });
                 if name != "." && name != ".." {
-                    let attributes = entry.FileAttributes;
-                    let kind = if is_link(attributes, entry.EaSize) {
-                        EntryKind::Symlink
-                    } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-                        EntryKind::Dir
-                    } else {
-                        EntryKind::File
-                    };
-                    out.push((
-                        name,
-                        EntryStat {
-                            kind,
-                            size: entry.EndOfFile.max(0) as u64,
-                            modified: unix_time(entry.LastWriteTime),
-                            links: 1,
-                            mode: 0,
-                            foreign: false,
-                            readonly: attributes & FILE_ATTRIBUTE_READONLY != 0,
-                            identity: (0, entry.FileId as u64),
-                        },
-                    ));
+                    names.push(name);
                 }
                 if entry.NextEntryOffset == 0 {
                     break;
                 }
                 offset += entry.NextEntryOffset as usize;
+            }
+        }
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(stat) = self.entry(&name)? {
+                out.push((name, stat));
             }
         }
         Ok(out)
@@ -713,10 +717,31 @@ impl ChangeDir {
     }
 
     pub fn device(&self) -> u64 {
-        file_info(&self.dir)
-            .map(|i| i.dwVolumeSerialNumber as u64)
-            .unwrap_or(0)
+        self.identity.0
     }
+
+    /// The volume serial number and file ID of the open directory.
+    pub fn identity(&self) -> (u64, u64) {
+        self.identity
+    }
+
+    /// Where the kernel says the open directory is
+    /// (`GetFinalPathNameByHandleW`): long names, as stored.
+    pub fn real_path(&self) -> Option<PathBuf> {
+        Some(self.real.clone())
+    }
+}
+
+/// Whether the last component of `real` is `name`, ignoring case: not an
+/// 8.3 short name or another alias for it.
+fn same_name(real: &Path, name: &OsStr) -> bool {
+    real.file_name().is_some_and(|n| {
+        n.to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase()
+    })
+}
+
+fn short_name() -> ToolError {
+    ToolError::denied("This is a short name for another file; use the file's full name.")
 }
 
 /// Rename the open `file` to `target` (a full path), never replacing

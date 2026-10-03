@@ -6,7 +6,14 @@
 //! no absolute paths), the deny list and the list of paths that are never
 //! changed, the rules on names and kinds of file ([`kinds`]), the checks on
 //! what is there now (no links, no hard links, no executables, no special
-//! files, no other user's files), then the change budgets. The change itself
+//! files, no other user's files), then the change budgets. The folder a
+//! change happens in is opened one folder at a time from the shared folder,
+//! never through a link, and every folder opened on the way is checked by
+//! what the kernel opened, not by the name asked for: its real path
+//! (`/proc/self/fd`, `F_GETPATH`, `GetFinalPathNameByHandleW`, so a case
+//! variant or an 8.3 short name can't dodge the deny lists) and its
+//! identity (so a folder shared read-only stays read-only whatever name
+//! reaches it). The change itself
 //! happens relative to a handle on the folder (see `safe_fs::ChangeDir`):
 //! new content is written to a hidden file beside the target and flushed,
 //! the old version goes to the system trash, and the new file is renamed
@@ -242,12 +249,17 @@ pub struct DocumentRequest {
     pub dry_run: bool,
 }
 
+/// Where the kernel says an open folder is. Tests stand in their own, as
+/// Windows would report a folder reached by its 8.3 short name.
+type RealPathFn = Arc<dyn Fn(&ChangeDir) -> Option<PathBuf> + Send + Sync>;
+
 /// Makes changes, one at a time.
 pub struct Writer {
     reader: Arc<Reader>,
     limiter: Arc<Limiter>,
     trash: Trash,
     lock: Mutex<()>,
+    real_path: RealPathFn,
 }
 
 /// A path a change acts on: its folder, opened, and its name there.
@@ -277,6 +289,17 @@ struct Tree {
 fn sha256(bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
     digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A change inside a folder that is shared on its own as read-only.
+fn read_only_inside(label: &str) -> ToolError {
+    ToolError::new(
+        ErrorCode::NotWritable,
+        format!(
+            "This path is inside “{label}”, which is shared read-only. The person can allow \
+             changes for it in the Local Agent on their computer."
+        ),
+    )
 }
 
 fn not_writable(root: &RootHandle) -> ToolError {
@@ -318,7 +341,63 @@ impl Writer {
             limiter,
             trash,
             lock: Mutex::new(()),
+            real_path: Arc::new(ChangeDir::real_path),
         }
+    }
+
+    /// Use `real_path` to find where an open folder really is.
+    #[cfg(all(test, unix))]
+    fn with_real_paths(
+        mut self,
+        real_path: impl Fn(&ChangeDir) -> Option<PathBuf> + Send + Sync + 'static,
+    ) -> Self {
+        self.real_path = Arc::new(real_path);
+        self
+    }
+
+    /// Where the kernel says `dir` is. A folder whose real place can't be
+    /// told isn't changed.
+    fn real(&self, dir: &ChangeDir) -> Result<PathBuf, ToolError> {
+        (self.real_path)(dir).ok_or_else(|| {
+            ToolError::internal("can't tell where this folder really is, so nothing was changed")
+        })
+    }
+
+    /// Check a folder opened on the way to a change, by what was opened:
+    /// both deny lists against its real path, and its identity against the
+    /// folders shared read-only. Returns its real path.
+    fn check_folder(
+        &self,
+        view: &ChangeView,
+        root: &RootHandle,
+        dir: &ChangeDir,
+    ) -> Result<PathBuf, ToolError> {
+        let real = self.real(dir)?;
+        Self::check_denied(view, &real)?;
+        if let Some(other) = view.root_with_identity(dir.identity(), &root.id)
+            && !view.writable(&other.id)
+        {
+            return Err(read_only_inside(&other.label));
+        }
+        Ok(real)
+    }
+
+    /// Open the folder `parent` of `root` for a change, one folder at a
+    /// time and never through a link, checking each folder opened (see
+    /// [`Writer::check_folder`]). Returns it and its real path.
+    fn open_parent(
+        &self,
+        view: &ChangeView,
+        root: &RootHandle,
+        parent: &RelPath,
+    ) -> Result<(ChangeDir, PathBuf), ToolError> {
+        let mut dir = root.change_dir(&RelPath::default(), Self::policy(view))?;
+        let mut real = self.check_folder(view, root, &dir)?;
+        for part in parent.components() {
+            dir = dir.subdir(OsStr::new(part))?;
+            real = self.check_folder(view, root, &dir)?;
+        }
+        Ok((dir, real))
     }
 
     /// Hold the writer: changes run one at a time. A change that panicked
@@ -358,6 +437,8 @@ impl Writer {
 
     /// A folder shared on its own as read-only stays read-only, even inside
     /// a shared folder that allows changes.
+    /// This is the check by name; [`Writer::check_folder`] checks by
+    /// identity what was opened, which no case or alias can dodge.
     fn check_nested(view: &ChangeView, root: &RootHandle, abs: &Path) -> Result<(), ToolError> {
         let inner = view
             .configured
@@ -365,14 +446,7 @@ impl Writer {
             .filter(|other| other.id != root.id && !other.writable)
             .find(|other| other.path.starts_with(&root.path) && abs.starts_with(&other.path));
         match inner {
-            Some(other) => Err(ToolError::new(
-                ErrorCode::NotWritable,
-                format!(
-                    "This path is inside “{}”, which is shared read-only. The person can allow \
-                     changes for it in the Local Agent on their computer.",
-                    other.label
-                ),
-            )),
+            Some(other) => Err(read_only_inside(&other.label)),
             None => Ok(()),
         }
     }
@@ -396,8 +470,8 @@ impl Writer {
         let parent = RelPath::parse(
             &parsed.rel.components()[..parsed.rel.components().len() - 1].join("/"),
         )?;
-        let dir = root
-            .change_dir(&parent, Self::policy(view))
+        let (dir, real) = self
+            .open_parent(view, &root, &parent)
             .map_err(|e| match e.code {
                 ErrorCode::NotFound => ToolError::new(
                     ErrorCode::NotFound,
@@ -408,6 +482,8 @@ impl Writer {
                 ),
                 _ => e,
             })?;
+        // The name as the kernel will see it, in the folder as it really is.
+        Self::check_denied(view, &real.join(&name))?;
         Ok(Target {
             tool_path: ToolPath::display(&root.id, &parsed.rel),
             name,
@@ -815,15 +891,18 @@ impl Writer {
             ));
         }
         let mut dir = root.change_dir(&RelPath::default(), Self::policy(&view))?;
+        let mut real = self.check_folder(&view, &root, &dir)?;
         let mut rel = RelPath::default();
         let mut missing = Vec::new();
         for (i, part) in parsed.rel.components().iter().enumerate() {
             rel = rel.join(part);
             Self::check_denied(&view, &root.abs_path(&rel))?;
             Self::check_nested(&view, &root, &root.abs_path(&rel))?;
+            Self::check_denied(&view, &real.join(part))?;
             match dir.entry(OsStr::new(part))? {
                 Some(stat) if stat.kind == EntryKind::Dir => {
                     dir = dir.subdir(OsStr::new(part))?;
+                    real = self.check_folder(&view, &root, &dir)?;
                 }
                 Some(_) => {
                     return Err(ToolError::new(
@@ -839,9 +918,12 @@ impl Writer {
                     for rest in &parsed.rel.components()[i..] {
                         kinds::check_new_name(rest)?;
                     }
+                    let mut ahead = real.join(part);
                     for rest in &parsed.rel.components()[i + 1..] {
                         rel = rel.join(rest);
+                        ahead.push(rest);
                         Self::check_denied(&view, &root.abs_path(&rel))?;
+                        Self::check_denied(&view, &ahead)?;
                     }
                     missing = parsed.rel.components()[i..].to_vec();
                     break;
@@ -872,7 +954,13 @@ impl Writer {
 
     /// Look through a folder about to be moved or deleted: nothing in it may
     /// be on the deny list, and it may hold at most `max_change_entries`.
-    fn inspect_tree(view: &ChangeView, dir: &ChangeDir, tree: &mut Tree) -> Result<(), ToolError> {
+    fn inspect_tree(
+        &self,
+        view: &ChangeView,
+        dir: &ChangeDir,
+        tree: &mut Tree,
+    ) -> Result<(), ToolError> {
+        let real_dir = self.real(dir)?;
         for (name, stat) in dir.entries()? {
             tree.entries += 1;
             if tree.entries > view.limits.max_change_entries {
@@ -885,17 +973,21 @@ impl Writer {
                     ),
                 ));
             }
-            let abs = dir.path.join(&name);
-            if let Some(pattern) = view.deny.denied_by(&abs) {
-                return Err(ToolError::denied(format!(
-                    "The folder holds something on the deny list ({pattern}), so it can't be \
-                     moved or deleted."
-                )));
+            for abs in [dir.path.join(&name), real_dir.join(&name)] {
+                if let Some(pattern) = view.deny.denied_by(&abs) {
+                    return Err(ToolError::denied(format!(
+                        "The folder holds something on the deny list ({pattern}), so it can't \
+                         be moved or deleted."
+                    )));
+                }
             }
             match stat.kind {
                 EntryKind::Dir => {
+                    if view.root_with_identity(stat.identity, "").is_some() {
+                        return Err(holds_shared_folder());
+                    }
                     let sub = dir.subdir(&name)?;
-                    Self::inspect_tree(view, &sub, tree)?;
+                    self.inspect_tree(view, &sub, tree)?;
                 }
                 EntryKind::File => {
                     tree.bytes += stat.size;
@@ -934,15 +1026,16 @@ impl Writer {
                          changed.",
                     ));
                 }
-                if view.configured.iter().any(|r| r.path.starts_with(&t.abs)) {
-                    return Err(ToolError::denied(format!(
-                        "This folder holds a shared folder, so it can't be {verb}d. The person \
-                         can stop sharing that one first."
-                    )));
+                // By name, and by identity: the folder itself, or any folder
+                // in it, may be a shared folder reached by another name.
+                if view.configured.iter().any(|r| r.path.starts_with(&t.abs))
+                    || view.root_with_identity(stat.identity, "").is_some()
+                {
+                    return Err(holds_shared_folder());
                 }
                 let sub = t.dir.subdir(t.name())?;
                 let mut tree = Tree::default();
-                Self::inspect_tree(view, &sub, &mut tree)?;
+                self.inspect_tree(view, &sub, &mut tree)?;
                 Ok((stat, Some(tree)))
             }
             EntryKind::Symlink => Err(ToolError::denied(
@@ -1132,6 +1225,13 @@ impl Writer {
         }
         Ok(())
     }
+}
+
+fn holds_shared_folder() -> ToolError {
+    ToolError::denied(
+        "This folder is or holds a shared folder, so it can't be moved or deleted. The person \
+         can stop sharing that one first.",
+    )
 }
 
 /// Copy the contents of `from` into `to`: regular files and folders only.

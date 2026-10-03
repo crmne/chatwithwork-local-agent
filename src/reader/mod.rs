@@ -474,6 +474,21 @@ pub struct ChangeView {
 }
 
 impl ChangeView {
+    /// The shared folder whose folder has `identity`, other than `except`,
+    /// whatever name or case reaches it.
+    pub fn root_with_identity(&self, identity: (u64, u64), except: &str) -> Option<&RootHandle> {
+        self.roots
+            .iter()
+            .filter(|r| r.id != except)
+            .find(|r| r.identity == identity)
+            .map(|r| r.as_ref())
+    }
+
+    /// Whether the shared folder `id` allows changes, as configured now.
+    pub fn writable(&self, id: &str) -> bool {
+        self.configured.iter().any(|r| r.id == id && r.writable)
+    }
+
     /// The open root `id`, as reads find it.
     pub fn root(&self, id: &str) -> Result<Arc<RootHandle>, ToolError> {
         if let Some(root) = self.roots.iter().find(|r| r.id == id) {
