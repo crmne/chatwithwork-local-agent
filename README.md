@@ -433,4 +433,4 @@ Licensed under either of
 
 at your option. Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in this project, as defined in the Apache-2.0 license, is dual licensed as above, without any additional terms or conditions.
 
-"Chat with Work" and its logo are trademarks of Plenty UG. The license covers the code, not the name or the logo in `app/assets`.
+"Chat with Work" and its logo are trademarks of PlentyLabs UG (haftungsbeschränkt) & Co. KG. The license covers the code, not the name or the logo in `app/assets`.

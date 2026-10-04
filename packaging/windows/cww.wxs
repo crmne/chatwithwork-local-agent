@@ -14,14 +14,15 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
     Name="Chat with Work Local Agent"
-    Manufacturer="Plenty UG"
+    Manufacturer="PlentyLabs UG (haftungsbeschränkt) &amp; Co. KG"
     Version="$(Version)"
     UpgradeCode="{FBC69B33-161E-40DC-9D83-5B54DB1A9821}"
     Scope="perUser"
     Compressed="yes"
-    Language="1033">
+    Language="1033"
+    Codepage="1252">
     <!-- Never change the UpgradeCode: it ties every version together. -->
-    <SummaryInformation Description="Chat with Work Local Agent (cww)" Manufacturer="Plenty UG" />
+    <SummaryInformation Codepage="1252" Description="Chat with Work Local Agent (cww)" Manufacturer="PlentyLabs UG (haftungsbeschränkt) &amp; Co. KG" />
     <MajorUpgrade
       Schedule="afterInstallInitialize"
       AllowSameVersionUpgrades="yes"

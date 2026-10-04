@@ -12,7 +12,7 @@ Commands:
 - cww
 AppsAndFeaturesEntries:
 - DisplayName: Chat with Work Local Agent
-  Publisher: Plenty UG
+  Publisher: "PlentyLabs UG (haftungsbeschränkt) & Co. KG"
   UpgradeCode: '{FBC69B33-161E-40DC-9D83-5B54DB1A9821}'
   InstallerType: wix
 Installers:
