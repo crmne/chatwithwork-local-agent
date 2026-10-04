@@ -15,6 +15,6 @@
     <!-- A menu bar app: no Dock icon and no menu bar of its own. -->
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSHumanReadableCopyright</key><string>MIT or Apache 2.0. Chat with Work is a trademark of Plenty UG.</string>
+    <key>NSHumanReadableCopyright</key><string>© 2026 Carmine Paolino. MIT or Apache 2.0. Chat with Work is a trademark of Plenty UG.</string>
 </dict>
 </plist>

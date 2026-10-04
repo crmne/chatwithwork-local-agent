@@ -8,6 +8,7 @@ tool:
 nfpm:
   name: chatwithwork-local-agent
   maintainer: Carmine Paolino <carmine@paolino.me>
+  vendor: "PlentyLabs UG (haftungsbeschränkt) & Co. KG"
   homepage: https://chatwithwork.com
   description: |-
     Chat with Work Local Agent: share folders with Chat with Work, read-only.
