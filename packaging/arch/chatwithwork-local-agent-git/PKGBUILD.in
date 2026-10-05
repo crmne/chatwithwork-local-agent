@@ -7,7 +7,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/crmne/chatwithwork-local-agent"
 license=('MIT OR Apache-2.0')
 install="${pkgname}.install"
-depends=('glibc' 'gcc-libs' 'libglvnd' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'libxkbcommon' 'wayland')
+depends=('glibc' 'gcc-libs' 'libglvnd' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'libxkbcommon' 'libxkbcommon-x11' 'wayland')
 makedepends=('git' 'cargo')
 optdepends=('org.freedesktop.secrets: store the device key in your keyring'
             'xdg-desktop-portal: native folder picker'

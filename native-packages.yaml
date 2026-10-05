@@ -63,12 +63,12 @@ nfpm:
   # at runtime, so declare them explicitly. The keyring and portal are optional.
   overrides:
     deb:
-      depends: [libgl1, libegl1, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0, libwayland-cursor0, libwayland-egl1]
+      depends: [libgl1, libegl1, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1]
       recommends:
       - xdg-desktop-portal
       - gnome-keyring | kwalletmanager | keepassxc
     rpm:
-      depends: [libglvnd-glx, libglvnd-egl, libX11, libXcursor, libXi, libXrandr, libxkbcommon, libwayland-client, libwayland-cursor, libwayland-egl]
+      depends: [libglvnd-glx, libglvnd-egl, libX11, libX11-xcb, libXcursor, libXi, libXrandr, libxkbcommon, libxkbcommon-x11, libwayland-client, libwayland-cursor, libwayland-egl]
       recommends:
       - xdg-desktop-portal
       - gnome-keyring

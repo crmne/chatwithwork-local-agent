@@ -51,7 +51,7 @@ docker run --rm --platform "linux/${target#linux-}" \
     else pacman -S --noconfirm python; fi
     python3 - <<"PY"
 import ctypes
-for name in ("libGL.so.1", "libEGL.so.1", "libX11.so.6", "libXcursor.so.1", "libXi.so.6", "libXrandr.so.2", "libxkbcommon.so.0", "libwayland-client.so.0", "libwayland-cursor.so.0", "libwayland-egl.so.1"):
+for name in ("libGL.so.1", "libEGL.so.1", "libX11.so.6", "libX11-xcb.so.1", "libXcursor.so.1", "libXi.so.6", "libXrandr.so.2", "libxkbcommon.so.0", "libxkbcommon-x11.so.0", "libwayland-client.so.0", "libwayland-cursor.so.0", "libwayland-egl.so.1"):
     ctypes.CDLL(name)
 PY
     test -s /usr/lib/systemd/user/cww.service
