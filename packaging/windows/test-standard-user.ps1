@@ -2,13 +2,22 @@
 # standard account so an administrator runner cannot mask startup failures.
 param([Parameter(Mandatory)] [string] $Msi)
 $ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Use this account-provisioning test only on an isolated GitHub Actions runner' }
 $name = 'cww-test-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $directory = Join-Path $env:PUBLIC $name
 $taskName = 'Chat with Work Local Agent'
 $createdUser = $false
 $createdTask = $false
+$installerPolicy = 'HKLM:\Software\Policies\Microsoft\Windows\Installer'
+$previousDisableMsi = Get-ItemPropertyValue -Path $installerPolicy -Name DisableMSI -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $directory | Out-Null
 try {
+  # Windows Server runners default to blocking unmanaged per-user MSI
+  # packages (1625). Exercise the desktop Windows policy without granting
+  # the test user elevation. Restore the runner setting in finally.
+  # https://learn.microsoft.com/en-us/windows/win32/msi/disablemsi
+  New-Item -Path $installerPolicy -Force | Out-Null
+  New-ItemProperty -Path $installerPolicy -Name DisableMSI -PropertyType DWord -Value 0 -Force | Out-Null
   Copy-Item -LiteralPath (Resolve-Path $Msi).Path -Destination (Join-Path $directory 'cww-test.msi')
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'test-install.ps1') -Destination $directory
   $password = ConvertTo-SecureString ('Cww!' + [Guid]::NewGuid().ToString('N')) -AsPlainText -Force
@@ -53,6 +62,11 @@ try {
   $process.Dispose()
   Get-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
 } finally {
+  if ($null -eq $previousDisableMsi) {
+    Remove-ItemProperty -Path $installerPolicy -Name DisableMSI
+  } else {
+    Set-ItemProperty -Path $installerPolicy -Name DisableMSI -Value $previousDisableMsi
+  }
   if ($createdTask) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false }
   if ($createdUser) { Remove-LocalUser -Name $name }
   Remove-Item -LiteralPath $directory -Recurse -Force
