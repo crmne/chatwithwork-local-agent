@@ -78,13 +78,23 @@ jobs:
           bash packaging/macos/test-install.sh dist/cww-test.pkg
           rm -rf "dist/Chat with Work.app" dist/cww-test.pkg
 
-      - name: Build and test the Windows installer
+      - name: Build the Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           dotnet tool install --global wix --version 5.0.2
           $version = ((Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$').Matches.Groups[1].Value)
           ./packaging/windows/build-msi.ps1 -Version $version -Arch x64 -Binary target/release/cww.exe -Output dist/cww-test.msi
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: cww-windows-installer
+          path: dist/cww-test.msi
+          if-no-files-found: error
+      - name: Test the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
           ./packaging/windows/test-install.ps1 -Msi dist/cww-test.msi
           ./packaging/windows/test-standard-user.ps1 -Msi dist/cww-test.msi
           Remove-Item dist/cww-test.msi, dist/cww-test.wixpdb

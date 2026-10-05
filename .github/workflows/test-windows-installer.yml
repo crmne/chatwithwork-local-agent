@@ -1,0 +1,46 @@
+name: Windows installer regression
+
+# Re-run installer checks against a preserved CI build while developing the
+# test scripts, without recompiling unchanged Rust code.
+on:
+  workflow_dispatch:
+    inputs:
+      build-run:
+        description: CI run containing the cww-windows-installer artifact (otherwise use the release below)
+        type: string
+      release-tag:
+        description: Release to test when build-run is empty
+        default: v0.3.0
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        if: inputs.build-run != ''
+        with:
+          name: cww-windows-installer
+          path: dist
+          run-id: ${{ inputs.build-run }}
+          github-token: ${{ github.token }}
+      - name: Download a published installer
+        if: inputs.build-run == ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern '*-x86_64-pc-windows-msvc.msi' --dir dist
+          Get-ChildItem dist/*.msi | Rename-Item -NewName cww-test.msi
+      - name: Test administrator and standard accounts
+        shell: pwsh
+        run: |
+          ./packaging/windows/test-install.ps1 -Msi dist/cww-test.msi
+          ./packaging/windows/test-standard-user.ps1 -Msi dist/cww-test.msi

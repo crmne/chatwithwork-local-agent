@@ -16,11 +16,18 @@ $dir = Join-Path $env:LOCALAPPDATA "Programs\Chat with Work Local Agent"
 $programs = [Environment]::GetFolderPath("Programs", "DoNotVerify")
 $startup = Join-Path ([Environment]::GetFolderPath('Startup', 'DoNotVerify')) 'Chat with Work Local Agent.lnk'
 function Run-Msi([string] $action) {
-  $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $action, "`"$Msi`"", "/qn", "/norestart"
-  if ($process.ExitCode -notin @(0, 3010)) { throw "msiexec $action failed: $($process.ExitCode)" }
+  New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
+  $log = Join-Path $env:TEMP ('cww-msi-' + [Guid]::NewGuid().ToString('N') + '.log')
+  $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $action, "`"$Msi`"", "/qn", "/norestart", '/L*V', "`"$log`""
+  if ($process.ExitCode -notin @(0, 3010)) {
+    if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | Write-Host }
+    throw "msiexec $action failed: $($process.ExitCode)"
+  }
 }
+$installed = $false
 try {
   Run-Msi "/i"
+  $installed = $true
   foreach ($binary in "cww.exe", "cww-app.exe", "cww-agent.exe") {
     if (-not (Test-Path (Join-Path $dir $binary))) { throw "Missing $binary" }
   }
@@ -81,7 +88,7 @@ try {
     & (Join-Path $dir 'cww.exe') daemon uninstall
     Remove-Item Env:CWW_HOME
   }
-  Run-Msi "/x"
+  if ($installed) { Run-Msi "/x" }
 }
 foreach ($binary in "cww.exe", "cww-app.exe", "cww-agent.exe") {
   if (Test-Path (Join-Path $dir $binary)) { throw "Uninstall left $binary" }
