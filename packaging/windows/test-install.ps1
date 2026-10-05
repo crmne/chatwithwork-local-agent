@@ -7,7 +7,6 @@ if ($StandardUser) {
   if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'This regression test must run without administrator rights'
   }
-  $env:CWW_HOME = Join-Path $env:LOCALAPPDATA 'Cww smoke test\state & data'
 }
 $Msi = (Resolve-Path $Msi).Path
 $dir = Join-Path $env:LOCALAPPDATA "Programs\Chat with Work Local Agent"
@@ -50,6 +49,18 @@ try {
       if ($status -notmatch 'running \(pid') { break }
       Start-Sleep -Milliseconds 200
     }
+    # Custom paths must survive shortcut argument quoting, too. Set this
+    # after the MSI check: deferred installer actions have their own environment.
+    $env:CWW_HOME = Join-Path $env:LOCALAPPDATA 'Cww smoke test\state & data'
+    & (Join-Path $dir 'cww.exe') daemon install
+    if ($LASTEXITCODE -ne 0) { throw 'Could not register the custom state path' }
+    & (Join-Path $dir 'cww.exe') daemon stop
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stop the custom agent' }
+    for ($i = 0; $i -lt 30; $i++) {
+      $status = & (Join-Path $dir 'cww.exe') status
+      if ($status -notmatch 'running \(pid') { break }
+      Start-Sleep -Milliseconds 200
+    }
     Start-Process -FilePath $startup
     $running = $false
     for ($i = 0; $i -lt 30; $i++) {
@@ -63,6 +74,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Starting the agent again as a standard user failed' }
   }
 } finally {
+  if ($StandardUser -and $env:CWW_HOME) {
+    & (Join-Path $dir 'cww.exe') daemon uninstall
+    Remove-Item Env:CWW_HOME
+  }
   Run-Msi "/x"
 }
 foreach ($binary in "cww.exe", "cww-app.exe", "cww-agent.exe") {
