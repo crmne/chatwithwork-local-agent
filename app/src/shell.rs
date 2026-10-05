@@ -167,6 +167,10 @@ fn create_window<'a>(
         viewport: egui::ViewportBuilder::default()
             .with_title("Chat with Work")
             .with_app_id("cww-app")
+            .with_decorations(cfg!(target_os = "macos"))
+            .with_fullsize_content_view(cfg!(target_os = "macos"))
+            .with_titlebar_shown(false)
+            .with_title_shown(false)
             .with_inner_size([840.0, 620.0])
             .with_min_inner_size([660.0, 460.0])
             .with_icon(crate::icons::window()),

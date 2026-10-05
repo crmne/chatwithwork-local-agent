@@ -25,6 +25,10 @@ impl Capture {
 }
 
 impl eframe::App for Capture {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        eframe::App::logic(&mut self.app, ctx, frame);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         eframe::App::ui(&mut self.app, ui, frame);
         let ctx = ui.ctx().clone();

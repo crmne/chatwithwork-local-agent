@@ -1352,6 +1352,7 @@ dependencies = [
  "env_logger",
  "fastframe-emoji",
  "fastframe-instance",
+ "fastframe-macos",
  "fastframe-scroll",
  "fastframe-text",
  "fastframe-theme",
@@ -2034,6 +2035,18 @@ dependencies = [
  "directories",
  "getrandom 0.4.3",
  "log",
+]
+
+[[package]]
+name = "fastframe-macos"
+version = "0.4.1"
+source = "git+https://github.com/crmne/fastframe?tag=v0.4.1#23d87e048185ef317f272e2a67416f516b2f2b04"
+dependencies = [
+ "eframe",
+ "egui",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "raw-window-handle",
 ]
 
 [[package]]

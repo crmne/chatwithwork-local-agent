@@ -125,6 +125,16 @@ fn nothing_is_shared_until_the_user_says_so() {
     fx.harness.run_steps(30);
     assert!(fx.changes().is_empty(), "{:?}", fx.changes());
 
+    // The setup page can be taller than the window. Bring its last card
+    // into view before clicking, just as a user would.
+    fx.harness.hover_at(egui::pos2(420.0, 600.0));
+    fx.harness.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -3.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    fx.harness.run_steps(60);
     fx.harness.get_by_label("Share Documents").click();
     let added = fx.wait_for_request("roots_add");
     assert_eq!(added["path"], serde_json::json!(fx.documents));
@@ -346,6 +356,191 @@ fn a_stopped_agent_can_be_started_from_the_window() {
     harness.get_by_label_contains("The Local Agent isn't running");
     harness.get_by_label("Start Local Agent");
     harness.get_by_label_contains("Not running");
+}
+
+fn welcome_harness(
+    size: [f32; 2],
+    platform: Platform,
+    dark: bool,
+    renderer: Option<egui_kittest::wgpu::WgpuTestRenderer>,
+) -> (tempfile::TempDir, Harness<'static, SettingsApp>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = crate::paths::Paths::under(tmp.path());
+    let shared = Shared::new(
+        Client::new(paths.socket_path()),
+        paths,
+        Arc::new(crate::pairing::Cli),
+    );
+    shared.set_status(None);
+    let app = SettingsApp::new(shared, Theme::new(platform, dark, None));
+    let mut builder = Harness::builder().with_size(size);
+    if let Some(renderer) = renderer {
+        builder = builder.renderer(renderer);
+    }
+    let mut harness = builder.build_ui_state(
+        |ui, app: &mut SettingsApp| {
+            let screen = ui.ctx().content_rect();
+            let mut window = ui.new_child(egui::UiBuilder::new().max_rect(screen));
+            window.set_clip_rect(screen);
+            app.show(&mut window);
+        },
+        app,
+    );
+    harness.run_steps(5);
+    (tmp, harness)
+}
+
+#[test]
+fn welcome_is_centered_at_each_window_size() {
+    for platform in [Platform::Windows, Platform::MacOs, Platform::Linux] {
+        for dark in [false, true] {
+            for size in [[660.0, 460.0], [840.0, 620.0], [1100.0, 760.0]] {
+                let (_tmp, harness) = welcome_harness(size, platform, dark, None);
+                let title = harness.get_by_label("Welcome to Chat with Work").rect();
+                assert!(
+                    (title.center().x - size[0] / 2.0).abs() < 1.0,
+                    "welcome title is not centered at {size:?}: {title:?}"
+                );
+                let start = harness.get_by_label("Start Local Agent").rect();
+                assert!(
+                    start.left() >= 0.0 && start.right() <= size[0],
+                    "startup button is clipped at {size:?}: {start:?}"
+                );
+                let step = harness.get_by_label("Run the Local Agent").rect();
+                assert!(
+                    step.left() < title.left(),
+                    "step content should remain left-aligned"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn seamless_window_controls_keep_the_agent_in_the_tray() {
+    for platform in [Platform::Windows, Platform::Linux] {
+        let (_tmp, mut harness) = welcome_harness([840.0, 620.0], platform, false, None);
+        harness.get_by_label("Minimize window").click();
+        harness.step();
+        assert!(
+            harness.output().viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::Minimized(true))
+        );
+        harness.get_by_label("Maximize window").click();
+        harness.step();
+        assert!(
+            harness.output().viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::Maximized(true))
+        );
+        harness.get_by_label("Close window").click();
+        harness.step();
+        assert!(
+            harness
+                .state()
+                .shared
+                .close_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(
+            !harness.output().viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::Close)
+        );
+    }
+    let (_tmp, harness) = welcome_harness([840.0, 620.0], Platform::MacOs, false, None);
+    assert!(
+        harness.query_by_label("Close window").is_none(),
+        "macOS uses its native traffic lights"
+    );
+}
+
+#[test]
+fn seamless_window_can_be_resized_at_every_edge_and_corner() {
+    use egui::{ResizeDirection as D, ViewportCommand};
+    for (position, direction) in [
+        ([1.0, 1.0], D::NorthWest),
+        ([420.0, 1.0], D::North),
+        ([839.0, 1.0], D::NorthEast),
+        ([1.0, 310.0], D::West),
+        ([839.0, 310.0], D::East),
+        ([1.0, 619.0], D::SouthWest),
+        ([420.0, 619.0], D::South),
+        ([839.0, 619.0], D::SouthEast),
+    ] {
+        let (_tmp, mut harness) = welcome_harness([840.0, 620.0], Platform::Windows, false, None);
+        harness.hover_at(position.into());
+        harness.step();
+        harness.drag_at(position.into());
+        harness.step();
+        assert!(
+            harness.output().viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&ViewportCommand::BeginResize(direction)),
+            "resize at {position:?}"
+        );
+        assert!(
+            !harness
+                .state()
+                .shared
+                .close_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+}
+
+#[test]
+fn seamless_header_drags_and_fullscreen_has_no_caption_controls() {
+    let (_tmp, mut harness) = welcome_harness([840.0, 620.0], Platform::Windows, false, None);
+    harness.hover_at(egui::pos2(300.0, 20.0));
+    harness.step();
+    harness.drag_at(egui::pos2(300.0, 20.0));
+    harness.step();
+    harness.hover_at(egui::pos2(330.0, 20.0));
+    harness.step();
+    assert!(
+        harness.output().viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&egui::ViewportCommand::StartDrag)
+    );
+    harness.drop_at(egui::pos2(330.0, 20.0));
+    harness
+        .input_mut()
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .fullscreen = Some(true);
+    harness.run_steps(2);
+    assert!(harness.query_by_label("Close window").is_none());
+}
+
+/// Synthetic first-run images, rendered only when explicitly requested.
+#[test]
+fn renders_welcome_review() {
+    let Some(dir) = std::env::var_os("CWW_WELCOME_REVIEW_DIR").map(PathBuf::from) else {
+        return;
+    };
+    let _ = env_logger::builder().is_test(true).try_init();
+    std::fs::create_dir_all(&dir).unwrap();
+    for (platform, name) in [
+        (Platform::Windows, "windows"),
+        (Platform::MacOs, "macos"),
+        (Platform::Linux, "linux"),
+    ] {
+        for dark in [false, true] {
+            for (size, label) in [([840.0, 620.0], "normal"), ([1100.0, 760.0], "wide")] {
+                let renderer = egui_kittest::wgpu::WgpuTestRenderer::new();
+                let (_tmp, mut harness) = welcome_harness(size, platform, dark, Some(renderer));
+                let theme = if dark { "dark" } else { "light" };
+                harness
+                    .render()
+                    .unwrap()
+                    .save(dir.join(format!("{name}-{label}-{theme}.png")))
+                    .unwrap();
+            }
+        }
+    }
 }
 
 /// A wheel notch scrolls as far as it does in other apps (fastframe-scroll's

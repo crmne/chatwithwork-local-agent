@@ -59,6 +59,8 @@ fastframe-theme = { version = "0.4.1", git = "https://github.com/crmne/fastframe
 # Draws color emoji in the platform's own style in every egui text, such
 # as folder and file names.
 fastframe-emoji = { version = "0.4.1", git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
+# The native macOS traffic lights and title-bar double-click preference.
+fastframe-macos = { version = "0.4.1", git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 # One running copy per user: a second launch asks it to open its window.
 fastframe-instance = { version = "0.4.1", git = "https://github.com/crmne/fastframe", tag = "v0.4.1" }
 # Scrolling that feels like the platform's: a wheel notch scrolls as far

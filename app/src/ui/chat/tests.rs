@@ -621,13 +621,14 @@ fn a_question_sent_is_pinned_near_the_top_with_its_answer_under_it() {
     let mut fx = fixture(Options::default());
     fx.ready();
     fx.open_waiting(11, "Want me to add it to the Q4 checklist?");
-    // Opened, the latest question sits 24 under the top, as on the web.
+    // The conversation keeps its padding below the integrated window header.
+    let pinned_top = crate::ui::chrome::HEIGHT + 34.0;
     let top = fx
         .harness
         .get_by_label("Draft a short reminder for the team.")
         .rect()
         .top();
-    assert!((top - 34.0).abs() < 4.0, "pinned at {top}");
+    assert!((top - pinned_top).abs() < 4.0, "pinned at {top}");
     let field = fx
         .harness
         .get_by_role(egui::accesskit::Role::MultilineTextInput);
@@ -641,12 +642,12 @@ fn a_question_sent_is_pinned_near_the_top_with_its_answer_under_it() {
     fx.wait("the question pinned", |h| {
         h.query_all_by_label("Who signs the renewal?")
             .last()
-            .is_some_and(|q| (q.rect().top() - 34.0).abs() < 4.0)
+            .is_some_and(|q| (q.rect().top() - pinned_top).abs() < 4.0)
     });
     assert!(
         fx.harness
             .query_by_label("Draft a short reminder for the team.")
-            .is_none_or(|q| q.rect().bottom() < 34.0),
+            .is_none_or(|q| q.rect().bottom() < pinned_top),
         "the earlier one scrolled up"
     );
 }

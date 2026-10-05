@@ -9,6 +9,7 @@
 mod account;
 mod activity;
 pub mod chat;
+mod chrome;
 mod folders;
 mod general;
 mod privacy;
@@ -395,8 +396,12 @@ impl SettingsApp {
         let p = self.theme.palette;
         self.style_for_page(ui.ctx());
 
+        if chrome::show(ui, &self.theme, self.page) {
+            self.shared.close_requested.store(true, Ordering::SeqCst);
+        }
         if self.page == Page::Chat {
             self.chat_page(ui, status.as_ref());
+            chrome::resize(ui, self.theme.platform);
             self.transition.paint(ui.ctx());
             return;
         }
@@ -427,12 +432,29 @@ impl SettingsApp {
                                 bottom: 24,
                             })
                             .show(ui, |ui| {
-                                // set_max_width can grow a Ui; only ever narrow it.
-                                ui.set_max_width(ui.available_width().min(680.0));
-                                self.page_contents(ui, status.as_ref());
+                                let width = ui.available_width().min(680.0);
+                                if self.page == Page::Welcome {
+                                    // Center the whole setup column, while the
+                                    // instructions inside each card stay left-aligned.
+                                    ui.with_layout(
+                                        egui::Layout::top_down(egui::Align::Center),
+                                        |ui| {
+                                            ui.allocate_ui_with_layout(
+                                                Vec2::new(width, 0.0),
+                                                egui::Layout::top_down(egui::Align::Min),
+                                                |ui| self.page_contents(ui, status.as_ref()),
+                                            );
+                                        },
+                                    );
+                                } else {
+                                    // set_max_width can grow a Ui; only ever narrow it.
+                                    ui.set_max_width(width);
+                                    self.page_contents(ui, status.as_ref());
+                                }
                             });
                     });
             });
+        chrome::resize(ui, self.theme.platform);
         self.transition.paint(ui.ctx());
     }
 
@@ -875,6 +897,10 @@ impl SettingsApp {
 }
 
 impl eframe::App for SettingsApp {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        fastframe_macos::align_traffic_lights(frame, ctx, chrome::HEIGHT);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
