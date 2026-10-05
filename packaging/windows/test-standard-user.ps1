@@ -24,14 +24,33 @@ try {
   Register-ScheduledTask -TaskName $taskName -Principal $principal -Action $action -Force | Out-Null
   $createdTask = $true
   Disable-ScheduledTask -TaskName $taskName | Out-Null
-  $credential = New-Object Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $password)
-  $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-    -Credential $credential -LoadUserProfile -WorkingDirectory $directory -Wait -PassThru `
-    -ArgumentList '-NoLogo', '-NoProfile', '-NonInteractive', '-File', "`"$directory\test-install.ps1`"", '-Msi', "`"$directory\cww-test.msi`"", '-StandardUser' `
-    -RedirectStandardOutput "$directory\stdout.log" -RedirectStandardError "$directory\stderr.log"
-  Get-Content -LiteralPath "$directory\stdout.log"
-  Get-Content -LiteralPath "$directory\stderr.log"
+  # Leave ProcessStartInfo.Environment untouched. .NET then passes a null
+  # environment to CreateProcessWithLogonW, which builds the new user's
+  # login environment. Start-Process copies the administrator's instead.
+  $start = New-Object Diagnostics.ProcessStartInfo
+  $start.FileName = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+  $start.UserName = $name
+  $start.Domain = $env:COMPUTERNAME
+  $start.Password = $password
+  $start.LoadUserProfile = $true
+  $start.UseShellExecute = $false
+  $start.WorkingDirectory = $directory
+  $start.RedirectStandardOutput = $true
+  $start.RedirectStandardError = $true
+  foreach ($argument in @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', "$directory\test-install.ps1", '-Msi', "$directory\cww-test.msi", '-StandardUser')) {
+    $start.ArgumentList.Add($argument)
+  }
+  $process = [Diagnostics.Process]::Start($start)
+  $stdout = $process.StandardOutput.ReadToEndAsync()
+  $stderr = $process.StandardError.ReadToEndAsync()
+  if (-not $process.WaitForExit(180000)) {
+    $process.Kill($true)
+    throw 'Standard-user installation timed out'
+  }
+  Write-Host ($stdout.GetAwaiter().GetResult())
+  Write-Host ($stderr.GetAwaiter().GetResult())
   if ($process.ExitCode -ne 0) { throw "Standard-user installation failed: $($process.ExitCode)" }
+  $process.Dispose()
   Get-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
 } finally {
   if ($createdTask) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false }

@@ -7,16 +7,9 @@ if ($StandardUser) {
   if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'This regression test must run without administrator rights'
   }
-  # Start-Process with alternate credentials can inherit the runner's
-  # environment. Reconstruct this loaded profile's normal login paths.
-  $env:USERPROFILE = [Environment]::GetFolderPath('UserProfile', 'DoNotVerify')
-  $env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData', 'DoNotVerify')
-  $env:APPDATA = [Environment]::GetFolderPath('ApplicationData', 'DoNotVerify')
-  $env:USERNAME = $identity.Name.Split('\')[-1]
-  $env:USERDOMAIN = $identity.Name.Split('\')[0]
-  $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
-  $env:TMP = $env:TEMP
-  New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
+  if ($env:USERNAME -ne $identity.Name.Split('\')[-1]) {
+    throw 'The test must use the standard account login environment'
+  }
 }
 $Msi = (Resolve-Path $Msi).Path
 $dir = Join-Path $env:LOCALAPPDATA "Programs\Chat with Work Local Agent"
