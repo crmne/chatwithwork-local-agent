@@ -16,6 +16,7 @@ $dir = Join-Path $env:LOCALAPPDATA "Programs\Chat with Work Local Agent"
 $programs = [Environment]::GetFolderPath("Programs", "DoNotVerify")
 $startup = Join-Path ([Environment]::GetFolderPath('Startup', 'DoNotVerify')) 'Chat with Work Local Agent.lnk'
 function Run-Msi([string] $action) {
+  Write-Host "Running msiexec $action for $env:USERNAME"
   New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
   $log = Join-Path $env:TEMP ('cww-msi-' + [Guid]::NewGuid().ToString('N') + '.log')
   $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $action, "`"$Msi`"", "/qn", "/norestart", '/L*V', "`"$log`""
@@ -23,6 +24,7 @@ function Run-Msi([string] $action) {
     if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log | Write-Host }
     throw "msiexec $action failed: $($process.ExitCode)"
   }
+  Write-Host "Completed msiexec $action"
 }
 $installed = $false
 try {
@@ -47,6 +49,7 @@ try {
   }
   if (-not $running) { throw "The MSI did not start the agent" }
   if ($StandardUser) {
+    Write-Host 'Checking the startup shortcut'
     if (-not (Test-Path -LiteralPath $startup)) { throw 'No per-user startup fallback was created' }
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($startup)
@@ -62,6 +65,7 @@ try {
     # Custom paths must survive shortcut argument quoting, too. Set this
     # after the MSI check: deferred installer actions have their own environment.
     $env:CWW_HOME = Join-Path $env:LOCALAPPDATA 'Cww smoke test\state & data'
+    Write-Host 'Registering the agent with a custom state path'
     & (Join-Path $dir 'cww.exe') daemon install
     if ($LASTEXITCODE -ne 0) { throw 'Could not register the custom state path' }
     & (Join-Path $dir 'cww.exe') daemon stop
@@ -72,6 +76,7 @@ try {
       Start-Sleep -Milliseconds 200
     }
     Start-Process -FilePath $startup
+    Write-Host 'Opened the login shortcut'
     $running = $false
     for ($i = 0; $i -lt 30; $i++) {
       $status = & (Join-Path $dir 'cww.exe') status
@@ -85,6 +90,7 @@ try {
   }
 } finally {
   if ($StandardUser -and $env:CWW_HOME) {
+    Write-Host 'Removing the custom agent'
     & (Join-Path $dir 'cww.exe') daemon uninstall
     Remove-Item Env:CWW_HOME
   }

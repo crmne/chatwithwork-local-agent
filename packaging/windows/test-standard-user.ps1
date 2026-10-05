@@ -54,6 +54,15 @@ try {
   $stderr = $process.StandardError.ReadToEndAsync()
   if (-not $process.WaitForExit(180000)) {
     $process.Kill($true)
+    $process.WaitForExit(5000) | Out-Null
+    if ($stdout.Wait(5000)) { Write-Host ($stdout.GetAwaiter().GetResult()) }
+    if ($stderr.Wait(5000)) { Write-Host ($stderr.GetAwaiter().GetResult()) }
+    $sid = (Get-LocalUser -Name $name).SID.Value
+    $profile = Get-ItemPropertyValue -Path "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name ProfileImagePath
+    Get-ChildItem -Path "$profile\AppData\Local\Temp\cww-msi-*.log" | ForEach-Object {
+      Write-Host "Installer log: $($_.Name)"
+      Get-Content -LiteralPath $_.FullName -Tail 150 | Write-Host
+    }
     throw 'Standard-user installation timed out'
   }
   Write-Host ($stdout.GetAwaiter().GetResult())
