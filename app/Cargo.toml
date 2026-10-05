@@ -1,6 +1,6 @@
 [package]
 name = "cww-app"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 # fastframe needs 1.98 (eframe 0.36 alone needs 1.95); the daemon itself
 # builds with 1.90.
