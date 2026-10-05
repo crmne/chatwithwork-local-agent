@@ -53,6 +53,8 @@ try {
   $stdout = $process.StandardOutput.ReadToEndAsync()
   $stderr = $process.StandardError.ReadToEndAsync()
   if (-not $process.WaitForExit(180000)) {
+    Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('cww.exe', 'cww-agent.exe', 'powershell.exe', 'schtasks.exe', 'msiexec.exe') } |
+      Select-Object Name, ProcessId, ParentProcessId, CommandLine | Format-List | Out-String | Write-Host
     $process.Kill($true)
     $process.WaitForExit(5000) | Out-Null
     if ($stdout.Wait(5000)) { Write-Host ($stdout.GetAwaiter().GetResult()) }
