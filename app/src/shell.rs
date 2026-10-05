@@ -23,7 +23,7 @@ use crate::instance::{self, Start};
 use crate::model::{Status, TrayView};
 use crate::paths::Paths;
 use crate::tray::Tray;
-use crate::ui::{AppState, Page, SettingsApp, Shared, theme};
+use crate::ui::{AppState, HEADER_HEIGHT, Page, SettingsApp, Shared, theme};
 
 pub struct Options {
     /// Open the settings window at start (not when started at login).
@@ -171,8 +171,9 @@ fn create_window<'a>(
             .with_fullsize_content_view(cfg!(target_os = "macos"))
             .with_titlebar_shown(false)
             .with_title_shown(false)
-            .with_inner_size([840.0, 620.0])
-            .with_min_inner_size([660.0, 460.0])
+            // Preserve the previous content area below the integrated header.
+            .with_inner_size([840.0, 620.0 + HEADER_HEIGHT])
+            .with_min_inner_size([660.0, 460.0 + HEADER_HEIGHT])
             .with_icon(crate::icons::window()),
         centered: true,
         ..Default::default()

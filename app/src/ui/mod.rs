@@ -17,6 +17,8 @@ pub mod theme;
 mod welcome;
 pub mod widgets;
 
+pub(crate) use chrome::HEIGHT as HEADER_HEIGHT;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};

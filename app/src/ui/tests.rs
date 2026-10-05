@@ -529,7 +529,10 @@ fn renders_welcome_review() {
         (Platform::Linux, "linux"),
     ] {
         for dark in [false, true] {
-            for (size, label) in [([840.0, 620.0], "normal"), ([1100.0, 760.0], "wide")] {
+            for (size, label) in [
+                ([840.0, 620.0 + super::HEADER_HEIGHT], "normal"),
+                ([1100.0, 760.0], "wide"),
+            ] {
                 let renderer = egui_kittest::wgpu::WgpuTestRenderer::new();
                 let (_tmp, mut harness) = welcome_harness(size, platform, dark, Some(renderer));
                 let theme = if dark { "dark" } else { "light" };
