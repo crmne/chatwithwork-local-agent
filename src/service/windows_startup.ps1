@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$directory = [Environment]::GetFolderPath('Startup')
+# A fresh profile may not have a Startup directory yet. Resolve its known
+# location without requiring it to exist; installation creates it below.
+$directory = [Environment]::GetFolderPath('Startup', 'DoNotVerify')
 if ([string]::IsNullOrWhiteSpace($directory)) { throw 'Your Windows Startup folder could not be found.' }
 $path = Join-Path $directory 'Chat with Work Local Agent.lnk'
 if ($env:CWW_STARTUP_ACTION -eq 'remove') {

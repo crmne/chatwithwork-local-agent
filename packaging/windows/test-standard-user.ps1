@@ -26,7 +26,7 @@ try {
   Disable-ScheduledTask -TaskName $taskName | Out-Null
   $credential = New-Object Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $password)
   $process = Start-Process -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-    -Credential $credential -LoadUserProfile -Wait -PassThru `
+    -Credential $credential -LoadUserProfile -WorkingDirectory $directory -Wait -PassThru `
     -ArgumentList '-NoLogo', '-NoProfile', '-NonInteractive', '-File', "`"$directory\test-install.ps1`"", '-Msi', "`"$directory\cww-test.msi`"", '-StandardUser' `
     -RedirectStandardOutput "$directory\stdout.log" -RedirectStandardError "$directory\stderr.log"
   Get-Content -LiteralPath "$directory\stdout.log"

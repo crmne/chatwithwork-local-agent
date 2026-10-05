@@ -7,11 +7,21 @@ if ($StandardUser) {
   if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'This regression test must run without administrator rights'
   }
+  # Start-Process with alternate credentials can inherit the runner's
+  # environment. Reconstruct this loaded profile's normal login paths.
+  $env:USERPROFILE = [Environment]::GetFolderPath('UserProfile', 'DoNotVerify')
+  $env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData', 'DoNotVerify')
+  $env:APPDATA = [Environment]::GetFolderPath('ApplicationData', 'DoNotVerify')
+  $env:USERNAME = $identity.Name.Split('\')[-1]
+  $env:USERDOMAIN = $identity.Name.Split('\')[0]
+  $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
+  $env:TMP = $env:TEMP
+  New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
 }
 $Msi = (Resolve-Path $Msi).Path
 $dir = Join-Path $env:LOCALAPPDATA "Programs\Chat with Work Local Agent"
-$programs = [Environment]::GetFolderPath("Programs")
-$startup = Join-Path ([Environment]::GetFolderPath('Startup')) 'Chat with Work Local Agent.lnk'
+$programs = [Environment]::GetFolderPath("Programs", "DoNotVerify")
+$startup = Join-Path ([Environment]::GetFolderPath('Startup', 'DoNotVerify')) 'Chat with Work Local Agent.lnk'
 function Run-Msi([string] $action) {
   $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList $action, "`"$Msi`"", "/qn", "/norestart"
   if ($process.ExitCode -notin @(0, 3010)) { throw "msiexec $action failed: $($process.ExitCode)" }
