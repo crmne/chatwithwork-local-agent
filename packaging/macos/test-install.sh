@@ -10,11 +10,15 @@ test -x "/Applications/Chat with Work.app/Contents/MacOS/cww"
 codesign --verify --strict --deep "/Applications/Chat with Work.app"
 # Hosted runners may not have a console user, so exercise the documented
 # fallback in the runner's own login session too.
-/usr/local/bin/cww daemon install
-running=false
-for _ in {1..30}; do
-  if /usr/local/bin/cww status | grep -q 'running (pid'; then running=true; break; fi
-  sleep 1
+for _restart in 1 2 3; do
+  # Replacing an already running agent must wait for launchd's asynchronous
+  # bootout instead of failing with "Operation already in progress".
+  /usr/local/bin/cww daemon install
+  running=false
+  for _ in {1..30}; do
+    if /usr/local/bin/cww status | grep -q 'running (pid'; then running=true; break; fi
+    sleep 1
+  done
+  test "$running" = true
 done
 /usr/local/bin/cww daemon uninstall
-test "$running" = true

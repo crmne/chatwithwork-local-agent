@@ -125,7 +125,7 @@ cww daemon stop        # stop it until the next logon
 cww daemon uninstall   # add --purge to also delete keys, config, index and logs
 ```
 
-`cww daemon run` runs in the foreground instead. Set `CWW_LOG=debug` for more output. With Homebrew, `brew services start cww` works too. On Windows the logon task runs `cww-agent.exe`, the same daemon without a console window, and it logs to `%LOCALAPPDATA%\cww\state\daemon.log`.
+`cww daemon run` runs in the foreground instead. Set `CWW_LOG=debug` for more output. With Homebrew, `brew services start cww` works too. On Windows the logon task runs `cww-agent.exe`, the same daemon without a console window, and it logs to `%LOCALAPPDATA%\cww\state\daemon.log`. If Task Scheduler denies access, setup uses your account's Startup folder instead and starts the agent immediately, without administrator rights. This fallback starts at login but does not restart the agent after a crash; open the app and choose **Start Local Agent** if needed. `cww daemon uninstall` removes either registration.
 
 The CLI, the terminal UI and the settings app talk to the daemon over a local socket (a named pipe on Windows) that only your user can open. [CONTROL.md](CONTROL.md) documents it for other clients.
 

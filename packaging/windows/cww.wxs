@@ -93,9 +93,10 @@
     </Feature>
 
     <!--
-      Register and remove the Scheduled Task without flashing a console
-      window (WixQuietExec). Failures are ignored: the task can always be
-      registered later with `cww daemon install`.
+      Register and remove the per-user daemon without flashing a console
+      window (WixQuietExec). cww falls back to a Startup shortcut if Task
+      Scheduler is unavailable. Failures are ignored so the app can offer
+      Start Local Agent after installation.
     -->
     <SetProperty Id="RegisterDaemon" Value="&quot;[#CwwExe]&quot; daemon install"
       Before="RegisterDaemon" Sequence="execute" />

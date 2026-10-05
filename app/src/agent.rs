@@ -1,6 +1,6 @@
 //! Starting the daemon. The app doesn't run it itself: `cww daemon install`
 //! registers the per-user service (systemd on Linux, launchd on macOS, a
-//! logon Scheduled Task on Windows),
+//! logon Scheduled Task or a per-user Startup shortcut on Windows),
 //! which starts it now and at every login, and keeps it running when the
 //! app is closed.
 
@@ -56,8 +56,14 @@ fn is_executable(path: &Path) -> bool {
 pub fn start() -> Result<String> {
     let cww = cww_binary()
         .context("Couldn't find the cww command. Install the Local Agent, then try again.")?;
-    let out = Command::new(&cww)
-        .args(["daemon", "install"])
+    let mut command = Command::new(&cww);
+    command.args(["daemon", "install"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = command
         .output()
         .with_context(|| format!("running {}", cww.display()))?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
