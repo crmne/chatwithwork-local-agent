@@ -16,7 +16,7 @@ case "$(uname -m)" in
 esac
 case "$image" in
   ubuntu:*|debian:*) format=deb ;;
-  fedora:*|rockylinux:*) format=rpm ;;
+  fedora:*|rockylinux:*|rockylinux/rockylinux:*) format=rpm ;;
   archlinux:*) format=arch ;;
   *) echo 'Unsupported test distribution' >&2; exit 1 ;;
 esac
