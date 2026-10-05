@@ -1,12 +1,12 @@
 <!--
   Chat with Work Local Agent, as a per-user MSI (WiX Toolset 5).
 
-  - Installs cww.exe and cww-agent.exe to %LOCALAPPDATA%\Programs\Chat with Work Local Agent
+  - Installs cww.exe, cww-app.exe and cww-agent.exe to %LOCALAPPDATA%\Programs\Chat with Work Local Agent
     and adds that folder to the user's PATH. Per-user, so no UAC prompt.
   - Registers the daemon's logon Scheduled Task (`cww daemon install`) and
     starts it; it stays idle until the computer is paired. Uninstalling
     removes the task (`cww daemon uninstall`) but keeps keys and settings.
-  - A Start menu shortcut opens the `cww` terminal UI.
+  - Start menu shortcuts open the desktop app and the terminal UI.
 
   Build (see packaging/windows/build-msi.ps1):
     wix build cww.wxs -arch x64 -ext WixToolset.Util.wixext -d Version=1.2.3 -d SourceDir=... -o cww.msi
@@ -31,7 +31,7 @@
 
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/crmne/chatwithwork-local-agent" />
     <Property Id="ARPHELPLINK" Value="https://github.com/crmne/chatwithwork-local-agent#readme" />
-    <Property Id="ARPCOMMENTS" Value="Shares the folders you choose with Chat with Work, read-only." />
+    <Property Id="ARPCOMMENTS" Value="Desktop app, terminal interface and local background agent. Open Chat with Work to finish setup, or run cww daemon install to start the agent." />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPNOREPAIR" Value="1" />
 
@@ -54,6 +54,11 @@
           Action="set" Part="last" System="no" Permanent="no" />
         <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
       </Component>
+      <Component Id="DesktopApp" Guid="{88003C63-64D5-4646-AB4A-F53A3F8DCD0A}">
+        <File Id="CwwAppExe" Name="cww-app.exe" Source="$(SourceDir)\cww-app.exe" KeyPath="no" />
+        <RegistryValue Root="HKCU" Key="Software\Chat with Work\Local Agent"
+          Name="DesktopApp" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
       <Component Id="Documents" Guid="{69A65CF0-1A21-433D-B72A-F1B9EC96AB41}">
         <File Id="Readme" Name="README.md" Source="$(SourceDir)\README.md" KeyPath="no" />
         <File Id="Protocol" Name="PROTOCOL.md" Source="$(SourceDir)\PROTOCOL.md" KeyPath="no" />
@@ -67,11 +72,18 @@
 
     <ComponentGroup Id="Shortcuts" Directory="ProgramMenuFolder">
       <Component Id="StartMenuShortcut">
-        <Shortcut Id="TuiShortcut" Name="Chat with Work Local Agent"
-          Description="Pair this computer, choose what to share and watch activity"
+        <Shortcut Id="TuiShortcut" Name="Chat with Work (Terminal)"
+          Description="Chat, pair this computer and manage shared folders in the terminal"
           Target="[#CwwExe]" WorkingDirectory="INSTALLFOLDER" />
         <RegistryValue Root="HKCU" Key="Software\Chat with Work\Local Agent"
           Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="DesktopShortcut">
+        <Shortcut Id="AppShortcut" Name="Chat with Work"
+          Description="Chat with your assistant and manage shared folders"
+          Target="[#CwwAppExe]" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\Chat with Work\Local Agent"
+          Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 

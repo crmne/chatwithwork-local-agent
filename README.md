@@ -10,47 +10,30 @@ The Chat with Work Local Agent (`cww` on the command line) is the open-source co
 
 ## Install
 
-**The desktop app** (macOS 11 or later, Windows 10 and 11, Linux) carries `cww` inside it, so it's all most people need. Download it from the [latest release](https://github.com/crmne/chatwithwork-local-agent/releases/latest):
+All packages include **Chat with Work**, the desktop app, **`cww`**, the terminal interface, and the background agent. Nothing is shared until you pair the computer and choose a folder. Linux and macOS run the daemon as `cww daemon run`; Windows also includes `cww-agent.exe` so the daemon runs without a console window.
 
-| Platform | Download | Then |
+| Platform | Install | Open |
 |---|---|---|
-| macOS (Apple silicon and Intel) | `chat-with-work-vX.Y.Z-macos-universal.dmg`, or `brew install --cask crmne/tap/chat-with-work` | Drag **Chat with Work** to Applications and open it. It lives in the menu bar, with no Dock icon. Signed with Developer ID and notarized. |
-| Windows (x64, Arm) | `chat-with-work-vX.Y.Z-x86_64-pc-windows-msvc.zip` (or `aarch64-…`) | Extract it to a folder you'll keep, such as `%LOCALAPPDATA%\Programs\Chat with Work` (the daemon's logon task points at `cww-agent.exe` there), and run **Chat with Work**. These builds aren't signed yet: on SmartScreen's warning choose **More info**, then **Run anyway**. |
-| Linux (x86_64, arm64) | `cww-app-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (or `aarch64-…`) | Put `cww-app` and `cww` on your `PATH`, `cww-app.desktop` in `~/.local/share/applications/` and `cww-app.svg` in `~/.local/share/icons/hicolor/scalable/apps/`. Needs glibc 2.35 or newer and a tray that shows StatusNotifierItems. |
+| macOS 11 or later | `brew install --cask crmne/tap/chat-with-work`, or download the `.pkg` or `.dmg` from the [latest release](https://github.com/crmne/chatwithwork-local-agent/releases/latest) | **Chat with Work** in Applications. With the `.dmg`, drag the app to Applications first; its `cww` command is inside `Chat with Work.app/Contents/MacOS/`. |
+| Windows 10 and 11 | `winget install ChatWithWork.LocalAgent`, or download the `.msi` from the latest release | **Chat with Work** or **Chat with Work (Terminal)** in the Start menu. `cww` is also on your PATH. |
+| Arch | `yay -S chatwithwork-local-agent-bin` (or `chatwithwork-local-agent` to build from source, `chatwithwork-local-agent-git` for development builds) | **Chat with Work** in the applications menu, or `cww` in a terminal. |
+| Debian, Ubuntu | Download the `.deb`, then `sudo apt install ./chatwithwork-local-agent_*.deb` | **Chat with Work** in the applications menu, or `cww`. |
+| Fedora, RHEL, openSUSE | Download the `.rpm`, then `sudo dnf install ./chatwithwork-local-agent-*.rpm` | **Chat with Work** in the applications menu, or `cww`. |
+| NixOS, Nix (Linux, Apple silicon macOS) | `nix profile install github:crmne/chatwithwork-local-agent` | `cww-app` or `cww`; the package also carries desktop integration. |
+| Linux, Homebrew | `brew install crmne/tap/cww` | `cww-app` or `cww`. Add the Homebrew prefix's `share` directory to your desktop session's `XDG_DATA_DIRS` for menu discovery. |
 
-On first run the app starts the background agent with the `cww` beside it, pairs the computer, and offers to share your Documents folder. To remove it, run `cww daemon uninstall` with that `cww`, then delete the app. The rest of this section installs `cww` on its own, for the terminal UI, servers, and people who prefer the command line.
+Linux desktop binaries need glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+, Fedora 36+, Rocky/RHEL 10+); the packages install the graphics libraries they need. A tray that shows StatusNotifierItems, such as Waybar, KDE, or GNOME with the AppIndicator extension, keeps the app available when its window closes. Install your desktop's XDG portal backend for the native folder picker. The separate `cww-vX.Y.Z-<arch>-unknown-linux-musl.tar.gz` downloads remain available for terminal-only use on older distributions and servers.
 
-**macOS**
+**Starting the background agent**
 
-```sh
-brew install crmne/tap/cww
-```
-
-Or download `cww-vX.Y.Z-macos-universal.pkg` from the [latest release](https://github.com/crmne/chatwithwork-local-agent/releases/latest): it installs `/usr/local/bin/cww` and starts the background agent for you.
-
-**Windows** (10 and 11, x64 and Arm)
-
-```powershell
-winget install ChatWithWork.LocalAgent
-```
-
-Or download `cww-vX.Y.Z-x86_64-pc-windows-msvc.msi` (or the `aarch64` one) from the latest release. It installs for your user only, with no administrator prompt, puts `cww` on your `PATH`, adds **Chat with Work Local Agent** to the Start menu, and starts the background agent at every logon. Without WinGet:
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/crmne/chatwithwork-local-agent/releases/latest/download/cww-installer.ps1 | iex"
-```
-
-**Linux**
-
-| Distribution | Command |
+| Installation | Startup |
 |---|---|
-| Debian, Ubuntu | download the `.deb` from the latest release, then `sudo apt install ./chatwithwork-local-agent_*.deb` |
-| Fedora, RHEL, openSUSE | download the `.rpm`, then `sudo dnf install ./chatwithwork-local-agent-*.rpm` |
-| Arch | `yay -S chatwithwork-local-agent-bin` (or `chatwithwork-local-agent` to build from source) |
-| NixOS, Nix | `nix profile install github:crmne/chatwithwork-local-agent` |
-| Any, with Homebrew | `brew install crmne/tap/cww` |
+| Windows MSI / WinGet / PowerShell, per-user Scoop | The installer registers and starts the agent for your account, now and at every login. |
+| macOS `.pkg` | The installer tries to register and start the agent for the logged-in console user. If nobody is logged in, finish setup after login. |
+| Linux packages, Nix, Homebrew, portable app | Open the app and choose **Start Local Agent**, or run `cww daemon install` as your own user. System-wide package installation cannot choose which user account should run the agent. |
+| macOS / Linux one-line installer | Tries `cww daemon install` for the installing user and prints recovery instructions if no user service manager is available. |
 
-Linux builds are static, so they run on any distribution, x86_64 or arm64. The packages install `cww` and a systemd user unit, and start nothing until you do.
+`cww daemon install` starts the agent now, enables it at future logins, and restarts an existing service to use the installed version. If automatic setup failed, run that command without `sudo`. On Linux, check it with `systemctl --user status cww.service`; after a package upgrade, restart it with `systemctl --user restart cww.service`. On any platform, `cww status` reports the agent's state. Without a user service manager, keep `cww daemon run` running in a terminal. Closing the desktop app does not stop the background service.
 
 **One line, macOS or Linux, no root**
 
@@ -58,23 +41,36 @@ Linux builds are static, so they run on any distribution, x86_64 or arm64. The p
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/crmne/chatwithwork-local-agent/releases/latest/download/cww-installer.sh | sh
 ```
 
-It installs `cww` into `~/.local/bin` after checking it against the release's checksums.
+It checks release checksums, installs `cww` and `cww-app` into `~/.local/bin`, and registers the desktop launcher and icon on Linux. On macOS the app goes in `~/Applications`. Set `CWW_INSTALL_DIR` to change the command directory. The installer uses `XDG_DATA_HOME` for Linux desktop files and `XDG_CACHE_HOME` for temporary downloads, defaulting to `~/.local/share` and `~/.cache`.
 
-**From source** (Rust 1.90 or newer)
+**Windows without WinGet**
 
-```sh
-cargo install --locked --git https://github.com/crmne/chatwithwork-local-agent
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/crmne/chatwithwork-local-agent/releases/latest/download/cww-installer.ps1 | iex"
 ```
 
-Release archives come with SHA-256 checksums, signed for the desktop app's updater, and GitHub artifact attestations. The macOS binary and app are signed with Developer ID and notarized. To check a download:
+Windows builds are not signed yet. If SmartScreen warns, choose **More info**, then **Run anyway**. Portable Windows zips also contain all three executables; extract them to a permanent folder before registering the agent. macOS app downloads are signed with Developer ID and notarized; the `.pkg` needs the separate Installer signing identity.
+
+**Portable Linux desktop app**
+
+The `cww-app-vX.Y.Z-<arch>-unknown-linux-gnu.tar.gz` archive contains both executables, the service, launcher, icon, documentation and licenses. Put `cww-app` and `cww` on your PATH, `cww-app.desktop` in `~/.local/share/applications/`, and `cww-app.svg` in `~/.local/share/icons/hicolor/scalable/apps/`. Then run `cww daemon install`.
+
+**From source** (Rust 1.98 or newer for the desktop app)
 
 ```sh
-gh attestation verify cww-v0.2.0-macos-universal.tar.gz --repo crmne/chatwithwork-local-agent
+cargo install --locked --path .
+cargo install --locked --path app
 ```
 
-[PACKAGING.md](PACKAGING.md) explains how each package is built and signed.
+Run these commands from a checkout. They install both commands; the packages or one-line installer also provide desktop integration. The terminal agent alone needs Rust 1.90 or newer.
 
-**Then run `cww`.** In a terminal, it opens the terminal UI, which pairs the computer, offers to share your Documents folder, and shows everything the assistant asks for. The sections below do the same step by step.
+Release archives come with SHA-256 checksums, signed for the desktop app's updater, and GitHub artifact attestations. To check a download:
+
+```sh
+gh attestation verify cww-app-v0.3.0-x86_64-unknown-linux-gnu.tar.gz --repo crmne/chatwithwork-local-agent
+```
+
+[PACKAGING.md](PACKAGING.md) explains packaging, signing, startup and removal. Open the desktop app or run `cww` to pair and choose folders, or follow the steps below.
 
 ## Pairing
 

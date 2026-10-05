@@ -45,6 +45,17 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml version $version."
             exit 1
           fi
+          app_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' app/Cargo.toml | head -n 1)
+          if [ "$app_version" != "$version" ]; then
+            echo "::error::The app and agent versions must match."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/v* ]] && [[ "$GITHUB_REF_NAME" != *-* ]]; then
+            test -s "packaging/release-notes/$GITHUB_REF_NAME.md" || {
+              echo "::error::Commit the release notes before tagging."
+              exit 1
+            }
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
@@ -93,14 +104,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          backend: local
       # No compiler cache: published binaries never build from outputs
       # restored from an Actions cache.
-      - run: cargo build --locked --release --target ${{ matrix.target }} --bins
+      - run: mbx build --locked --release --target ${{ matrix.target }} --bins
       # Built on its own so cww's binaries come out as they always have. The
       # Linux app needs glibc, so it's built by the linux-app job.
       - name: Build the desktop app
         if: runner.os == 'Windows'
-        run: cargo build --locked --release --target ${{ matrix.target }} -p cww-app --bin cww-app
+        run: mbx build --locked --release --target ${{ matrix.target }} -p cww-app --bin cww-app
 
       - name: Check the binary is static
         if: runner.os == 'Linux'
@@ -147,7 +161,7 @@ jobs:
           mkdir -p "dist/$name"
           cp README.md PROTOCOL.md CONTROL.md SECURITY.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/cww.exe" "target/${{ matrix.target }}/release/cww-agent.exe" "dist/$name/"
+            cp "target/${{ matrix.target }}/release/cww.exe" "target/${{ matrix.target }}/release/cww-agent.exe" "target/${{ matrix.target }}/release/cww-app.exe" "dist/$name/"
             (cd dist && 7z a "$name.zip" "$name")
             # The desktop app with the daemon beside it, as the preview
             # builds had it: the app starts the cww.exe next to it.
@@ -248,16 +262,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          backend: local
       # No compiler cache, as above.
       - name: Build both architectures
         run: |
-          cargo build --locked --release --target aarch64-apple-darwin --bin cww
-          cargo build --locked --release --target x86_64-apple-darwin --bin cww
+          mbx build --locked --release --target aarch64-apple-darwin --bin cww
+          mbx build --locked --release --target x86_64-apple-darwin --bin cww
       # Built on its own so cww comes out as it always has.
       - name: Build the desktop app for both architectures
         run: |
-          cargo build --locked --release --target aarch64-apple-darwin -p cww-app --bin cww-app
-          cargo build --locked --release --target x86_64-apple-darwin -p cww-app --bin cww-app
+          mbx build --locked --release --target aarch64-apple-darwin -p cww-app --bin cww-app
+          mbx build --locked --release --target x86_64-apple-darwin -p cww-app --bin cww-app
 
       - name: Universal binaries
         run: |
@@ -291,15 +308,6 @@ jobs:
         run: |
           codesign --verify --strict --verbose=2 "$RUNNER_TEMP/cww-signed"
           codesign --display --verbose=2 "$RUNNER_TEMP/cww-signed" 2>&1 | grep -q "flags=0x10000(runtime)"
-
-      - name: Installer package
-        run: |
-          if [ -n "$APPLE_INSTALLER_CERTIFICATE_P12" ]; then
-            APPLE_INSTALLER_KEYCHAIN=$(bash packaging/macos/import-installer-identity.sh)
-            export APPLE_INSTALLER_KEYCHAIN
-          fi
-          bash packaging/macos/pkg.sh "$RUNNER_TEMP/cww-signed" "$VERSION" \
-            "dist/cww-v${VERSION}-macos-universal.pkg"
 
       # The desktop app: the steps the desktop-preview workflow proved. The
       # bundle carries cww next to cww-app, both signed with the hardened
@@ -350,6 +358,21 @@ jobs:
           xcrun stapler staple "$app"
           xcrun stapler validate "$app"
           spctl --assess --type execute --verbose=4 "$app"
+
+      - name: Installer package
+        run: |
+          if [ -n "$APPLE_INSTALLER_CERTIFICATE_P12" ]; then
+            APPLE_INSTALLER_KEYCHAIN=$(bash packaging/macos/import-installer-identity.sh)
+            export APPLE_INSTALLER_KEYCHAIN
+          fi
+          bash packaging/macos/pkg.sh "$RUNNER_TEMP/cww-signed" "$VERSION" \
+            "dist/cww-v${VERSION}-macos-universal.pkg" "$RUNNER_TEMP/app/Chat with Work.app"
+
+      - name: Add the desktop app to the Homebrew and shell-installer archive
+        run: |
+          name="cww-v${VERSION}-macos-universal"
+          ditto "$RUNNER_TEMP/app/Chat with Work.app" "$RUNNER_TEMP/signed-portable/$name/Chat with Work.app"
+          tar -C "$RUNNER_TEMP/signed-portable" -czf "dist/$name.tar.gz" "$name"
 
       - name: Desktop app disk image and zip
         run: |
@@ -428,8 +451,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          backend: local
       # No compiler cache, as above.
-      - run: cargo build --locked --release --target ${{ matrix.target }} -p cww-app --bin cww-app
+      - run: mbx build --locked --release --target ${{ matrix.target }} -p cww-app --bin cww-app
 
       - name: Check the app needs only the C library, glibc 2.35 or older
         run: |
@@ -455,16 +481,9 @@ jobs:
         run: |
           cww_name="cww-v${VERSION}-${{ matrix.cww-target }}"
           tar -xzf "cww-archive/$cww_name.tar.gz" -C "$RUNNER_TEMP"
-          name="cww-app-v${VERSION}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/cww-app" "$RUNNER_TEMP/$cww_name/cww" \
-            packaging/linux/cww-app.desktop README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
-          # Named as the desktop entry's Icon=cww-app asks.
-          cp app/assets/mark.svg "dist/$name/cww-app.svg"
-          "dist/$name/cww" --version
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          rm -rf "dist/$name"
-          tar -tzvf "dist/$name.tar.gz"
+          bash packaging/linux/archive.sh "$RUNNER_TEMP/$cww_name/cww" \
+            "target/${{ matrix.target }}/release/cww-app" "$VERSION" "${{ matrix.target }}" dist
+          tar -tzvf "dist/cww-app-v${VERSION}-${{ matrix.target }}.tar.gz"
 
       - name: Attest the desktop app archive
         if: startsWith(github.ref, 'refs/tags/')

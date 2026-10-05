@@ -5,7 +5,7 @@
 #
 # Downloads the MSI for this machine (x64 or arm64), checks it against the
 # release's checksums.txt, and installs it for the current user: cww.exe on
-# the PATH, a Start menu entry, and the daemon's logon task, idle until you
+# the PATH, the GUI and terminal Start menu entries, and the daemon's logon task, idle until you
 # pair. Set $env:CWW_VERSION = "1.2.3" for a specific release, or
 # $env:CWW_DOWNLOAD_BASE to a mirror holding a release's files.
 $ErrorActionPreference = "Stop"
@@ -52,8 +52,11 @@ try {
   Write-Host ""
   Write-Host "Installed $(& (Join-Path $dir 'cww.exe') --version) to $dir"
   Write-Host ""
-  Write-Host "Next, in a new terminal:"
-  Write-Host "  cww      # pair this computer and choose what to share"
+  Write-Host "Open Chat with Work from the Start menu, or run cww for the terminal interface."
+  Write-Host "The installer registers and starts the background agent for your account."
+  Write-Host "If it could not start, open the app or run: cww daemon install"
+  Write-Host "Check the agent with: cww status"
+  Write-Host "Nothing is shared until you pair this computer and choose a folder."
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

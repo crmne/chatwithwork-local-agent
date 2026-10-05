@@ -2,15 +2,17 @@
 
 Every way to install the Chat with Work Local Agent comes from one release: a `v*` tag on a commit already on `main`.
 
+Every package installs the desktop app, terminal interface and daemon together. Portable Linux musl archives are the explicit terminal-only download for servers and systems without glibc.
+
 | Platform | What users install | Built by |
 |---|---|---|
-| macOS | The desktop app: a notarized `.dmg` and `.zip` (`chat-with-work-vX.Y.Z-macos-universal`, holding `Chat with Work.app`), or the Homebrew cask (`brew install --cask crmne/tap/chat-with-work`). `cww` alone: Homebrew formula (`brew install crmne/tap/cww`), a signed and notarized `.pkg`, or the one-line installer | `release.yml`, job `macos` |
-| Windows | The desktop app: a zip per architecture (`chat-with-work-vX.Y.Z-<target>.zip`, holding `Chat with Work.exe` with `cww.exe` and `cww-agent.exe`). `cww` alone: per-user `.msi` (x64, arm64), WinGet, Scoop, or the PowerShell installer | `release.yml`, job `build` |
-| Linux | The desktop app: an archive per architecture (`cww-app-vX.Y.Z-<arch>-unknown-linux-gnu.tar.gz`). `cww` alone: `.deb`, `.rpm`, AUR (`chatwithwork-local-agent`, `-bin`, `-git`), Homebrew, Nix flake, or the one-line installer | `release.yml` (jobs `build` and `linux-app`) and `packaging.yml` |
+| macOS | App bundle (`.dmg` / `.zip`), `.pkg` installer, Homebrew cask or formula, or one-line installer. The cask depends on the formula to expose `cww` on PATH without conflicting with existing formula installs. | `release.yml`, job `macos` |
+| Windows | Per-user MSI (WinGet and PowerShell), Scoop, or a portable zip, with `cww.exe`, `cww-app.exe` and `cww-agent.exe`. The app-focused zip names the GUI `Chat with Work.exe`. | `release.yml`, job `build` |
+| Linux | `.deb`, `.rpm`, all three AUR variants, Homebrew, Nix, the one-line installer, or the complete desktop archive. | `release.yml` (jobs `build` and `linux-app`) and `packaging.yml` |
 
-`cww`'s Linux binaries are static (musl), so one build per architecture runs on every distribution and the packages have no dependencies. The desktop app on Linux links only the C library and loads Wayland, X11 and OpenGL at run time; `linux-app` builds it on Ubuntu 22.04, so it needs glibc 2.35 or newer, and fails the build if it ever needs more.
+The Linux archive `cww-app-vX.Y.Z-<arch>-unknown-linux-gnu.tar.gz` is the single input for native packages and binary AUR recipes. `packaging/linux/archive.sh` creates it with both executables, the systemd unit, launcher, icon, docs and licenses. `cww` itself remains static (musl); the GUI requires glibc 2.35 or newer. Release and packaging-test workflows build the GUI on Ubuntu 22.04. ELF inspection adds libc and libgcc dependencies; `native-packages.yaml` and the AUR recipes also declare the graphics libraries loaded at runtime. Rocky/RHEL 9's glibc 2.34 is too old for this GUI, so package installation tests use Rocky 10.
 
-Every desktop app download carries `cww` beside `cww-app` (inside the bundle on macOS), and the app starts the daemon with that copy. The app's files are in `checksums.txt` with everything else, so `checksums.txt.sig` covers them for the app's updater.
+Each app download carries `cww` beside the GUI (inside the bundle on macOS), so the app starts the matching daemon. All archives are covered by `checksums.txt` and its signature. The macOS app is signed and stapled before it is copied into the `.pkg` and the formula/shell-installer archive.
 
 ## Files
 
@@ -25,18 +27,20 @@ Every desktop app download carries `cww` beside `cww-app` (inside the bundle on 
 | `packaging/homebrew/cww.rb.in` | The formula, with a `brew services` definition. |
 | `packaging/homebrew/chat-with-work.rb.in` | The desktop app's cask, from the notarized `.dmg`. |
 | `packaging/macos/` | `bundle.sh` (the desktop app's bundle), `pkg.sh` (the installer package), its `postinstall`, `distribution.xml` and pages, and `import-installer-identity.sh` for CI. |
-| `packaging/linux/cww-app.desktop` | The desktop app's entry, shipped in its Linux archives with the icon as `cww-app.svg`. |
+| `packaging/linux/cww-app.desktop` | Applications-menu entry, installed with the `cww-app.svg` icon by every Linux package. |
+| `packaging/linux/archive.sh` | Assembles the complete Linux package payload, shared by release and packaging-test builds. |
+| `packaging/test-packaging.py` | Installer, archive and AUR package-layout regression tests, isolated from the user's account. |
 | `.github/workflows/desktop-preview.yml` | By hand: the desktop app for macOS and Windows as a `desktop-preview-<run>` prerelease, to try a change between releases. |
 | `packaging/windows/` | `cww.wxs` (WiX 5 MSI), `build-msi.ps1`, and `sign.ps1` for certificate signing. |
 | `packaging/winget/`, `packaging/scoop/` | Manifest templates. |
 | `packaging/install.sh`, `install.ps1` | The one-line installers, attached to each release as `cww-installer.sh` and `cww-installer.ps1`. |
-| `packaging/test-install.sh` | Installs, runs and removes a `.deb` or `.rpm` in a container. |
+| `packaging/test-install.sh` | Installs, runs and removes Debian, RPM and Arch packages in clean containers. |
 | `packaging/release-notes/vX.Y.Z.md` | Required for a stable tag. |
 | `flake.nix` | The Nix package (Linux and macOS) and a dev shell. |
 
 ## Releasing
 
-1. Bump `version` in `Cargo.toml` and `app/Cargo.toml` (they move together) and run `cargo build` so `Cargo.lock` follows.
+1. Bump `version` in `Cargo.toml` and `app/Cargo.toml` (they move together) and run `mbx build` so `Cargo.lock` follows.
 2. Write `packaging/release-notes/vX.Y.Z.md`.
 3. Push `main`, wait for CI, then tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
@@ -47,13 +51,14 @@ For a stable tag, `packaging.yml` then runs the shared [native-packages](https:/
 ### Trying changes before a tag
 
 - `gh workflow run release.yml` builds and signs everything, uploading the files as workflow artifacts without publishing.
-- Any push or PR that touches packaging runs `packaging.yml` against the commit: static builds, `.deb`/`.rpm`, all recipes (with stand-ins for the macOS and Windows assets), and install tests on Ubuntu 24.04, Debian 12 and 13, Fedora 41 and latest, and Rocky 9, on amd64 and arm64.
+- Any push or PR that touches packaging runs `packaging.yml` against the commit: static daemon and glibc GUI builds, `.deb`/`.rpm`, all recipes (with stand-ins for the macOS and Windows assets), and install tests on Ubuntu 24.04, Debian 12 and 13, Fedora 41 and latest, and Rocky 10, on amd64 and arm64.
 - Locally, with `gem install native-packages --version 0.8.1`, nFPM 2.47.0 and `bsdtar`:
 
   ```sh
+  python3 packaging/test-packaging.py
   native-packages validate
   # dist/ needs release-shaped inputs; see the "inputs" job in packaging.yml
-  native-packages build --version 0.2.0 --target linux-amd64 --output dist/np
+  native-packages build --version 0.3.0 --target linux-amd64 --output dist/np
   bash packaging/test-install.sh ubuntu:24.04 dist/np
   packaging/arch/build-local.sh                 # makepkg from the working tree
   nix build .#default
@@ -141,20 +146,24 @@ Individual developer accounts are free. Microsoft signs Store packages itself, s
 
 `PUBLISH_AUR` and `PUBLISH_HOMEBREW` are repository **variables**; the rest are secrets.
 
-**The desktop app** is in the Homebrew cask only. Not yet published, each a follow-up: WinGet and Scoop manifests for the Windows zips (a portable `zip` installer; better once the builds are signed), the app in the MSI, and a Linux package (`.deb`, `.rpm`, or an AUR `chatwithwork-local-agent-app-bin` from the archives). The `.deb` and `.rpm` stay `cww` only: native-packages builds one package per configuration, from the static archives, and the app's glibc build would bring dependencies they don't have.
+**The desktop app** is included in every package recipe alongside the terminal agent. Updating the existing package upgrades users to the complete installation; there is no separate Linux GUI package to discover.
 
 **WinGet.** Unpack the release's packaging archive and copy `recipes/winget/*.yaml` to `manifests/c/ChatWithWork/LocalAgent/X.Y.Z/` in a `winget-pkgs` fork. On Windows, run `winget validate --manifest <dir>` and `winget install --manifest <dir>`, then open the pull request (or `wingetcreate submit <dir>`). The manifests use the MSI's fixed UpgradeCode, so upgrades replace the previous version.
 
 **Scoop.** Put `recipes/scoop/cww.json` in a bucket (for example `crmne/scoop-bucket`, as `bucket/cww.json`). Its `checkver` and `autoupdate` keep it current: `scoop install crmne/cww` once the bucket is added with `scoop bucket add crmne https://github.com/crmne/scoop-bucket`.
 
-## Before the first public release
+## Existing releases
 
-The repository is private. Every download URL in the formula, the AUR recipes, the WinGet and Scoop manifests and the one-line installers points at its GitHub releases, which only work anonymously once the repository is public. Until then, installs work from a checkout (`cargo install --path .`, `packaging/arch/build-local.sh`, `nix build`) or from release files downloaded with `gh release download`.
+Starting with v0.3.0, packages include the desktop app. The published v0.2.0 Linux packages and MSI still contain only the terminal agent; its desktop archives are separate downloads. Do not republish old desktop archives in place: the new Linux package recipes need the service and documentation included by `packaging/linux/archive.sh`.
 
-## What the MSI and the .pkg do
+## Startup and removal
 
-- **Windows:** per-user install to `%LOCALAPPDATA%\Programs\Chat with Work Local Agent` (no UAC prompt), added to the user's `PATH`, a Start menu entry that opens the `cww` terminal UI, and `cww daemon install`, which registers the logon Scheduled Task running `cww-agent.exe` (no console window). Uninstalling runs `cww daemon uninstall` and keeps keys and settings. The UpgradeCode `{FBC69B33-161E-40DC-9D83-5B54DB1A9821}` must never change.
-- **macOS:** installs `/usr/local/bin/cww` (admin password), then registers the LaunchAgent for the logged-in user. The first time the daemon reads `~/Documents`, macOS asks whether `cww` may access it.
-- **Linux packages:** install `/usr/bin/cww` and the systemd user unit, and start nothing: each user runs `cww` to pair, then `systemctl --user enable --now cww`.
+- **Windows MSI:** per-user install to `%LOCALAPPDATA%\Programs\Chat with Work Local Agent`, on PATH, with separate **Chat with Work** and **Chat with Work (Terminal)** Start menu entries. It runs `cww daemon install`, registering and starting the logon task with `cww-agent.exe`. Uninstall runs `cww daemon uninstall` and keeps keys and settings. Preserve the UpgradeCode `{FBC69B33-161E-40DC-9D83-5B54DB1A9821}` so upgrades replace earlier versions. WinGet and PowerShell use this MSI.
+- **Scoop:** installs all three executables and both shortcuts. Per-user installs try to start the daemon; global installs ask each user to run `cww daemon install`. Uninstall removes the daemon task before removing the binaries.
+- **macOS `.pkg`:** installs `/Applications/Chat with Work.app`, `/usr/local/bin/cww` and the `cww-app` command. It tries to register and start the LaunchAgent for the console user. The completion page explains `cww daemon install` when no user session is available or startup fails. To remove it, run `cww daemon uninstall` before deleting the app and commands.
+- **Linux distro packages:** install both commands, the launcher and icon, and `/usr/lib/systemd/user/cww.service`. The root package transaction does not select a user account or start an agent as root. The install and upgrade messages tell each user to choose **Start Local Agent** in the app, or run `cww daemon install` without sudo. This enables and starts the packaged service. Check with `systemctl --user status cww.service`; restart after upgrading with `systemctl --user restart cww.service`. Before removing the package, run `cww daemon uninstall` as each user who enabled it.
+- **Homebrew:** both the formula and cask carry the GUI and terminal tools. The cask registers the app in Applications; the formula keeps its macOS bundle under the formula prefix. Run `cww daemon install`, or choose **Start Local Agent** in the app. If using `brew services start cww` instead, stop that service before switching to the app-managed service to avoid running two daemons.
+- **Nix:** builds the whole workspace, includes Linux desktop integration and the service, and wraps the GUI with its runtime graphics libraries. On Apple silicon macOS it carries an app bundle under `$out/Applications`. The pinned Nixpkgs no longer supports Intel macOS; use the universal native installer or Homebrew there. `nix profile install` does not enable services or register macOS Applications aliases; run `cww daemon install` and use your NixOS/Home Manager or nix-darwin configuration for declarative desktop integration.
+- **One-line macOS/Linux installer:** verifies checksums, installs both commands plus desktop integration, and attempts `cww daemon install` for the invoking user. If startup is unavailable it leaves the installation usable and prints the recovery command. It never registers a daemon for root. Uninstall with `cww daemon uninstall`, then remove the installed commands, launcher/icon or app bundle.
 
-In every case the daemon stays idle until the computer is paired, and nothing is shared until the user picks a folder.
+The daemon stays idle until pairing, and nothing is shared until the user chooses a folder. `cww status` checks it on every platform. Without a supported user service manager, `cww daemon run` runs in the foreground. Starting the app and enabling its tray icon at login are separate from enabling the background daemon.

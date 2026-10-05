@@ -12,10 +12,12 @@ PackageUrl: https://github.com/crmne/chatwithwork-local-agent
 License: MIT OR Apache-2.0
 LicenseUrl: https://github.com/crmne/chatwithwork-local-agent#license
 Copyright: Copyright (c) 2026 Carmine Paolino
-ShortDescription: Share the folders you choose with Chat with Work, read-only.
+ShortDescription: Chat with Work desktop app, terminal interface and local background agent.
 Description: |-
   The Chat with Work Local Agent (cww) lets the Chat with Work assistant search and read the folders you
-  choose on this computer, and nothing else. It answers four read-only tools over one outbound WebSocket,
+  choose on this computer, and nothing else. Includes the desktop app, terminal interface and daemon.
+  The installer starts the agent at login. If startup fails, open Chat with Work or run cww daemon install.
+  Folders are read-only unless you allow changes. It connects over one outbound WebSocket,
   keeps its full-text index on your machine, and never shares secrets such as keys, .env files or password
   databases, even inside a shared folder. Every request is written to a local audit log.
 Moniker: cww

@@ -5,8 +5,12 @@
 # Never fails the installation.
 user=$(stat -f %Su /dev/console 2>/dev/null)
 case "$user" in
-  ""|root|loginwindow|_mbsetupuser) exit 0 ;;
+  ""|root|loginwindow|_mbsetupuser)
+    echo 'Open Chat with Work in Applications after login, or run: cww daemon install'
+    exit 0 ;;
 esac
 uid=$(id -u "$user" 2>/dev/null) || exit 0
-launchctl asuser "$uid" sudo -H -u "$user" /usr/local/bin/cww daemon install >/dev/null 2>&1 || true
+if ! launchctl asuser "$uid" sudo -H -u "$user" /usr/local/bin/cww daemon install; then
+  echo 'The agent could not start. Open Chat with Work in Applications, or run as your own user: cww daemon install'
+fi
 exit 0

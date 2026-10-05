@@ -11,51 +11,66 @@ nfpm:
   vendor: "PlentyLabs UG (haftungsbeschränkt) & Co. KG"
   homepage: https://chatwithwork.com
   description: |-
-    Chat with Work Local Agent: share folders with Chat with Work, read-only.
-    cww answers four read-only tools (roots, search, list, read) for the
-    folders you choose, over an outbound WebSocket. Secrets inside shared
-    folders stay private. Includes a systemd user unit.
+    Chat with Work: desktop app, terminal interface and local background agent.
+    Chat with your assistant and share only the folders you choose.
+    Includes the applications-menu entry, icon and systemd user service.
   license: MIT OR Apache-2.0
   provides: [cww]
   contents:
-  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/cww"
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/cww"
     dst: /usr/bin/cww
     file_info:
       mode: 493
-  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/packaging/systemd/cww.service"
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/packaging/systemd/cww.service"
     dst: /usr/lib/systemd/user/cww.service
     file_info:
       mode: 420
-  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/README.md"
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/README.md"
     dst: /usr/share/doc/chatwithwork-local-agent/README.md
     file_info:
       mode: 420
-  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/PROTOCOL.md"
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/PROTOCOL.md"
     dst: /usr/share/doc/chatwithwork-local-agent/PROTOCOL.md
     file_info:
       mode: 420
-  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/SECURITY.md"
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/SECURITY.md"
     dst: /usr/share/doc/chatwithwork-local-agent/SECURITY.md
     file_info:
       mode: 420
-  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/LICENSE-MIT"
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/LICENSE-MIT"
     dst: /usr/share/licenses/chatwithwork-local-agent/LICENSE-MIT
     file_info:
       mode: 420
-  - src: "@PAYLOAD@/cww-v@VERSION@-@TARGET@/LICENSE-APACHE"
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/LICENSE-APACHE"
     dst: /usr/share/licenses/chatwithwork-local-agent/LICENSE-APACHE
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/cww-app"
+    dst: /usr/bin/cww-app
+    file_info:
+      mode: 493
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/cww-app.desktop"
+    dst: /usr/share/applications/cww-app.desktop
+    file_info:
+      mode: 420
+  - src: "@PAYLOAD@/cww-app-v@VERSION@-@TARGET@/cww-app.svg"
+    dst: /usr/share/icons/hicolor/scalable/apps/cww-app.svg
     file_info:
       mode: 420
   scripts:
     postinstall: packaging/linux/postinstall.sh
-  # The binary is static (musl): no runtime dependencies. The Secret Service
-  # is optional; without it the device key goes to a 0600 file.
+  # ELF inspection adds libc/libgcc. These graphics libraries are loaded
+  # at runtime, so declare them explicitly. The keyring and portal are optional.
   overrides:
     deb:
+      depends: [libgl1, libegl1, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0, libwayland-cursor0, libwayland-egl1]
       recommends:
+      - xdg-desktop-portal
       - gnome-keyring | kwalletmanager | keepassxc
     rpm:
+      depends: [libglvnd-glx, libglvnd-egl, libX11, libXcursor, libXi, libXrandr, libxkbcommon, libwayland-client, libwayland-cursor, libwayland-egl]
       recommends:
+      - xdg-desktop-portal
       - gnome-keyring
   rpm:
     buildhost: github-actions
@@ -63,30 +78,36 @@ targets:
   linux-amd64:
     platform: linux
     arch: amd64
-    libc: static
-    compiler_target: x86_64-unknown-linux-musl
+    libc: glibc
+    compiler_target: x86_64-unknown-linux-gnu
     formats:
     - deb
     - rpm
     input:
-      local: dist/cww-v@VERSION@-x86_64-unknown-linux-musl.tar.gz
-      release_asset: cww-v@VERSION@-x86_64-unknown-linux-musl.tar.gz
+      local: dist/cww-app-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+      release_asset: cww-app-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
   linux-arm64:
     platform: linux
     arch: arm64
-    libc: static
-    compiler_target: aarch64-unknown-linux-musl
+    libc: glibc
+    compiler_target: aarch64-unknown-linux-gnu
     formats:
     - deb
     - rpm
     input:
-      local: dist/cww-v@VERSION@-aarch64-unknown-linux-musl.tar.gz
-      release_asset: cww-v@VERSION@-aarch64-unknown-linux-musl.tar.gz
+      local: dist/cww-app-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+      release_asset: cww-app-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
 release:
   repository: crmne/chatwithwork-local-agent
   checksums: checksums.txt
   prereleases: true
 assets:
+  LINUX_APP_AMD64:
+    file: cww-app-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+    local: dist/cww-app-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+  LINUX_APP_ARM64:
+    file: cww-app-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+    local: dist/cww-app-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
   AMD64:
     file: cww-v@VERSION@-x86_64-unknown-linux-musl.tar.gz
     local: dist/cww-v@VERSION@-x86_64-unknown-linux-musl.tar.gz

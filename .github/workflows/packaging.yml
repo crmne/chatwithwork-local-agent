@@ -1,7 +1,7 @@
 name: Packaging
 
 # Releases call this after the GitHub release exists: the shared
-# native-packages workflow downloads the static Linux builds, checks them
+# native-packages workflow downloads the complete Linux builds, checks them
 # against checksums.txt, builds .deb and .rpm, attaches them, renders the
 # AUR, Homebrew and WinGet recipes, and publishes the enabled ones.
 #
@@ -45,7 +45,14 @@ permissions:
   contents: read
 
 jobs:
-  # Inputs for packaging this commit: the static Linux builds as a release
+  contracts:
+    name: Installer and package layout regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 packaging/test-packaging.py
+
+  # Inputs for packaging this commit: the complete Linux builds as a release
   # would name them, the source archive, and stand-ins for the macOS and
   # Windows assets (the desktop app's disk image among them) that only the
   # recipes' checksums refer to.
@@ -53,26 +60,32 @@ jobs:
     if: inputs.version == ''
     name: build inputs (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
     strategy:
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
+            app-target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-musl
+            app-target: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
       - id: version
         run: echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }},${{ matrix.app-target }}
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          backend: local
       # No compiler cache: these binaries become the published packages.
-      - run: cargo build --locked --release --target ${{ matrix.target }} --bin cww
+      - run: mbx build --locked --release --target ${{ matrix.target }} --bin cww
+      - run: mbx build --locked --release --target ${{ matrix.app-target }} -p cww-app --bin cww-app
       - name: Release-shaped archives
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -84,6 +97,8 @@ jobs:
           cp --parents packaging/systemd/cww.service "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -rf "dist/$name"
+          bash packaging/linux/archive.sh "target/${{ matrix.target }}/release/cww" \
+            "target/${{ matrix.app-target }}/release/cww-app" "$VERSION" "${{ matrix.app-target }}" dist
           if [ "${{ matrix.target }}" = x86_64-unknown-linux-musl ]; then
             git archive --format=tar.gz --prefix="chatwithwork-local-agent-${VERSION}/" \
               -o "dist/chatwithwork-local-agent-${VERSION}.tar.gz" HEAD
@@ -131,7 +146,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-24.04-arm]
-        image: ['ubuntu:24.04', 'debian:12-slim', 'debian:13-slim', 'fedora:41', 'fedora:latest', 'rockylinux:9']
+        image: ['ubuntu:24.04', 'debian:12-slim', 'debian:13-slim', 'fedora:41', 'fedora:latest', 'rockylinux:10']
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the macOS installer package.
 #
-#   packaging/macos/pkg.sh SIGNED_BINARY VERSION OUTPUT.pkg
+#   packaging/macos/pkg.sh SIGNED_BINARY VERSION OUTPUT.pkg SIGNED_APP
 #
 # SIGNED_BINARY is the universal cww, already signed with Developer ID and
 # the hardened runtime (native-packages notarize-macos does that).
@@ -19,22 +19,31 @@ set -euo pipefail
 binary=${1:?signed universal binary}
 version=${2:?version}
 output=${3:?output .pkg}
+app=${4:?signed Chat with Work.app}
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-work=$(mktemp -d)
+mkdir -p "$(dirname "$output")"
+work=$(mktemp -d "$(dirname "$output")/.pkg.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-mkdir -p "$work/payload/usr/local/bin" "$work/resources"
+mkdir -p "$work/payload/usr/local/bin" "$work/payload/Applications" "$work/resources"
 cp "$binary" "$work/payload/usr/local/bin/cww"
 chmod 755 "$work/payload/usr/local/bin/cww"
 # Drop quarantine and other removable attributes; the code signature lives
 # inside the binary. (com.apple.provenance can't be removed and shows up as
 # ._ entries in the payload; Installer restores it as an attribute.)
 xattr -cr "$work/payload"
+# Preserve the bundle's signature and stapled notarization ticket.
+ditto "$app" "$work/payload/Applications/Chat with Work.app"
+ln -s "/Applications/Chat with Work.app/Contents/MacOS/cww-app" "$work/payload/usr/local/bin/cww-app"
 cp "$here"/resources/*.html "$root/LICENSE-MIT" "$work/resources/"
 
+pkgbuild --analyze --root "$work/payload" "$work/components.plist"
+# Always install in /Applications, even if another copy exists elsewhere.
+/usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' "$work/components.plist"
 pkgbuild \
   --root "$work/payload" \
+  --component-plist "$work/components.plist" \
   --identifier com.chatwithwork.cww \
   --version "$version" \
   --install-location / \

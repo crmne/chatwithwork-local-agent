@@ -62,9 +62,7 @@ jobs:
       - run: mbx test -p cww-app --locked --no-run
       - run: mbx test -p cww-app --locked
         timeout-minutes: 5
-      # Built by cargo itself, like the published binaries, since these are
-      # downloadable.
-      - run: cargo build -p cww-app -p cww --release --locked
+      - run: mbx build -p cww-app -p cww --release --locked
 
       - name: Bundle the macOS app
         if: runner.os == 'macOS'
@@ -72,7 +70,24 @@ jobs:
           packaging/macos/bundle.sh target/release/cww-app target/release/cww \
             "dist/Chat with Work.app" "$(cargo pkgid -p cww-app | sed 's/.*[#@]//')"
           ditto -c -k --keepParent "dist/Chat with Work.app" dist/cww-app-macos.zip
-          rm -rf "dist/Chat with Work.app"
+      - name: Build and test the macOS installer
+        if: runner.os == 'macOS'
+        run: |
+          version="$(cargo pkgid -p cww-app | sed 's/.*[#@]//')"
+          bash packaging/macos/pkg.sh target/release/cww "$version" dist/cww-test.pkg "dist/Chat with Work.app"
+          bash packaging/macos/test-install.sh dist/cww-test.pkg
+          rm -rf "dist/Chat with Work.app" dist/cww-test.pkg
+
+      - name: Build and test the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          $version = ((Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$').Matches.Groups[1].Value)
+          ./packaging/windows/build-msi.ps1 -Version $version -Arch x64 -Binary target/release/cww.exe -Output dist/cww-test.msi
+          ./packaging/windows/test-install.ps1 -Msi dist/cww-test.msi
+          Remove-Item dist/cww-test.msi, dist/cww-test.wixpdb
+
       - name: Collect the Linux binary and desktop entry
         if: runner.os == 'Linux'
         run: |
@@ -124,3 +139,4 @@ jobs:
       - name: Build package
         run: nix build .#default -L
       - run: ./result/bin/cww --version
+      - run: ./result/bin/cww-app --version

@@ -1,6 +1,6 @@
 {
     "version": "@VERSION@",
-    "description": "Chat with Work Local Agent: share the folders you choose with Chat with Work, read-only.",
+    "description": "Chat with Work: desktop app, terminal interface and local background agent.",
     "homepage": "https://github.com/crmne/chatwithwork-local-agent",
     "license": "MIT|Apache-2.0",
     "architecture": {
@@ -17,8 +17,9 @@
     },
     "bin": "cww.exe",
     "notes": [
-        "Pair this computer and choose what to share: cww",
-        "Start the daemon at every logon: cww daemon install"
+        "Open Chat with Work from the Start menu, or run cww for the terminal interface.",
+        "The agent starts now and at every logon for per-user installs. If startup failed, run: cww daemon install",
+        "Check the agent: cww status. Nothing is shared until you pair and choose a folder."
     ],
     "pre_uninstall": "if (Test-Path \"$dir\\cww.exe\") { & \"$dir\\cww.exe\" daemon uninstall | Out-Null }",
     "checkver": "github",
@@ -36,5 +37,23 @@
         "hash": {
             "url": "$baseurl/checksums.txt"
         }
-    }
+    },
+    "shortcuts": [
+        [
+            "cww-app.exe",
+            "Chat with Work"
+        ],
+        [
+            "cww.exe",
+            "Chat with Work (Terminal)"
+        ]
+    ],
+    "post_install": [
+        "if ($global) {",
+        "    warn \"Open Chat with Work as your own user, or run: cww daemon install\"",
+        "} else {",
+        "    & \"$dir\\cww.exe\" daemon install",
+        "    if ($LASTEXITCODE -ne 0) { warn \"Agent startup failed. Open Chat with Work, or run: cww daemon install\" }",
+        "}"
+    ]
 }

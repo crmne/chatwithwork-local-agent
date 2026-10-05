@@ -2,14 +2,22 @@
 # Runs as root after the .deb or .rpm is installed. The daemon runs per
 # user, so nothing is started here; this only says how.
 cat <<'MSG'
-Chat with Work Local Agent is installed. As your own user, run:
+Chat with Work is installed: desktop app, terminal interface and background agent.
 
-  cww                                   # the terminal UI: pair, share folders, watch activity
+Open Chat with Work from your applications menu, or run cww-app.
+Choose Start Local Agent in the app to run it now and at future logins.
+Run cww for the terminal interface.
 
-or, step by step:
+This system-wide installer cannot select a user account for the agent.
+To start it without opening the app, run as your own user (without sudo):
 
+  cww daemon install                    # start now and at every login
   cww login                             # pair this computer
-  cww roots add ~/Documents             # share a folder
-  systemctl --user enable --now cww     # run the daemon in the background
+  cww roots add ~/Documents             # choose a folder to share
+
+Check: systemctl --user status cww.service
+After upgrading: systemctl --user restart cww.service
+Without a systemd user session: cww daemon run (keep the terminal open).
+Nothing is shared until you pair this computer and choose a folder.
 MSG
 exit 0
