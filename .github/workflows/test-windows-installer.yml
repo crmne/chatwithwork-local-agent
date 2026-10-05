@@ -12,6 +12,10 @@ on:
         description: Release to test when build-run is empty
         default: v0.3.0
         type: string
+      rebuild-agent:
+        description: Rebuild the agent from source, retaining the downloaded desktop app
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -20,7 +24,7 @@ permissions:
 jobs:
   install:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -39,6 +43,29 @@ jobs:
         run: |
           gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern '*-x86_64-pc-windows-msvc.msi' --dir dist
           Get-ChildItem dist/*.msi | Rename-Item -NewName cww-test.msi
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.rebuild-agent
+      - uses: jdx/mr-boxington-action@v1
+        if: inputs.rebuild-agent
+        with:
+          backend: local
+      - name: Rebuild the agent and installer
+        if: inputs.rebuild-agent
+        shell: pwsh
+        run: |
+          mbx build --release --locked --bins
+          if ($LASTEXITCODE -ne 0) { throw 'Agent build failed' }
+          $payload = Join-Path $env:RUNNER_TEMP 'cww-installer-payload'
+          $msi = (Resolve-Path dist/cww-test.msi).Path
+          $extract = Start-Process msiexec.exe -Wait -PassThru -ArgumentList '/a', "`"$msi`"", '/qn', "TARGETDIR=`"$payload`""
+          if ($extract.ExitCode -ne 0) { throw "MSI extraction failed: $($extract.ExitCode)" }
+          $app = Get-ChildItem $payload -Filter cww-app.exe -Recurse | Select-Object -First 1
+          if (-not $app) { throw 'The downloaded installer has no desktop app' }
+          Copy-Item -LiteralPath $app.FullName -Destination target/release/cww-app.exe
+          dotnet tool install --global wix --version 5.0.2
+          $version = ((Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$').Matches.Groups[1].Value)
+          Remove-Item -LiteralPath $msi
+          ./packaging/windows/build-msi.ps1 -Version $version -Arch x64 -Binary target/release/cww.exe -Output dist/cww-test.msi
       - name: Test administrator and standard accounts
         shell: pwsh
         run: |

@@ -4,9 +4,15 @@
 //! registry key's 260-character command-line limit. Windows PowerShell and
 //! WScript.Shell are built into Windows; no administrator rights are needed.
 
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Threading::{
+    CREATE_NEW_PROCESS_GROUP, CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW,
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -55,15 +61,53 @@ pub(super) fn remove() -> Result<Option<PathBuf>> {
 }
 
 pub(super) fn start(exe: &Path, arguments: &[String]) -> Result<()> {
-    // Detach from the setup process, including its standard streams, so
-    // closing the app or installer leaves the daemon running.
-    Command::new(exe)
-        .args(arguments)
-        .creation_flags(0x0000_0008 | 0x0000_0200) // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("starting the Local Agent in the background")?;
+    // Command::spawn inherits every inheritable Windows handle, even when
+    // its standard streams are redirected to NUL. An MSI's output pipe can
+    // then remain open in the daemon and keep WixQuietExec waiting forever.
+    // CreateProcessW with inheritance disabled leaves all installer handles
+    // behind. A detached daemon has no console or standard streams and logs
+    // to the --log-file argument supplied by the caller.
+    let mut executable: Vec<u16> = exe.as_os_str().encode_wide().collect();
+    let mut command = vec![b'"' as u16];
+    command.extend_from_slice(&executable);
+    command.extend([b'"' as u16, b' ' as u16]);
+    command.extend(super::windows_task::quote_arguments(arguments).encode_utf16());
+    if executable.contains(&0) || command.contains(&0) {
+        bail!("The Local Agent's command contains a null character");
+    }
+    executable.push(0);
+    command.push(0);
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    // SAFETY: both strings are terminated, command is writable, and the
+    // structures remain live for the call. Null environment and directory
+    // pointers keep the current user's environment and working directory.
+    let created = unsafe {
+        CreateProcessW(
+            executable.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup,
+            &mut process,
+        )
+    };
+    if created == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("starting the Local Agent in the background");
+    }
+    // SAFETY: successful creation returns these two owned handles. Closing
+    // them does not terminate the background process.
+    unsafe {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
     Ok(())
 }
