@@ -875,6 +875,11 @@ fn answers_offer_what_the_chat_allows() {
         (retried["chat"].as_str(), retried["message"].as_str()),
         (Some("11"), Some("115"))
     );
+    // The server records the request before the UI receives its reply.
+    // Finish the retry before testing a second action in another chat.
+    fx.wait("the retry to finish", |h| {
+        h.state().chat_state().is_some_and(|s| s.acting.is_none())
+    });
     // A project chat started by someone else: no retry, and no share.
     fx.chat().open(6);
     fx.wait_for_label("Interviews for the third role finish on Thursday.");
