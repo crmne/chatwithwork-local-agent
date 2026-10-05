@@ -140,6 +140,9 @@ jobs:
   installation:
     name: Install (${{ matrix.os }}, ${{ matrix.image }})
     needs: packaging
+    # Release inputs deliberately skip the build jobs. Override the default
+    # success() check so those skipped ancestors do not skip installation too.
+    if: ${{ !cancelled() && needs.packaging.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
