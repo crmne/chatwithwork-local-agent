@@ -11,7 +11,10 @@ fn main() {
             .set("ProductName", "Chat with Work")
             .set("FileDescription", "Chat with Work")
             .set("CompanyName", "PlentyLabs UG (haftungsbeschränkt) & Co. KG")
-            .set("LegalCopyright", "© 2026 Carmine Paolino. MIT or Apache 2.0");
+            .set(
+                "LegalCopyright",
+                "© 2026 Carmine Paolino. MIT or Apache 2.0",
+            );
         if let Err(error) = resource.compile() {
             println!("cargo:warning=Windows resources not embedded: {error}");
         }
